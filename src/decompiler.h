@@ -4,6 +4,7 @@
 #include "cfg.h"
 #include "macho.h"
 #include <QString>
+#include <QProcess>
 #include <string>
 #include <map>
 #include <set>
@@ -26,7 +27,7 @@ public:
         auto tree = structurer.structure(func);
 
         Emitter em(mf, func);
-        return em.generate(tree.get());
+        return clangFormat(em.generate(tree.get()));
     }
 
     // Decompile a whole source file
@@ -93,7 +94,21 @@ public:
             out += "\n";
         }
 
-        return out;
+        return clangFormat(out);
+    }
+
+    // Run clang-format on the output for clean formatting
+    static QString clangFormat(const QString &code) {
+        QProcess proc;
+        proc.start("clang-format", QStringList()
+            << "-style={BasedOnStyle: LLVM, IndentWidth: 4, ColumnLimit: 100}"
+            << "-assume-filename=decompiled.c");
+        if (!proc.waitForStarted(1000)) return code;
+        proc.write(code.toUtf8());
+        proc.closeWriteChannel();
+        if (!proc.waitForFinished(5000)) return code;
+        if (proc.exitCode() != 0) return code;
+        return QString::fromUtf8(proc.readAllStandardOutput());
     }
 
 private:

@@ -1079,6 +1079,9 @@ private:
             return;
         }
 
+        // ── SSE / SSE2 ─────────────────────────────────────────────
+        if (liftSSE(mn, o, n, bb, in)) return;
+
         // ── Fallback: emit as intrinsic with original asm ───────────
         std::string asmText = mn + " " + std::string(in.op_str);
         bb.stmts.push_back(IRStmt::mkIntrinsic("asm", "__asm__(\"" + asmText + "\")"));
@@ -1215,6 +1218,258 @@ private:
         }
     }
 
+    // ── SSE / SSE2 instruction lifter ──────────────────────────────
+    bool liftSSE(const std::string &mn, cs_x86_op *o, int n, BasicBlock &bb, cs_insn &in) {
+        // ── Scalar moves: movss, movsd ──────────────────────────────
+        if ((mn == "movss" || mn == "movsd") && n == 2) {
+            auto src = readSSEOp(o[1], mn == "movsd");
+            if (src) writeOp(o[0], std::move(src), bb);
+            return true;
+        }
+        // ── Packed moves (treat as scalar for decompilation) ────────
+        if ((mn == "movaps" || mn == "movups" || mn == "movapd" || mn == "movupd" ||
+             mn == "movdqa" || mn == "movdqu" || mn == "movlps" || mn == "movhps" ||
+             mn == "movlpd" || mn == "movhpd" || mn == "movq") && n == 2) {
+            auto src = readSSEOp(o[1], mn.find('d') != std::string::npos);
+            if (src) writeOp(o[0], std::move(src), bb);
+            return true;
+        }
+
+        // ── Scalar arithmetic: addss/sd, subss/sd, mulss/sd, divss/sd
+        if ((mn == "addss" || mn == "addsd" || mn == "subss" || mn == "subsd" ||
+             mn == "mulss" || mn == "mulsd" || mn == "divss" || mn == "divsd") && n == 2) {
+            bool dbl = (mn.back() == 'd');
+            IROp irop;
+            if (mn.find("add") == 0) irop = IROp::Add;
+            else if (mn.find("sub") == 0) irop = IROp::Sub;
+            else if (mn.find("mul") == 0) irop = IROp::Mul;
+            else irop = IROp::SDiv;
+            auto lhs = readSSEOp(o[0], dbl);
+            auto rhs = readSSEOp(o[1], dbl);
+            if (lhs && rhs) writeOp(o[0], IRExpr::mkBinary(irop, std::move(lhs), std::move(rhs)), bb);
+            return true;
+        }
+
+        // ── Packed arithmetic (treat as scalar) ─────────────────────
+        if ((mn == "addps" || mn == "addpd" || mn == "subps" || mn == "subpd" ||
+             mn == "mulps" || mn == "mulpd" || mn == "divps" || mn == "divpd") && n == 2) {
+            bool dbl = (mn.back() == 'd');
+            IROp irop;
+            if (mn.find("add") == 0) irop = IROp::Add;
+            else if (mn.find("sub") == 0) irop = IROp::Sub;
+            else if (mn.find("mul") == 0) irop = IROp::Mul;
+            else irop = IROp::SDiv;
+            auto lhs = readSSEOp(o[0], dbl);
+            auto rhs = readSSEOp(o[1], dbl);
+            if (lhs && rhs) writeOp(o[0], IRExpr::mkBinary(irop, std::move(lhs), std::move(rhs)), bb);
+            return true;
+        }
+
+        // ── Conversions ─────────────────────────────────────────────
+        if ((mn == "cvtsi2ss" || mn == "cvtsi2sd") && n == 2) {
+            auto src = readOp(o[1]);
+            if (src) writeOp(o[0], IRExpr::mkCast(CastKind::IntToFloat, std::move(src)), bb);
+            return true;
+        }
+        if ((mn == "cvttss2si" || mn == "cvttsd2si" || mn == "cvtss2si" || mn == "cvtsd2si") && n == 2) {
+            auto src = readSSEOp(o[1], mn.find("sd") != std::string::npos);
+            if (src) writeOp(o[0], IRExpr::mkCast(CastKind::FloatToInt, std::move(src)), bb);
+            return true;
+        }
+        if ((mn == "cvtss2sd" || mn == "cvtsd2ss") && n == 2) {
+            auto src = readSSEOp(o[1], mn == "cvtsd2ss");
+            if (src) writeOp(o[0], std::move(src), bb); // just propagate, C handles float<->double
+            return true;
+        }
+        if ((mn == "cvtps2pd" || mn == "cvtpd2ps" || mn == "cvtdq2ps" || mn == "cvtps2dq" ||
+             mn == "cvttps2dq" || mn == "cvtdq2pd" || mn == "cvtpd2dq" || mn == "cvttpd2dq") && n == 2) {
+            auto src = readSSEOp(o[1], false);
+            if (src) writeOp(o[0], std::move(src), bb);
+            return true;
+        }
+
+        // ── Comparisons: ucomiss, ucomisd, comiss, comisd ───────────
+        if ((mn == "ucomiss" || mn == "ucomisd" || mn == "comiss" || mn == "comisd") && n == 2) {
+            bool dbl = (mn.find("sd") != std::string::npos);
+            m_flags.lhs = readSSEOp(o[0], dbl);
+            m_flags.rhs = readSSEOp(o[1], dbl);
+            m_flags.op = IROp::Sub;
+            return true;
+        }
+        // ── cmpss/cmpsd/cmpps/cmppd (packed compare) ───────────────
+        if ((mn == "cmpss" || mn == "cmpsd" || mn == "cmpps" || mn == "cmppd") && n >= 2) {
+            auto lhs = readSSEOp(o[0], mn.find('d') != std::string::npos);
+            auto rhs = readSSEOp(o[1], mn.find('d') != std::string::npos);
+            if (lhs && rhs) {
+                m_flags.lhs = std::move(lhs);
+                m_flags.rhs = std::move(rhs);
+                m_flags.op = IROp::Sub;
+            }
+            return true;
+        }
+
+        // ── Bitwise: xorps/xorpd, andps/andpd, orps/orpd ──────────
+        if ((mn == "xorps" || mn == "xorpd" || mn == "pxor") && n == 2) {
+            // xorps xmm0, xmm0 → zero
+            if (o[0].type == X86_OP_REG && o[1].type == X86_OP_REG && o[0].reg == o[1].reg) {
+                writeOp(o[0], IRExpr::mkVar("0.0f"), bb);
+                return true;
+            }
+            auto lhs = readSSEOp(o[0], false);
+            auto rhs = readSSEOp(o[1], false);
+            if (lhs && rhs) writeOp(o[0], IRExpr::mkBinary(IROp::Xor, std::move(lhs), std::move(rhs)), bb);
+            return true;
+        }
+        if ((mn == "andps" || mn == "andpd" || mn == "pand" ||
+             mn == "andnps" || mn == "andnpd" || mn == "pandn") && n == 2) {
+            auto lhs = readSSEOp(o[0], false);
+            auto rhs = readSSEOp(o[1], false);
+            if (lhs && rhs) writeOp(o[0], IRExpr::mkBinary(IROp::And, std::move(lhs), std::move(rhs)), bb);
+            return true;
+        }
+        if ((mn == "orps" || mn == "orpd" || mn == "por") && n == 2) {
+            auto lhs = readSSEOp(o[0], false);
+            auto rhs = readSSEOp(o[1], false);
+            if (lhs && rhs) writeOp(o[0], IRExpr::mkBinary(IROp::Or, std::move(lhs), std::move(rhs)), bb);
+            return true;
+        }
+
+        // ── Min/Max/Sqrt/Rsqrt/Rcp ─────────────────────────────────
+        if ((mn == "minss" || mn == "minsd" || mn == "minps" || mn == "minpd") && n == 2) {
+            auto a = readSSEOp(o[0], mn.find('d') != std::string::npos);
+            auto b = readSSEOp(o[1], mn.find('d') != std::string::npos);
+            if (a && b) writeOp(o[0], IRExpr::mkVar("fminf(" + varText(std::move(a)) + ", " + varText(std::move(b)) + ")"), bb);
+            return true;
+        }
+        if ((mn == "maxss" || mn == "maxsd" || mn == "maxps" || mn == "maxpd") && n == 2) {
+            auto a = readSSEOp(o[0], mn.find('d') != std::string::npos);
+            auto b = readSSEOp(o[1], mn.find('d') != std::string::npos);
+            if (a && b) writeOp(o[0], IRExpr::mkVar("fmaxf(" + varText(std::move(a)) + ", " + varText(std::move(b)) + ")"), bb);
+            return true;
+        }
+        if ((mn == "sqrtss" || mn == "sqrtsd" || mn == "sqrtps" || mn == "sqrtpd") && n == 2) {
+            auto src = readSSEOp(o[1], mn.find('d') != std::string::npos);
+            if (src) writeOp(o[0], IRExpr::mkVar("sqrtf(" + varText(std::move(src)) + ")"), bb);
+            return true;
+        }
+        if ((mn == "rsqrtss" || mn == "rsqrtps") && n == 2) {
+            auto src = readSSEOp(o[1], false);
+            if (src) writeOp(o[0], IRExpr::mkVar("(1.0f / sqrtf(" + varText(std::move(src)) + "))"), bb);
+            return true;
+        }
+        if ((mn == "rcpss" || mn == "rcpps") && n == 2) {
+            auto src = readSSEOp(o[1], false);
+            if (src) writeOp(o[0], IRExpr::mkVar("(1.0f / " + varText(std::move(src)) + ")"), bb);
+            return true;
+        }
+
+        // ── Shuffles / unpacks (pass through, hard to decompile) ────
+        if (mn == "shufps" || mn == "shufpd" || mn == "pshufd" || mn == "pshufw" ||
+            mn == "pshufb" || mn == "pshuflw" || mn == "pshufhw" ||
+            mn == "unpcklps" || mn == "unpckhps" || mn == "unpcklpd" || mn == "unpckhpd" ||
+            mn == "punpcklbw" || mn == "punpckhbw" || mn == "punpcklwd" || mn == "punpckhwd" ||
+            mn == "punpckldq" || mn == "punpckhdq" || mn == "punpcklqdq" || mn == "punpckhqdq") {
+            if (n >= 2) {
+                auto src = readSSEOp(o[1], false);
+                if (src) writeOp(o[0], std::move(src), bb);
+            }
+            return true;
+        }
+
+        // ── Integer SIMD packed ops (just propagate values) ─────────
+        if ((mn.substr(0, 4) == "padd" || mn.substr(0, 4) == "psub" ||
+             mn.substr(0, 4) == "pmul" || mn.substr(0, 4) == "pmin" ||
+             mn.substr(0, 4) == "pmax" || mn.substr(0, 4) == "pcmp" ||
+             mn.substr(0, 4) == "pack" || mn.substr(0, 4) == "psll" ||
+             mn.substr(0, 4) == "psrl" || mn.substr(0, 4) == "psra" ||
+             mn.substr(0, 5) == "pmovs" || mn.substr(0, 5) == "pmovz") && n == 2) {
+            IROp irop = IROp::Add;
+            if (mn.find("sub") != std::string::npos) irop = IROp::Sub;
+            else if (mn.find("mull") != std::string::npos || mn.find("mulh") != std::string::npos) irop = IROp::Mul;
+            else if (mn.find("sll") != std::string::npos) irop = IROp::Shl;
+            else if (mn.find("srl") != std::string::npos) irop = IROp::Shr;
+            else if (mn.find("sra") != std::string::npos) irop = IROp::Sar;
+            auto lhs = readSSEOp(o[0], false);
+            auto rhs = readSSEOp(o[1], false);
+            if (lhs && rhs) writeOp(o[0], IRExpr::mkBinary(irop, std::move(lhs), std::move(rhs)), bb);
+            return true;
+        }
+
+        // ── movd/movq between GP and XMM ────────────────────────────
+        if ((mn == "movd" || mn == "movq") && n == 2) {
+            auto src = readOp(o[1]);
+            if (src) writeOp(o[0], std::move(src), bb);
+            return true;
+        }
+
+        // ── Prefetch, fence, etc — no-ops for decompilation ─────────
+        if (mn == "prefetchnta" || mn == "prefetcht0" || mn == "prefetcht1" || mn == "prefetcht2" ||
+            mn == "lfence" || mn == "mfence" || mn == "sfence" || mn == "emms" ||
+            mn == "ldmxcsr" || mn == "stmxcsr") {
+            return true;
+        }
+
+        return false; // not an SSE instruction
+    }
+
+    // Read an SSE operand, resolving memory as float/double constants
+    std::unique_ptr<IRExpr> readSSEOp(cs_x86_op &op, bool isDouble) {
+        if (op.type == X86_OP_REG) return readReg(op.reg);
+        if (op.type == X86_OP_IMM) return IRExpr::mkConst(op.imm);
+        if (op.type == X86_OP_MEM) {
+            // Try to resolve the memory address to an actual float constant
+            auto resolved = resolveFloatConst(op.mem, isDouble);
+            if (resolved) return resolved;
+            // Fall back to regular memory read
+            return readMem(op.mem);
+        }
+        return IRExpr::mkConst(0);
+    }
+
+    // Try to read a float/double constant from a known memory address
+    std::unique_ptr<IRExpr> resolveFloatConst(x86_op_mem &m, bool isDouble) {
+        uint32_t addr = 0;
+
+        // Direct address: [disp]
+        if (m.base == X86_REG_INVALID && m.index == X86_REG_INVALID && m.disp)
+            addr = (uint32_t)m.disp;
+        // PIC-relative: [ebx + disp]
+        else if (m_hasPIC && m.base == X86_REG_EBX && m.index == X86_REG_INVALID && m_picBase)
+            addr = m_picBase + (int)m.disp;
+        else
+            return nullptr;
+
+        // Check if it's in a const data section
+        const Section *sec = m_mf.sectionForAddress(addr);
+        if (!sec) return nullptr;
+        if (sec->sectname != "__const" && sec->sectname != "__literal4" &&
+            sec->sectname != "__literal8" && sec->sectname != "__data")
+            return nullptr;
+
+        int64_t off = m_mf.fileOffsetForAddress(addr);
+        if (off < 0) return nullptr;
+
+        // Check for global variable first
+        auto *g = m_types.globalAtAddress(addr);
+        if (g) return IRExpr::mkVar(g->name, g->typeRef);
+
+        if (isDouble) {
+            const uint8_t *p = m_mf.bytesAt((uint32_t)off, 8);
+            if (!p) return nullptr;
+            double val;
+            memcpy(&val, p, 8);
+            char buf[64]; snprintf(buf, sizeof(buf), "%.10g", val);
+            return IRExpr::mkVar(buf);
+        } else {
+            const uint8_t *p = m_mf.bytesAt((uint32_t)off, 4);
+            if (!p) return nullptr;
+            float val;
+            memcpy(&val, p, 4);
+            char buf[64]; snprintf(buf, sizeof(buf), "%.7gf", val);
+            return IRExpr::mkVar(buf);
+        }
+    }
+
     // Helper: extract a readable string from an IR expr (for intrinsic text)
     static std::string varText(std::unique_ptr<IRExpr> e) {
         if (!e) return "?";
@@ -1227,6 +1482,10 @@ private:
             return buf;
         }
         if (e->op == IROp::Temp) return "t" + std::to_string(e->value);
+        if (e->op == IROp::Field) {
+            std::string base = e->kids.empty() ? "?" : varText(std::move(e->kids[0]));
+            return base + "->" + e->name;
+        }
         return "?";
     }
 };
