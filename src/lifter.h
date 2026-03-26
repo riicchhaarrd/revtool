@@ -1,0 +1,1232 @@
+#pragma once
+#include "ir.h"
+#include "macho.h"
+#include <capstone/capstone.h>
+#include <map>
+#include <set>
+#include <string>
+#include <vector>
+#include <cstdio>
+#include <cstring>
+
+// ── x86 → IR Lifter ─────────────────────────────────────────────────
+// Converts every x86-32 instruction into IR statements.  Tracks register
+// contents as IR temps so later passes can build expression trees.
+
+class Lifter {
+public:
+    Lifter(const MachOFile &mf) : m_mf(mf), m_types(mf.typeTable()) {}
+
+    // Lift one function into an IRFunc.  Returns empty blocks on failure.
+    IRFunc liftFunction(uint32_t funcAddr) {
+        IRFunc func;
+        const StabsFunction *sfn = m_mf.stabsFunctionAt(funcAddr);
+        uint32_t endAddr = sfn && sfn->size > 0 ? funcAddr + sfn->size : funcAddr + 0x2000;
+        auto &funcMap = m_mf.functionMap();
+
+        // Function metadata from STABS
+        auto fit = funcMap.find(funcAddr);
+        func.name = fit != funcMap.end() ? fit->second :
+            "sub_" + ([&]{ char b[16]; snprintf(b,16,"%08X",funcAddr); return std::string(b); })();
+        func.address = funcAddr;
+        if (sfn) {
+            func.returnType = sfn->returnType;
+            func.isStatic = !sfn->isGlobal;
+            func.params = sfn->params;
+            func.locals = sfn->locals;
+            func.sourceFileIdx = sfn->sourceFileIdx;
+        }
+
+        // Disassemble
+        const Section *sec = m_mf.sectionForAddress(funcAddr);
+        if (!sec) return func;
+
+        csh cs;
+        if (cs_open(CS_ARCH_X86, CS_MODE_32, &cs) != CS_ERR_OK) return func;
+        cs_option(cs, CS_OPT_DETAIL, CS_OPT_ON);
+
+        uint32_t codeOff = funcAddr - sec->addr;
+        uint32_t codeLen = std::min(endAddr - funcAddr, sec->size - codeOff);
+        const uint8_t *code = m_mf.bytesAt(sec->offset + codeOff, codeLen);
+        if (!code) { cs_close(&cs); return func; }
+
+        cs_insn *insn;
+        size_t count = cs_disasm(cs, code, codeLen, funcAddr, 0, &insn);
+        if (count == 0) { cs_close(&cs); return func; }
+
+        // Find actual end (first ret)
+        size_t funcEndIdx = count;
+        for (size_t i = 0; i < count; ++i) {
+            if (insn[i].detail) {
+                for (uint8_t g = 0; g < insn[i].detail->groups_count; ++g) {
+                    if (insn[i].detail->groups[g] == CS_GRP_RET) {
+                        funcEndIdx = i + 1;
+                        goto found_end;
+                    }
+                }
+            }
+        }
+        found_end:
+
+        // ── Pass 1: find all branch targets → basic block boundaries ─
+        std::set<uint32_t> blockStarts;
+        blockStarts.insert(funcAddr);
+        for (size_t i = 0; i < funcEndIdx; ++i) {
+            auto &in = insn[i];
+            if (!in.detail) continue;
+            bool isBranch = false, isJump = false, isRet = false;
+            for (uint8_t g = 0; g < in.detail->groups_count; ++g) {
+                if (in.detail->groups[g] == CS_GRP_JUMP) isJump = true;
+                if (in.detail->groups[g] == CS_GRP_RET)  isRet = true;
+            }
+            if (isJump && in.detail->x86.op_count > 0 &&
+                in.detail->x86.operands[0].type == X86_OP_IMM) {
+                uint32_t target = (uint32_t)in.detail->x86.operands[0].imm;
+                if (target >= funcAddr && target < funcAddr + codeLen)
+                    blockStarts.insert(target);
+                // Instruction after a branch is also a block start
+                if (i + 1 < funcEndIdx)
+                    blockStarts.insert(insn[i + 1].address);
+            }
+            if (isRet && i + 1 < funcEndIdx)
+                blockStarts.insert(insn[i + 1].address);
+        }
+
+        // ── Pass 2: create basic blocks ──────────────────────────────
+        std::map<uint32_t, int> addrToBlock;
+        for (uint32_t addr : blockStarts) {
+            int id = (int)func.blocks.size();
+            func.blocks.push_back({});
+            func.blocks.back().id = id;
+            func.blocks.back().startAddr = addr;
+            addrToBlock[addr] = id;
+        }
+
+        // ── Pass 3: detect prologue & PIC thunk ─────────────────────
+        m_hasFrame = false; m_frameSize = 0;
+        m_hasPIC = false; m_picBase = 0;
+        m_prologueEnd = 0;
+
+        if (funcEndIdx >= 2 &&
+            std::string(insn[0].mnemonic) == "push" && std::string(insn[0].op_str) == "ebp" &&
+            std::string(insn[1].mnemonic) == "mov" && std::string(insn[1].op_str) == "ebp, esp") {
+            m_hasFrame = true;
+            m_prologueEnd = 2;
+            if (funcEndIdx > 2 && std::string(insn[2].mnemonic) == "sub") {
+                auto *d = insn[2].detail;
+                if (d && d->x86.op_count == 2 && d->x86.operands[1].type == X86_OP_IMM) {
+                    m_frameSize = (int)d->x86.operands[1].imm;
+                    m_prologueEnd = 3;
+                }
+            }
+            // Callee-saved pushes
+            for (size_t i = m_prologueEnd; i < std::min(funcEndIdx, m_prologueEnd + 3); ++i) {
+                if (std::string(insn[i].mnemonic) == "push" && insn[i].detail &&
+                    insn[i].detail->x86.op_count == 1 && insn[i].detail->x86.operands[0].type == X86_OP_REG) {
+                    auto r = insn[i].detail->x86.operands[0].reg;
+                    if (r == X86_REG_EBX || r == X86_REG_ESI || r == X86_REG_EDI)
+                        m_prologueEnd = i + 1;
+                }
+            }
+        }
+
+        // PIC thunk detection
+        for (size_t i = 0; i + 1 < funcEndIdx; ++i) {
+            if (std::string(insn[i].mnemonic) != "call") continue;
+            if (!insn[i].detail || insn[i].detail->x86.op_count == 0) continue;
+            if (insn[i].detail->x86.operands[0].type != X86_OP_IMM) continue;
+            uint32_t tgt = (uint32_t)insn[i].detail->x86.operands[0].imm;
+            auto it = funcMap.find(tgt);
+            if (it == funcMap.end()) continue;
+            if (it->second.find("get_pc_thunk") == std::string::npos &&
+                it->second.find("__i686") == std::string::npos) continue;
+            if (std::string(insn[i+1].mnemonic) == "add") {
+                auto *d2 = insn[i+1].detail;
+                if (d2 && d2->x86.op_count == 2 && d2->x86.operands[1].type == X86_OP_IMM) {
+                    m_picBase = insn[i].address + insn[i].size + (uint32_t)d2->x86.operands[1].imm;
+                    m_hasPIC = true;
+                    m_picThunkAddr = insn[i].address;
+                }
+            }
+        }
+
+        // ── Pass 4: build param/local offset maps ───────────────────
+        m_paramByOffset.clear();
+        m_localByOffset.clear();
+        if (sfn) {
+            for (size_t i = 0; i < sfn->params.size(); ++i) {
+                int off = sfn->params[i].stackOffset ? sfn->params[i].stackOffset : (int)(8 + i * 4);
+                m_paramByOffset[off] = &sfn->params[i];
+            }
+            for (auto &l : sfn->locals) {
+                if (l.stackOffset != 0)
+                    m_localByOffset[l.stackOffset] = &l;
+            }
+        }
+
+        // ── Pass 5: lift instructions into basic blocks ─────────────
+        m_func = &func;
+        m_cs = cs;
+        m_regTemps.clear();
+        m_espArgs.clear();
+        m_pushArgs.clear();
+        m_flags = {-1, IROp::Eq, nullptr, nullptr};
+
+        int curBlock = 0;
+        for (size_t i = 0; i < funcEndIdx; ++i) {
+            auto &in = insn[i];
+            // Check if this starts a new block
+            auto bit = addrToBlock.find(in.address);
+            if (bit != addrToBlock.end()) curBlock = bit->second;
+
+            // Skip prologue instructions
+            if (i < m_prologueEnd) continue;
+
+            // Skip PIC thunk call + add
+            if (m_hasPIC && in.address == m_picThunkAddr) { continue; }
+            if (m_hasPIC && i > 0 && insn[i-1].address == m_picThunkAddr &&
+                std::string(in.mnemonic) == "add") continue;
+
+            // Skip epilogue
+            std::string mn = in.mnemonic;
+            if (mn == "leave") continue;
+            if (mn == "pop" && in.detail && in.detail->x86.op_count == 1 &&
+                in.detail->x86.operands[0].type == X86_OP_REG) {
+                auto r = in.detail->x86.operands[0].reg;
+                if (r == X86_REG_EBP || r == X86_REG_EBX ||
+                    r == X86_REG_ESI || r == X86_REG_EDI) continue;
+            }
+            if (mn == "nop" || mn == "fnop") continue;
+
+            liftInsn(in, func.blocks[curBlock], func, addrToBlock);
+        }
+
+        // ── Pass 6: wire up block edges ─────────────────────────────
+        for (auto &bb : func.blocks) {
+            if (bb.stmts.empty()) {
+                // Empty block falls through to next
+                if (bb.id + 1 < (int)func.blocks.size()) {
+                    bb.succs.push_back(bb.id + 1);
+                    func.blocks[bb.id + 1].preds.push_back(bb.id);
+                }
+                continue;
+            }
+            auto &last = bb.stmts.back();
+            if (last.kind == IRStmtKind::Jump) {
+                if (last.jumpTarget >= 0 && last.jumpTarget < (int)func.blocks.size()) {
+                    bb.succs.push_back(last.jumpTarget);
+                    func.blocks[last.jumpTarget].preds.push_back(bb.id);
+                }
+            } else if (last.kind == IRStmtKind::Branch) {
+                if (last.trueTarget >= 0 && last.trueTarget < (int)func.blocks.size()) {
+                    bb.succs.push_back(last.trueTarget);
+                    func.blocks[last.trueTarget].preds.push_back(bb.id);
+                }
+                if (last.falseTarget >= 0 && last.falseTarget < (int)func.blocks.size()) {
+                    bb.succs.push_back(last.falseTarget);
+                    func.blocks[last.falseTarget].preds.push_back(bb.id);
+                }
+            } else if (last.kind == IRStmtKind::Return) {
+                // no successors
+            } else {
+                // falls through to next block
+                if (bb.id + 1 < (int)func.blocks.size()) {
+                    bb.succs.push_back(bb.id + 1);
+                    func.blocks[bb.id + 1].preds.push_back(bb.id);
+                }
+            }
+        }
+
+        cs_free(insn, count);
+        cs_close(&cs);
+        return func;
+    }
+
+private:
+    const MachOFile      &m_mf;
+    const StabsTypeTable &m_types;
+    IRFunc               *m_func = nullptr;
+    csh                   m_cs;
+
+    // Prologue/PIC state
+    bool     m_hasFrame = false;
+    int      m_frameSize = 0;
+    size_t   m_prologueEnd = 0;
+    bool     m_hasPIC = false;
+    uint32_t m_picBase = 0;
+    uint32_t m_picThunkAddr = 0;
+
+    // Param/local lookup
+    std::map<int, const StabsTypedVar*> m_paramByOffset;
+    std::map<int, const StabsTypedVar*> m_localByOffset;
+
+    // Register → temp mapping (current state)
+    std::map<x86_reg, int> m_regTemps;
+
+    // Flags state: which temp holds the flag result and what comparison produced it
+    struct FlagsState {
+        int   temp = -1;
+        IROp  op   = IROp::Eq;
+        std::unique_ptr<IRExpr> lhs, rhs;
+    } m_flags;
+
+    // Call argument collection
+    std::map<int, std::unique_ptr<IRExpr>> m_espArgs;
+    std::vector<std::unique_ptr<IRExpr>>   m_pushArgs;
+
+    // ── Register helpers ────────────────────────────────────────────
+    int regTemp(x86_reg reg) {
+        auto it = m_regTemps.find(canonReg(reg));
+        if (it != m_regTemps.end()) return it->second;
+        return -1;
+    }
+
+    std::unique_ptr<IRExpr> readReg(x86_reg reg) {
+        int t = regTemp(reg);
+        if (t >= 0) return IRExpr::mkTemp(t, m_func->tempType(t));
+        return IRExpr::mkVar(cs_reg_name(m_cs, reg));
+    }
+
+    void writeReg(x86_reg reg, int temp, BasicBlock &bb) {
+        m_regTemps[canonReg(reg)] = temp;
+    }
+
+    void assignReg(x86_reg reg, std::unique_ptr<IRExpr> val, BasicBlock &bb, TypeRef t = NullType) {
+        int temp = m_func->newTemp(t);
+        bb.stmts.push_back(IRStmt::mkAssign(temp, std::move(val), t));
+        writeReg(reg, temp, bb);
+    }
+
+    // Normalize sub-registers to their 32-bit parent
+    static x86_reg canonReg(x86_reg r) {
+        switch (r) {
+        case X86_REG_AL: case X86_REG_AH: case X86_REG_AX: return X86_REG_EAX;
+        case X86_REG_BL: case X86_REG_BH: case X86_REG_BX: return X86_REG_EBX;
+        case X86_REG_CL: case X86_REG_CH: case X86_REG_CX: return X86_REG_ECX;
+        case X86_REG_DL: case X86_REG_DH: case X86_REG_DX: return X86_REG_EDX;
+        case X86_REG_SI: return X86_REG_ESI;
+        case X86_REG_DI: return X86_REG_EDI;
+        case X86_REG_SP: return X86_REG_ESP;
+        case X86_REG_BP: return X86_REG_EBP;
+        default: return r;
+        }
+    }
+
+    // ── Operand reading ─────────────────────────────────────────────
+
+    std::unique_ptr<IRExpr> readOp(cs_x86_op &op) {
+        switch (op.type) {
+        case X86_OP_REG: return readReg(op.reg);
+        case X86_OP_IMM: return readImm(op.imm);
+        case X86_OP_MEM: return readMem(op.mem);
+        default: return IRExpr::mkConst(0);
+        }
+    }
+
+    std::unique_ptr<IRExpr> readImm(int64_t imm) {
+        uint32_t v = (uint32_t)imm;
+        // String literal?
+        std::string s = tryString(v);
+        if (!s.empty()) return IRExpr::mkString(s);
+        // Known function?
+        auto fit = m_mf.functionMap().find(v);
+        if (fit != m_mf.functionMap().end()) return IRExpr::mkFunc(fit->second);
+        // Global variable?
+        auto *g = m_types.globalAtAddress(v);
+        if (g) return IRExpr::mkVar(g->name, g->typeRef);
+        return IRExpr::mkConst(imm);
+    }
+
+    std::unique_ptr<IRExpr> readMem(x86_op_mem &m) {
+        // EBP-relative: param or local
+        if (m.base == X86_REG_EBP && m.index == X86_REG_INVALID) {
+            int d = (int)m.disp;
+            if (d > 0) {
+                auto it = m_paramByOffset.find(d);
+                if (it != m_paramByOffset.end())
+                    return IRExpr::mkVar(it->second->name, it->second->typeRef);
+            }
+            if (d < 0) {
+                auto it = m_localByOffset.find(d);
+                if (it != m_localByOffset.end())
+                    return IRExpr::mkVar(it->second->name, it->second->typeRef);
+            }
+            // Unnamed stack slot
+            char buf[32];
+            if (d > 0) snprintf(buf, sizeof(buf), "arg_%x", (d - 8) / 4);
+            else snprintf(buf, sizeof(buf), "var_%x", (-d) / 4);
+            return IRExpr::mkVar(buf);
+        }
+
+        // PIC-relative (EBX + disp)
+        if (m_hasPIC && m.base == X86_REG_EBX && m.index == X86_REG_INVALID && m_picBase) {
+            uint32_t addr = m_picBase + (int)m.disp;
+            auto *g = m_types.globalAtAddress(addr);
+            if (g) return IRExpr::mkVar(g->name, g->typeRef);
+            std::string s = tryString(addr);
+            if (!s.empty()) return IRExpr::mkString(s);
+            auto fit = m_mf.functionMap().find(addr);
+            if (fit != m_mf.functionMap().end())
+                return IRExpr::mkAddrOf(IRExpr::mkFunc(fit->second));
+            return IRExpr::mkLoad(IRExpr::mkConst(addr));
+        }
+
+        // ESP-relative: suppress (call arg collection handles these)
+        if (m.base == X86_REG_ESP && m.index == X86_REG_INVALID)
+            return nullptr;
+
+        // Struct field access: [base + disp] where base holds a struct pointer
+        if (m.base != X86_REG_INVALID && m.index == X86_REG_INVALID) {
+            auto base = readReg(m.base);
+            TypeRef baseType = NullType;
+            int bt = regTemp(m.base);
+            if (bt >= 0) baseType = m_func->tempType(bt);
+
+            if (baseType != NullType && m_types.isStructPointer(baseType)) {
+                TypeRef structRef = m_types.getPointedStruct(baseType);
+                if (structRef != NullType) {
+                    auto *field = m_types.findFieldAtOffset(structRef, (int)m.disp);
+                    if (field && !field->name.empty())
+                        return IRExpr::mkField(std::move(base), field->name, (int)m.disp, field->typeRef);
+                }
+            }
+
+            if (m.disp != 0) {
+                char fname[32]; snprintf(fname, sizeof(fname), "field_%X", (unsigned)(int)m.disp);
+                return IRExpr::mkField(std::move(base), fname, (int)m.disp);
+            }
+            return IRExpr::mkLoad(std::move(base));
+        }
+
+        // Direct address: [disp]
+        if (m.base == X86_REG_INVALID && m.index == X86_REG_INVALID && m.disp) {
+            uint32_t addr = (uint32_t)m.disp;
+            auto *g = m_types.globalAtAddress(addr);
+            if (g) return IRExpr::mkVar(g->name, g->typeRef);
+            std::string s = tryString(addr);
+            if (!s.empty()) return IRExpr::mkString(s);
+            return IRExpr::mkLoad(IRExpr::mkConst(addr));
+        }
+
+        // General: base + index*scale + disp
+        std::unique_ptr<IRExpr> addr;
+        if (m.base != X86_REG_INVALID) addr = readReg(m.base);
+        if (m.index != X86_REG_INVALID) {
+            auto idx = readReg(m.index);
+            if (m.scale > 1)
+                idx = IRExpr::mkBinary(IROp::Mul, std::move(idx), IRExpr::mkConst(m.scale));
+            addr = addr ? IRExpr::mkBinary(IROp::Add, std::move(addr), std::move(idx)) : std::move(idx);
+        }
+        if (m.disp) {
+            auto d = IRExpr::mkConst(m.disp);
+            addr = addr ? IRExpr::mkBinary(IROp::Add, std::move(addr), std::move(d)) : std::move(d);
+        }
+        if (!addr) addr = IRExpr::mkConst(0);
+        return IRExpr::mkLoad(std::move(addr));
+    }
+
+    // Write to a memory destination
+    void writeMem(x86_op_mem &m, std::unique_ptr<IRExpr> val, BasicBlock &bb) {
+        // EBP-relative
+        if (m.base == X86_REG_EBP && m.index == X86_REG_INVALID) {
+            int d = (int)m.disp;
+            if (d > 0) {
+                auto it = m_paramByOffset.find(d);
+                if (it != m_paramByOffset.end()) {
+                    bb.stmts.push_back(IRStmt::mkVarSet(it->second->name, std::move(val), it->second->typeRef));
+                    return;
+                }
+            }
+            if (d < 0) {
+                auto it = m_localByOffset.find(d);
+                if (it != m_localByOffset.end()) {
+                    bb.stmts.push_back(IRStmt::mkVarSet(it->second->name, std::move(val), it->second->typeRef));
+                    return;
+                }
+            }
+            char buf[32];
+            if (d > 0) snprintf(buf, sizeof(buf), "arg_%x", (d - 8) / 4);
+            else snprintf(buf, sizeof(buf), "var_%x", (-d) / 4);
+            bb.stmts.push_back(IRStmt::mkVarSet(buf, std::move(val)));
+            return;
+        }
+        // Struct field write
+        if (m.base != X86_REG_INVALID && m.index == X86_REG_INVALID && m.disp != 0) {
+            auto base = readReg(m.base);
+            TypeRef baseType = NullType;
+            int bt = regTemp(m.base);
+            if (bt >= 0) baseType = m_func->tempType(bt);
+            if (baseType != NullType && m_types.isStructPointer(baseType)) {
+                TypeRef structRef = m_types.getPointedStruct(baseType);
+                if (structRef != NullType) {
+                    auto *field = m_types.findFieldAtOffset(structRef, (int)m.disp);
+                    if (field && !field->name.empty()) {
+                        auto fld = IRExpr::mkField(std::move(base), field->name, (int)m.disp, field->typeRef);
+                        bb.stmts.push_back(IRStmt::mkStore(std::move(fld), std::move(val)));
+                        return;
+                    }
+                }
+            }
+        }
+        // General store
+        auto addr = readMem_addr(m);
+        if (addr)
+            bb.stmts.push_back(IRStmt::mkStore(std::move(addr), std::move(val)));
+    }
+
+    // Get the address expression for a memory operand (without loading)
+    std::unique_ptr<IRExpr> readMem_addr(x86_op_mem &m) {
+        std::unique_ptr<IRExpr> addr;
+        if (m.base != X86_REG_INVALID) addr = readReg(m.base);
+        if (m.index != X86_REG_INVALID) {
+            auto idx = readReg(m.index);
+            if (m.scale > 1)
+                idx = IRExpr::mkBinary(IROp::Mul, std::move(idx), IRExpr::mkConst(m.scale));
+            addr = addr ? IRExpr::mkBinary(IROp::Add, std::move(addr), std::move(idx)) : std::move(idx);
+        }
+        if (m.disp) {
+            auto d = IRExpr::mkConst(m.disp);
+            addr = addr ? IRExpr::mkBinary(IROp::Add, std::move(addr), std::move(d)) : std::move(d);
+        }
+        return addr;
+    }
+
+    // ── Write to an operand destination ─────────────────────────────
+    void writeOp(cs_x86_op &op, std::unique_ptr<IRExpr> val, BasicBlock &bb, TypeRef t = NullType) {
+        if (op.type == X86_OP_REG) {
+            assignReg(op.reg, std::move(val), bb, t);
+        } else if (op.type == X86_OP_MEM) {
+            writeMem(op.mem, std::move(val), bb);
+        }
+    }
+
+    // ── String resolution ───────────────────────────────────────────
+    std::string tryString(uint32_t addr) const {
+        int64_t off = m_mf.fileOffsetForAddress(addr);
+        if (off < 0) return "";
+        const Section *sec = m_mf.sectionForAddress(addr);
+        if (!sec || (sec->sectname != "__cstring" && sec->sectname != "__const")) return "";
+        const uint8_t *p = m_mf.bytesAt(off, std::min((uint32_t)80, (uint32_t)(m_mf.size() - off)));
+        if (!p) return "";
+        std::string s;
+        for (int i = 0; i < 72 && p[i]; ++i) {
+            if (p[i] >= 0x20 && p[i] < 0x7F) {
+                if (p[i] == '"') s += "\\\"";
+                else if (p[i] == '\\') s += "\\\\";
+                else s += (char)p[i];
+            } else { char b[8]; snprintf(b, 8, "\\x%02X", p[i]); s += b; }
+        }
+        return s.empty() ? "" : "\"" + s + "\"";
+    }
+
+    // ── Build a comparison expression from flags state ───────────────
+    std::unique_ptr<IRExpr> buildCondition(const std::string &jmn) {
+        if (!m_flags.lhs) return IRExpr::mkConst(1);
+        auto lhs = m_flags.lhs->clone();
+        auto rhs = m_flags.rhs ? m_flags.rhs->clone() : IRExpr::mkConst(0);
+
+        // test X, X → compare X with 0
+        bool isTest = (m_flags.op == IROp::And);
+
+        IROp cmpOp;
+        if (isTest && lhs->op == rhs->op && lhs->op == IROp::Temp &&
+            lhs->value == rhs->value) {
+            // test reg, reg → flags based on reg value
+            rhs = IRExpr::mkConst(0);
+            if      (jmn == "je"  || jmn == "jz")  cmpOp = IROp::Eq;
+            else if (jmn == "jne" || jmn == "jnz") cmpOp = IROp::Ne;
+            else if (jmn == "js")                   cmpOp = IROp::Slt;
+            else if (jmn == "jns")                  cmpOp = IROp::Sge;
+            else cmpOp = IROp::Ne;
+        } else {
+            // cmp or sub-based flags
+            if      (jmn == "je"  || jmn == "jz")  cmpOp = IROp::Eq;
+            else if (jmn == "jne" || jmn == "jnz") cmpOp = IROp::Ne;
+            else if (jmn == "jl"  || jmn == "jnge") cmpOp = IROp::Slt;
+            else if (jmn == "jle" || jmn == "jng")  cmpOp = IROp::Sle;
+            else if (jmn == "jg"  || jmn == "jnle") cmpOp = IROp::Sgt;
+            else if (jmn == "jge" || jmn == "jnl")  cmpOp = IROp::Sge;
+            else if (jmn == "jb"  || jmn == "jnae") cmpOp = IROp::Ult;
+            else if (jmn == "jbe" || jmn == "jna")  cmpOp = IROp::Ule;
+            else if (jmn == "ja"  || jmn == "jnbe") cmpOp = IROp::Ugt;
+            else if (jmn == "jae" || jmn == "jnb")  cmpOp = IROp::Uge;
+            else if (jmn == "js")                    cmpOp = IROp::Slt;
+            else if (jmn == "jns")                   cmpOp = IROp::Sge;
+            else cmpOp = IROp::Ne;
+        }
+        return IRExpr::mkBinary(cmpOp, std::move(lhs), std::move(rhs));
+    }
+
+    // ── Main instruction lifter ─────────────────────────────────────
+    void liftInsn(cs_insn &in, BasicBlock &bb, IRFunc &func,
+                  const std::map<uint32_t, int> &addrToBlock) {
+        std::string mn = in.mnemonic;
+        cs_detail *d = in.detail;
+        if (!d) return;
+        auto &ops = d->x86;
+        auto *o = ops.operands;
+        int n = ops.op_count;
+
+        // ── Data movement ───────────────────────────────────────────
+        if (mn == "mov" && n == 2) {
+            if (o[0].type == X86_OP_MEM && o[0].mem.base == X86_REG_ESP &&
+                o[0].mem.index == X86_REG_INVALID) {
+                // mov [esp+N], src → collect as call arg
+                auto val = readOp(o[1]);
+                if (val) m_espArgs[(int)o[0].mem.disp] = std::move(val);
+                return;
+            }
+            auto src = readOp(o[1]);
+            if (!src) return;
+            TypeRef t = src->typeRef;
+            writeOp(o[0], std::move(src), bb, t);
+            return;
+        }
+        if (mn == "lea" && n == 2) {
+            // LEA: compute address, don't load
+            auto addr = readMem_addr(o[1].mem);
+            if (!addr) addr = IRExpr::mkConst(0);
+
+            // Check if this is just loading address of a stack var
+            if (o[1].mem.base == X86_REG_EBP && o[1].mem.index == X86_REG_INVALID) {
+                int disp = (int)o[1].mem.disp;
+                if (disp > 0) {
+                    auto it = m_paramByOffset.find(disp);
+                    if (it != m_paramByOffset.end())
+                        addr = IRExpr::mkAddrOf(IRExpr::mkVar(it->second->name, it->second->typeRef));
+                }
+                if (disp < 0) {
+                    auto it = m_localByOffset.find(disp);
+                    if (it != m_localByOffset.end())
+                        addr = IRExpr::mkAddrOf(IRExpr::mkVar(it->second->name, it->second->typeRef));
+                }
+            }
+            // PIC-relative LEA
+            if (m_hasPIC && o[1].mem.base == X86_REG_EBX &&
+                o[1].mem.index == X86_REG_INVALID && m_picBase) {
+                uint32_t target = m_picBase + (int)o[1].mem.disp;
+                auto *g = m_types.globalAtAddress(target);
+                if (g) addr = IRExpr::mkAddrOf(IRExpr::mkVar(g->name, g->typeRef));
+                else {
+                    std::string s = tryString(target);
+                    if (!s.empty()) addr = IRExpr::mkString(s);
+                    else {
+                        auto fit = m_mf.functionMap().find(target);
+                        if (fit != m_mf.functionMap().end())
+                            addr = IRExpr::mkFunc(fit->second);
+                        else
+                            addr = IRExpr::mkConst(target);
+                    }
+                }
+            }
+            writeOp(o[0], std::move(addr), bb);
+            return;
+        }
+        if (mn == "movzx" && n == 2) {
+            auto src = readOp(o[1]);
+            if (!src) return;
+            CastKind ck = (o[1].size == 1) ? CastKind::ZeroExt8 : CastKind::ZeroExt16;
+            writeOp(o[0], IRExpr::mkCast(ck, std::move(src)), bb);
+            return;
+        }
+        if (mn == "movsx" && n == 2) {
+            auto src = readOp(o[1]);
+            if (!src) return;
+            CastKind ck = (o[1].size == 1) ? CastKind::SignExt8 : CastKind::SignExt16;
+            writeOp(o[0], IRExpr::mkCast(ck, std::move(src)), bb);
+            return;
+        }
+        if (mn == "xchg" && n == 2) {
+            auto a = readOp(o[0]);
+            auto b = readOp(o[1]);
+            if (a && b) {
+                writeOp(o[0], std::move(b), bb);
+                writeOp(o[1], std::move(a), bb);
+            }
+            return;
+        }
+        if (mn == "bswap" && n == 1) {
+            auto v = readOp(o[0]);
+            bb.stmts.push_back(IRStmt::mkIntrinsic("bswap",
+                "__builtin_bswap32(" + varText(std::move(v)) + ")"));
+            return;
+        }
+        if (mn == "cdq") {
+            // sign-extend EAX into EDX:EAX — we model EDX = (EAX >> 31)
+            auto eax = readReg(X86_REG_EAX);
+            assignReg(X86_REG_EDX,
+                IRExpr::mkBinary(IROp::Sar, std::move(eax), IRExpr::mkConst(31)), bb);
+            return;
+        }
+        if (mn == "cwde") {
+            auto ax = readReg(X86_REG_EAX);
+            assignReg(X86_REG_EAX, IRExpr::mkCast(CastKind::SignExt16, std::move(ax)), bb);
+            return;
+        }
+        if (mn == "cbw") {
+            auto al = readReg(X86_REG_EAX);
+            assignReg(X86_REG_EAX, IRExpr::mkCast(CastKind::SignExt8, std::move(al)), bb);
+            return;
+        }
+
+        // ── Conditional moves ───────────────────────────────────────
+        if (mn.substr(0, 4) == "cmov" && n == 2) {
+            std::string cc = mn.substr(4);
+            auto cond = buildCondition("j" + cc);
+            auto src = readOp(o[1]);
+            auto dst = readOp(o[0]);
+            if (src && dst)
+                writeOp(o[0], IRExpr::mkTernary(std::move(cond), std::move(src), std::move(dst)), bb);
+            return;
+        }
+
+        // ── Conditional set ─────────────────────────────────────────
+        if (mn.substr(0, 3) == "set" && n == 1) {
+            std::string cc = mn.substr(3);
+            auto cond = buildCondition("j" + cc);
+            writeOp(o[0], std::move(cond), bb);
+            return;
+        }
+
+        // ── Push: collect as call arg ───────────────────────────────
+        if (mn == "push" && n == 1) {
+            auto val = readOp(o[0]);
+            if (val) m_pushArgs.push_back(std::move(val));
+            return;
+        }
+        // Pop (non-epilogue) — rare, just model as a var read
+        if (mn == "pop" && n == 1) {
+            writeOp(o[0], IRExpr::mkVar("__stack_pop"), bb);
+            return;
+        }
+
+        // ── Arithmetic ──────────────────────────────────────────────
+        if ((mn == "add" || mn == "sub" || mn == "or" || mn == "and" ||
+             mn == "xor" || mn == "shl" || mn == "shr" || mn == "sar") && n == 2) {
+            // Skip ESP adjustments
+            if (o[0].type == X86_OP_REG && canonReg(o[0].reg) == X86_REG_ESP) return;
+            // xor reg, reg → zero
+            if (mn == "xor" && o[0].type == X86_OP_REG && o[1].type == X86_OP_REG &&
+                canonReg(o[0].reg) == canonReg(o[1].reg)) {
+                writeOp(o[0], IRExpr::mkConst(0), bb);
+                return;
+            }
+            IROp irop;
+            if      (mn == "add") irop = IROp::Add;
+            else if (mn == "sub") irop = IROp::Sub;
+            else if (mn == "or")  irop = IROp::Or;
+            else if (mn == "and") irop = IROp::And;
+            else if (mn == "xor") irop = IROp::Xor;
+            else if (mn == "shl") irop = IROp::Shl;
+            else if (mn == "shr") irop = IROp::Shr;
+            else                  irop = IROp::Sar;
+
+            auto lhs = readOp(o[0]);
+            auto rhs = readOp(o[1]);
+            if (lhs && rhs) {
+                auto res = IRExpr::mkBinary(irop, std::move(lhs), std::move(rhs));
+                writeOp(o[0], std::move(res), bb);
+            }
+            return;
+        }
+        if (mn == "inc" && n == 1) {
+            auto v = readOp(o[0]);
+            if (v) writeOp(o[0], IRExpr::mkBinary(IROp::Add, std::move(v), IRExpr::mkConst(1)), bb);
+            return;
+        }
+        if (mn == "dec" && n == 1) {
+            auto v = readOp(o[0]);
+            if (v) writeOp(o[0], IRExpr::mkBinary(IROp::Sub, std::move(v), IRExpr::mkConst(1)), bb);
+            return;
+        }
+        if (mn == "neg" && n == 1) {
+            auto v = readOp(o[0]);
+            if (v) writeOp(o[0], IRExpr::mkUnary(IROp::Neg, std::move(v)), bb);
+            return;
+        }
+        if (mn == "not" && n == 1) {
+            auto v = readOp(o[0]);
+            if (v) writeOp(o[0], IRExpr::mkUnary(IROp::Not, std::move(v)), bb);
+            return;
+        }
+        if (mn == "imul") {
+            if (n == 1) {
+                // imul r/m32 → EDX:EAX = EAX * r/m32
+                auto src = readOp(o[0]);
+                auto eax = readReg(X86_REG_EAX);
+                assignReg(X86_REG_EAX, IRExpr::mkBinary(IROp::Mul, std::move(eax), std::move(src)), bb);
+                return;
+            }
+            if (n == 2) {
+                auto a = readOp(o[0]); auto b = readOp(o[1]);
+                if (a && b) writeOp(o[0], IRExpr::mkBinary(IROp::Mul, std::move(a), std::move(b)), bb);
+                return;
+            }
+            if (n == 3) {
+                auto a = readOp(o[1]); auto b = readOp(o[2]);
+                if (a && b) writeOp(o[0], IRExpr::mkBinary(IROp::Mul, std::move(a), std::move(b)), bb);
+                return;
+            }
+            return;
+        }
+        if (mn == "mul" && n == 1) {
+            auto src = readOp(o[0]);
+            auto eax = readReg(X86_REG_EAX);
+            assignReg(X86_REG_EAX, IRExpr::mkBinary(IROp::Mul, std::move(eax), std::move(src)), bb);
+            return;
+        }
+        if ((mn == "div" || mn == "idiv") && n == 1) {
+            auto src = readOp(o[0]);
+            auto eax = readReg(X86_REG_EAX);
+            IROp divOp = (mn == "div") ? IROp::UDiv : IROp::SDiv;
+            IROp modOp = (mn == "div") ? IROp::UMod : IROp::SMod;
+            assignReg(X86_REG_EDX, IRExpr::mkBinary(modOp, eax->clone(), src->clone()), bb);
+            assignReg(X86_REG_EAX, IRExpr::mkBinary(divOp, std::move(eax), std::move(src)), bb);
+            return;
+        }
+
+        // ── Comparison / test (set flags) ───────────────────────────
+        if (mn == "cmp" && n == 2) {
+            m_flags.lhs = readOp(o[0]);
+            m_flags.rhs = readOp(o[1]);
+            m_flags.op = IROp::Sub;
+            return;
+        }
+        if (mn == "test" && n == 2) {
+            m_flags.lhs = readOp(o[0]);
+            m_flags.rhs = readOp(o[1]);
+            m_flags.op = IROp::And;
+            return;
+        }
+
+        // ── Branches ────────────────────────────────────────────────
+        if (mn == "jmp" && n == 1 && o[0].type == X86_OP_IMM) {
+            uint32_t tgt = (uint32_t)o[0].imm;
+            auto bit = addrToBlock.find(tgt);
+            if (bit != addrToBlock.end())
+                bb.stmts.push_back(IRStmt::mkJump(bit->second));
+            return;
+        }
+        // Conditional jumps
+        {
+            bool isJcc = false;
+            for (uint8_t g = 0; g < d->groups_count; ++g)
+                if (d->groups[g] == CS_GRP_JUMP) isJcc = true;
+            if (isJcc && mn != "jmp" && n == 1 && o[0].type == X86_OP_IMM) {
+                uint32_t tgt = (uint32_t)o[0].imm;
+                auto bit = addrToBlock.find(tgt);
+                int trueBlock = bit != addrToBlock.end() ? bit->second : -1;
+                // False target = next instruction's block
+                uint32_t fallAddr = in.address + in.size;
+                auto fbit = addrToBlock.find(fallAddr);
+                int falseBlock = fbit != addrToBlock.end() ? fbit->second : -1;
+
+                auto cond = buildCondition(mn);
+                bb.stmts.push_back(IRStmt::mkBranch(std::move(cond), trueBlock, falseBlock));
+                return;
+            }
+        }
+
+        // ── Return ──────────────────────────────────────────────────
+        if (mn == "ret") {
+            auto eax = readReg(X86_REG_EAX);
+            // Check if return type is void
+            if (m_func->returnType != NullType) {
+                auto *rt = m_types.resolveType(m_func->returnType);
+                if (rt && rt->kind == StabsTypeKind::Void) {
+                    bb.stmts.push_back(IRStmt::mkReturn());
+                    return;
+                }
+            }
+            bb.stmts.push_back(IRStmt::mkReturn(std::move(eax)));
+            return;
+        }
+
+        // ── Call ────────────────────────────────────────────────────
+        if (mn == "call" && n == 1) {
+            std::string target;
+            TypeRef retType = NullType;
+            if (o[0].type == X86_OP_IMM) {
+                uint32_t addr = (uint32_t)o[0].imm;
+                auto fit = m_mf.functionMap().find(addr);
+                target = fit != m_mf.functionMap().end() ? fit->second :
+                    ([&]{ char b[16]; snprintf(b,16,"sub_%X",addr); return std::string(b); })();
+                auto *callee = m_mf.stabsFunctionAt(addr);
+                if (callee) retType = callee->returnType;
+            } else {
+                auto tgt = readOp(o[0]);
+                target = tgt ? varText(std::move(tgt)) : "???";
+            }
+
+            // Gather args
+            std::vector<std::unique_ptr<IRExpr>> args;
+            if (!m_espArgs.empty()) {
+                std::map<int, std::unique_ptr<IRExpr>> sorted;
+                for (auto &[off, val] : m_espArgs) sorted[off] = std::move(val);
+                for (auto &[off, val] : sorted) args.push_back(std::move(val));
+            } else if (!m_pushArgs.empty()) {
+                for (int a = (int)m_pushArgs.size() - 1; a >= 0; --a)
+                    args.push_back(std::move(m_pushArgs[a]));
+            }
+            m_espArgs.clear();
+            m_pushArgs.clear();
+
+            auto callExpr = IRExpr::mkCall(target, std::move(args), retType);
+
+            // Check if void return
+            bool isVoid = false;
+            if (retType != NullType) {
+                auto *rt = m_types.resolveType(retType);
+                if (rt && rt->kind == StabsTypeKind::Void) isVoid = true;
+            }
+
+            if (isVoid) {
+                bb.stmts.push_back(IRStmt::mkCall(std::move(callExpr)));
+            } else {
+                int t = func.newTemp(retType);
+                bb.stmts.push_back(IRStmt::mkAssign(t, std::move(callExpr), retType));
+                writeReg(X86_REG_EAX, t, bb);
+            }
+            // Caller-saved registers invalidated
+            m_regTemps.erase(X86_REG_ECX);
+            m_regTemps.erase(X86_REG_EDX);
+            return;
+        }
+
+        // ── String operations ───────────────────────────────────────
+        if (mn == "rep movsb" || mn == "rep movsd" || mn == "repe movsb" || mn == "repe movsd") {
+            int sz = (mn.find("movsd") != std::string::npos) ? 4 : 1;
+            auto dst = readReg(X86_REG_EDI);
+            auto src = readReg(X86_REG_ESI);
+            auto cnt = readReg(X86_REG_ECX);
+            std::string cText = "memcpy(" + varText(std::move(dst)) + ", " +
+                                varText(std::move(src)) + ", " + varText(std::move(cnt));
+            if (sz > 1) cText += " * " + std::to_string(sz);
+            cText += ")";
+            bb.stmts.push_back(IRStmt::mkIntrinsic("memcpy", cText));
+            return;
+        }
+        if (mn == "rep stosb" || mn == "rep stosd") {
+            int sz = (mn.find("stosd") != std::string::npos) ? 4 : 1;
+            auto dst = readReg(X86_REG_EDI);
+            auto val = readReg(X86_REG_EAX);
+            auto cnt = readReg(X86_REG_ECX);
+            std::string cText = "memset(" + varText(std::move(dst)) + ", " +
+                                varText(std::move(val)) + ", " + varText(std::move(cnt));
+            if (sz > 1) cText += " * " + std::to_string(sz);
+            cText += ")";
+            bb.stmts.push_back(IRStmt::mkIntrinsic("memset", cText));
+            return;
+        }
+        if (mn == "repe cmpsb" || mn == "repe cmpsd" || mn == "repne cmpsb" || mn == "repne cmpsd") {
+            int sz = (mn.find("cmpsd") != std::string::npos) ? 4 : 1;
+            bool equal = (mn.find("repe") != std::string::npos);
+            auto dst = readReg(X86_REG_EDI);
+            auto src = readReg(X86_REG_ESI);
+            auto cnt = readReg(X86_REG_ECX);
+            std::string cText;
+            if (equal && sz == 1) {
+                cText = "memcmp(" + varText(std::move(src)) + ", " +
+                        varText(std::move(dst)) + ", " + varText(std::move(cnt)) + ")";
+            } else {
+                cText = "memcmp(" + varText(std::move(src)) + ", " +
+                        varText(std::move(dst)) + ", " + varText(std::move(cnt));
+                if (sz > 1) cText += " * " + std::to_string(sz);
+                cText += ")";
+            }
+            // Result goes into flags for subsequent branch
+            int t = func.newTemp();
+            bb.stmts.push_back(IRStmt::mkAssign(t, IRExpr::mkVar(cText)));
+            m_flags.lhs = IRExpr::mkTemp(t);
+            m_flags.rhs = IRExpr::mkConst(0);
+            m_flags.op = IROp::Sub;
+            return;
+        }
+        if (mn == "repne scasb" || mn == "repe scasb" || mn == "repne scasd" || mn == "repe scasd") {
+            auto dst = readReg(X86_REG_EDI);
+            auto cnt = readReg(X86_REG_ECX);
+            auto val = readReg(X86_REG_EAX);
+            bool repne = (mn.find("repne") != std::string::npos);
+            std::string cText;
+            if (repne && mn.find("scasb") != std::string::npos) {
+                cText = "strlen(" + varText(std::move(dst)) + ")";
+            } else {
+                cText = "memchr(" + varText(std::move(dst)) + ", " +
+                        varText(std::move(val)) + ", " + varText(std::move(cnt)) + ")";
+            }
+            int t = func.newTemp();
+            bb.stmts.push_back(IRStmt::mkAssign(t, IRExpr::mkVar(cText)));
+            assignReg(X86_REG_ECX, IRExpr::mkTemp(t), bb);
+            return;
+        }
+        if (mn == "movsb" || mn == "movsd" || mn == "movsw") {
+            auto dst = readReg(X86_REG_EDI);
+            auto src = readReg(X86_REG_ESI);
+            int sz = (mn == "movsd") ? 4 : (mn == "movsw") ? 2 : 1;
+            std::string cText = "*((" + std::string(sz > 1 ? "int" : "char") + " *)" +
+                                varText(std::move(dst)) + ") = *((" +
+                                std::string(sz > 1 ? "int" : "char") + " *)" +
+                                varText(std::move(src)) + ")";
+            bb.stmts.push_back(IRStmt::mkIntrinsic("movs", cText));
+            return;
+        }
+        if (mn == "stosb" || mn == "stosd" || mn == "stosw") {
+            auto dst = readReg(X86_REG_EDI);
+            auto val = readReg(X86_REG_EAX);
+            int sz = (mn == "stosd") ? 4 : (mn == "stosw") ? 2 : 1;
+            std::string cText = "*((" + std::string(sz > 1 ? "int" : "char") + " *)" +
+                                varText(std::move(dst)) + ") = " + varText(std::move(val));
+            bb.stmts.push_back(IRStmt::mkIntrinsic("stos", cText));
+            return;
+        }
+        if (mn == "cmpsb" || mn == "cmpsd" || mn == "cmpsw") {
+            auto dst = readReg(X86_REG_EDI);
+            auto src = readReg(X86_REG_ESI);
+            m_flags.lhs = IRExpr::mkLoad(std::move(src));
+            m_flags.rhs = IRExpr::mkLoad(std::move(dst));
+            m_flags.op = IROp::Sub;
+            return;
+        }
+        if (mn == "scasb" || mn == "scasd" || mn == "scasw") {
+            auto dst = readReg(X86_REG_EDI);
+            auto val = readReg(X86_REG_EAX);
+            m_flags.lhs = std::move(val);
+            m_flags.rhs = IRExpr::mkLoad(std::move(dst));
+            m_flags.op = IROp::Sub;
+            return;
+        }
+        if (mn == "lodsb" || mn == "lodsd" || mn == "lodsw") {
+            auto src = readReg(X86_REG_ESI);
+            assignReg(X86_REG_EAX, IRExpr::mkLoad(std::move(src)), bb);
+            return;
+        }
+
+        // ── Bit operations ──────────────────────────────────────────
+        if ((mn == "bt" || mn == "bts" || mn == "btr" || mn == "btc") && n == 2) {
+            auto base = readOp(o[0]);
+            auto bit = readOp(o[1]);
+            auto mask = IRExpr::mkBinary(IROp::Shl, IRExpr::mkConst(1), std::move(bit));
+            m_flags.lhs = IRExpr::mkBinary(IROp::And, base->clone(), mask->clone());
+            m_flags.rhs = IRExpr::mkConst(0);
+            m_flags.op = IROp::Sub;
+            if (mn == "bts")
+                writeOp(o[0], IRExpr::mkBinary(IROp::Or, std::move(base), std::move(mask)), bb);
+            else if (mn == "btr")
+                writeOp(o[0], IRExpr::mkBinary(IROp::And, std::move(base),
+                    IRExpr::mkUnary(IROp::Not, std::move(mask))), bb);
+            else if (mn == "btc")
+                writeOp(o[0], IRExpr::mkBinary(IROp::Xor, std::move(base), std::move(mask)), bb);
+            return;
+        }
+        if (mn == "bsf" || mn == "bsr") {
+            auto src = readOp(o[1]);
+            std::string fn = (mn == "bsf") ? "__builtin_ctz" : "__builtin_clz";
+            bb.stmts.push_back(IRStmt::mkIntrinsic(mn, fn + "(" + varText(std::move(src)) + ")"));
+            return;
+        }
+
+        // ── Rotate ──────────────────────────────────────────────────
+        if ((mn == "rol" || mn == "ror") && n == 2) {
+            auto v = readOp(o[0]);
+            auto amt = readOp(o[1]);
+            std::string fn = (mn == "rol") ? "__builtin_rotl" : "__builtin_rotr";
+            auto result = IRExpr::mkVar(fn + "(" + varText(v->clone()) + ", " + varText(std::move(amt)) + ")");
+            writeOp(o[0], std::move(result), bb);
+            return;
+        }
+
+        // ── FPU ─────────────────────────────────────────────────────
+        if (mn == "fld" || mn == "fild" || mn == "flds" || mn == "fldl" ||
+            mn == "fst" || mn == "fstp" || mn == "fist" || mn == "fistp" ||
+            mn == "fistl" || mn == "fistpl" ||
+            mn == "fadd" || mn == "faddp" || mn == "fiadd" ||
+            mn == "fsub" || mn == "fsubp" || mn == "fisub" || mn == "fsubr" || mn == "fsubrp" ||
+            mn == "fmul" || mn == "fmulp" || mn == "fimul" ||
+            mn == "fdiv" || mn == "fdivp" || mn == "fidiv" || mn == "fdivr" || mn == "fdivrp" ||
+            mn == "fchs" || mn == "fabs" || mn == "fsqrt" || mn == "fsin" || mn == "fcos" ||
+            mn == "fpatan" || mn == "fyl2x" || mn == "f2xm1" ||
+            mn == "fxch" || mn == "fcom" || mn == "fcomp" || mn == "fcompp" ||
+            mn == "fucom" || mn == "fucomp" || mn == "fucompp" || mn == "fcomi" || mn == "fcomip" ||
+            mn == "fucomi" || mn == "fucomip" ||
+            mn == "fld1" || mn == "fldz" || mn == "fldpi" || mn == "fldl2e" || mn == "fldln2" ||
+            mn == "fnstcw" || mn == "fldcw" || mn == "fnstsw" || mn == "fstsw" ||
+            mn == "frndint" || mn == "fscale" || mn == "fdecstp" || mn == "fincstp" ||
+            mn == "ffree" || mn == "finit" || mn == "fninit" || mn == "fwait" || mn == "wait") {
+            liftFPU(mn, o, n, bb);
+            return;
+        }
+
+        // ── Misc ────────────────────────────────────────────────────
+        if (mn == "cld" || mn == "std" || mn == "clc" || mn == "stc" || mn == "cmc" ||
+            mn == "sahf" || mn == "lahf" || mn == "int3" || mn == "hlt" || mn == "ud2") {
+            // Direction/carry flag ops and traps — no C equivalent needed usually
+            return;
+        }
+        if (mn == "cpuid") {
+            bb.stmts.push_back(IRStmt::mkIntrinsic("cpuid", "__cpuid()"));
+            return;
+        }
+        if (mn == "rdtsc") {
+            bb.stmts.push_back(IRStmt::mkIntrinsic("rdtsc", "__rdtsc()"));
+            return;
+        }
+
+        // ── Indirect jump (switch/vtable) ───────────────────────────
+        if (mn == "jmp" && n == 1 && o[0].type != X86_OP_IMM) {
+            auto target = readOp(o[0]);
+            bb.stmts.push_back(IRStmt::mkIntrinsic("indirect_jmp",
+                "goto *" + varText(std::move(target))));
+            return;
+        }
+
+        // ── Fallback: emit as intrinsic with original asm ───────────
+        std::string asmText = mn + " " + std::string(in.op_str);
+        bb.stmts.push_back(IRStmt::mkIntrinsic("asm", "__asm__(\"" + asmText + "\")"));
+    }
+
+    // ── FPU instruction lifter ──────────────────────────────────────
+    void liftFPU(const std::string &mn, cs_x86_op *o, int n, BasicBlock &bb) {
+        // Model FPU as a set of intrinsics that map to C float/double ops
+        if (mn == "fld" || mn == "flds" || mn == "fldl") {
+            if (n == 1) {
+                auto src = readOp(o[0]);
+                assignReg(X86_REG_ST0, IRExpr::mkCast(CastKind::IntToFloat, std::move(src)), bb);
+            }
+            return;
+        }
+        if (mn == "fild") {
+            if (n == 1) {
+                auto src = readOp(o[0]);
+                assignReg(X86_REG_ST0, IRExpr::mkCast(CastKind::IntToFloat, std::move(src)), bb);
+            }
+            return;
+        }
+        if (mn == "fst" || mn == "fstp") {
+            if (n == 1) {
+                auto st0 = readReg(X86_REG_ST0);
+                writeOp(o[0], std::move(st0), bb);
+            }
+            return;
+        }
+        if (mn == "fist" || mn == "fistp" || mn == "fistl" || mn == "fistpl") {
+            if (n == 1) {
+                auto st0 = readReg(X86_REG_ST0);
+                writeOp(o[0], IRExpr::mkCast(CastKind::FloatToInt, std::move(st0)), bb);
+            }
+            return;
+        }
+        if (mn == "fadd" || mn == "faddp" || mn == "fiadd") {
+            if (n >= 1) {
+                auto st0 = readReg(X86_REG_ST0);
+                auto src = (n >= 1) ? readOp(o[0]) : readReg(X86_REG_ST0);
+                assignReg(X86_REG_ST0, IRExpr::mkBinary(IROp::Add, std::move(st0), std::move(src)), bb);
+            }
+            return;
+        }
+        if (mn == "fsub" || mn == "fsubp" || mn == "fisub") {
+            if (n >= 1) {
+                auto st0 = readReg(X86_REG_ST0);
+                auto src = readOp(o[0]);
+                assignReg(X86_REG_ST0, IRExpr::mkBinary(IROp::Sub, std::move(st0), std::move(src)), bb);
+            }
+            return;
+        }
+        if (mn == "fsubr" || mn == "fsubrp") {
+            if (n >= 1) {
+                auto st0 = readReg(X86_REG_ST0);
+                auto src = readOp(o[0]);
+                assignReg(X86_REG_ST0, IRExpr::mkBinary(IROp::Sub, std::move(src), std::move(st0)), bb);
+            }
+            return;
+        }
+        if (mn == "fmul" || mn == "fmulp" || mn == "fimul") {
+            if (n >= 1) {
+                auto st0 = readReg(X86_REG_ST0);
+                auto src = readOp(o[0]);
+                assignReg(X86_REG_ST0, IRExpr::mkBinary(IROp::Mul, std::move(st0), std::move(src)), bb);
+            }
+            return;
+        }
+        if (mn == "fdiv" || mn == "fdivp" || mn == "fidiv") {
+            if (n >= 1) {
+                auto st0 = readReg(X86_REG_ST0);
+                auto src = readOp(o[0]);
+                assignReg(X86_REG_ST0, IRExpr::mkBinary(IROp::SDiv, std::move(st0), std::move(src)), bb);
+            }
+            return;
+        }
+        if (mn == "fdivr" || mn == "fdivrp") {
+            if (n >= 1) {
+                auto st0 = readReg(X86_REG_ST0);
+                auto src = readOp(o[0]);
+                assignReg(X86_REG_ST0, IRExpr::mkBinary(IROp::SDiv, std::move(src), std::move(st0)), bb);
+            }
+            return;
+        }
+        if (mn == "fchs") {
+            auto st0 = readReg(X86_REG_ST0);
+            assignReg(X86_REG_ST0, IRExpr::mkUnary(IROp::Neg, std::move(st0)), bb);
+            return;
+        }
+        if (mn == "fabs") {
+            auto st0 = readReg(X86_REG_ST0);
+            bb.stmts.push_back(IRStmt::mkIntrinsic("fabs", "fabs(" + varText(std::move(st0)) + ")"));
+            return;
+        }
+        if (mn == "fsqrt") {
+            auto st0 = readReg(X86_REG_ST0);
+            bb.stmts.push_back(IRStmt::mkIntrinsic("sqrt", "sqrt(" + varText(std::move(st0)) + ")"));
+            return;
+        }
+        if (mn == "fsin") {
+            auto st0 = readReg(X86_REG_ST0);
+            bb.stmts.push_back(IRStmt::mkIntrinsic("sin", "sin(" + varText(std::move(st0)) + ")"));
+            return;
+        }
+        if (mn == "fcos") {
+            auto st0 = readReg(X86_REG_ST0);
+            bb.stmts.push_back(IRStmt::mkIntrinsic("cos", "cos(" + varText(std::move(st0)) + ")"));
+            return;
+        }
+        if (mn == "fld1") { assignReg(X86_REG_ST0, IRExpr::mkConst(1), bb); return; }
+        if (mn == "fldz") { assignReg(X86_REG_ST0, IRExpr::mkConst(0), bb); return; }
+        if (mn == "fldpi") { assignReg(X86_REG_ST0, IRExpr::mkVar("M_PI"), bb); return; }
+        if (mn == "fcom" || mn == "fcomp" || mn == "fcompp" ||
+            mn == "fucom" || mn == "fucomp" || mn == "fucompp" ||
+            mn == "fcomi" || mn == "fcomip" || mn == "fucomi" || mn == "fucomip") {
+            auto st0 = readReg(X86_REG_ST0);
+            auto cmp = (n >= 1) ? readOp(o[0]) : readReg(X86_REG_ST0);
+            m_flags.lhs = std::move(st0);
+            m_flags.rhs = std::move(cmp);
+            m_flags.op = IROp::Sub;
+            return;
+        }
+        if (mn == "fnstsw" || mn == "fstsw") {
+            // Store FPU status word — used before sahf/test for FPU comparisons
+            assignReg(X86_REG_EAX, IRExpr::mkVar("__fpu_status"), bb);
+            return;
+        }
+        if (mn == "fxch") { return; } // swap ST(0) and ST(i) — we approximate
+        if (mn == "fnstcw" || mn == "fldcw" || mn == "frndint" || mn == "fscale" ||
+            mn == "fdecstp" || mn == "fincstp" || mn == "ffree" ||
+            mn == "finit" || mn == "fninit" || mn == "fwait" || mn == "wait" ||
+            mn == "fpatan" || mn == "fyl2x" || mn == "f2xm1" || mn == "fldl2e" || mn == "fldln2") {
+            return; // Control/transcendental — suppress
+        }
+    }
+
+    // Helper: extract a readable string from an IR expr (for intrinsic text)
+    static std::string varText(std::unique_ptr<IRExpr> e) {
+        if (!e) return "?";
+        if (e->op == IROp::Var) return e->name;
+        if (e->op == IROp::String) return e->name;
+        if (e->op == IROp::FuncRef) return e->name;
+        if (e->op == IROp::Const) {
+            if (e->value >= -256 && e->value <= 256) return std::to_string(e->value);
+            char buf[32]; snprintf(buf, sizeof(buf), "0x%X", (unsigned)e->value);
+            return buf;
+        }
+        if (e->op == IROp::Temp) return "t" + std::to_string(e->value);
+        return "?";
+    }
+};
