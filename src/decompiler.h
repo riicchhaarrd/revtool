@@ -108,29 +108,29 @@ private:
     }
 
     static void emitTypeDefsRecursive(QString &out, const StabsTypeTable &types,
-                                      TypeRef ref, std::set<TypeRef> &emitted) {
-        if (ref == NullType || emitted.count(ref)) return;
+                                      TypeRef ref, std::set<TypeRef> &emitted, int depth = 0) {
+        if (ref == NullType || emitted.count(ref) || depth > 30) return;
+        emitted.insert(ref); // mark visited BEFORE recursing to break cycles
         auto *t = types.getType(ref);
         if (!t) return;
 
         // Resolve through pointers/typedefs to find underlying struct/enum
         if (t->kind == StabsTypeKind::Pointer || t->kind == StabsTypeKind::Typedef ||
             t->kind == StabsTypeKind::Const || t->kind == StabsTypeKind::Volatile) {
-            if (t->targetType != NullType) emitTypeDefsRecursive(out, types, t->targetType, emitted);
+            if (t->targetType != NullType)
+                emitTypeDefsRecursive(out, types, t->targetType, emitted, depth + 1);
             return;
         }
         if (t->kind == StabsTypeKind::Struct || t->kind == StabsTypeKind::Union) {
             if (t->name.empty() || t->fields.empty()) return;
-            emitted.insert(ref);
             // Emit fields' types first
             for (auto &f : t->fields)
-                emitTypeDefsRecursive(out, types, f.typeRef, emitted);
+                emitTypeDefsRecursive(out, types, f.typeRef, emitted, depth + 1);
             out += QString::fromStdString(types.formatStructDef(ref)) + ";\n\n";
             return;
         }
         if (t->kind == StabsTypeKind::Enum) {
             if (t->name.empty() || t->enumValues.empty()) return;
-            emitted.insert(ref);
             out += QString::fromStdString(types.formatEnumDef(ref)) + ";\n\n";
             return;
         }
