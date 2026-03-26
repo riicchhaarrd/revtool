@@ -10,16 +10,17 @@
 #include <cstdint>
 
 struct DisasmLine {
-    uint32_t    address;
-    uint8_t     size;
+    uint32_t    address = 0;
+    uint8_t     size    = 0;
     std::string bytes;
     std::string mnemonic;
     std::string operands;
-    std::string label;    // function/label name at this address
+    std::string label;
     std::string comment;
     bool        isCall = false;
     bool        isJump = false;
     bool        isRet  = false;
+    bool        isNop  = false;
 };
 
 class DisasmWidget : public QAbstractScrollArea {
@@ -52,6 +53,7 @@ private:
     void updateScrollBar();
     int visibleLines() const;
     int lineHeight() const;
+    int headerHeight() const;
     int indexFromY(int y) const;
 
     MachOFile *m_macho = nullptr;
@@ -63,10 +65,9 @@ private:
     int      m_charW = 0;
     int      m_charH = 0;
 
-    // Column positions
-    int m_addrX   = 0;
-    int m_bytesX  = 0;
-    int m_mnemoX  = 0;
-    int m_operX   = 0;
-    int m_commentX= 0;
+    int m_addrX    = 0;
+    int m_bytesX   = 0;
+    int m_mnemoX   = 0;
+    int m_operX    = 0;
+    int m_commentX = 0;
 };

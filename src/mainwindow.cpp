@@ -9,52 +9,206 @@
 #include <QApplication>
 #include <QSplitter>
 
+static const char *kStyleSheet = R"(
+* {
+    font-family: "Segoe UI", "Noto Sans", "Helvetica Neue", sans-serif;
+    font-size: 13px;
+}
+
+QMainWindow, QDialog {
+    background: #181818;
+}
+
+/* ── Menu bar ────────────────────────────────────────────────── */
+QMenuBar {
+    background: #1b1b1b;
+    color: #aaa;
+    border-bottom: 1px solid #2a2a2a;
+    padding: 2px 0;
+}
+QMenuBar::item        { padding: 4px 10px; }
+QMenuBar::item:selected { background: #333; color: #ddd; border-radius: 3px; }
+QMenu {
+    background: #222;
+    color: #ccc;
+    border: 1px solid #333;
+    padding: 4px 0;
+}
+QMenu::item            { padding: 5px 28px 5px 12px; }
+QMenu::item:selected   { background: #3d5a80; color: #fff; }
+QMenu::separator       { height: 1px; background: #333; margin: 4px 8px; }
+
+/* ── Toolbar ─────────────────────────────────────────────────── */
+QToolBar {
+    background: #1b1b1b;
+    border-bottom: 1px solid #2a2a2a;
+    spacing: 6px;
+    padding: 3px 6px;
+}
+QToolBar QLabel { color: #888; }
+QComboBox {
+    background: #252525;
+    color: #ccc;
+    border: 1px solid #3a3a3a;
+    border-radius: 3px;
+    padding: 4px 10px;
+    min-width: 280px;
+}
+QComboBox:hover         { border-color: #555; }
+QComboBox::drop-down    { border: none; width: 20px; }
+QComboBox QAbstractItemView {
+    background: #222;
+    color: #ccc;
+    border: 1px solid #3a3a3a;
+    selection-background-color: #3d5a80;
+}
+
+/* ── Tab bar ─────────────────────────────────────────────────── */
+QTabWidget::pane { border: none; }
+QTabBar {
+    background: #1b1b1b;
+}
+QTabBar::tab {
+    background: transparent;
+    color: #777;
+    padding: 7px 18px;
+    border: none;
+    border-bottom: 2px solid transparent;
+}
+QTabBar::tab:hover    { color: #bbb; }
+QTabBar::tab:selected { color: #ddd; border-bottom: 2px solid #5a9ecf; }
+
+/* ── Dock ────────────────────────────────────────────────────── */
+QDockWidget {
+    color: #aaa;
+    titlebar-close-icon: none;
+}
+QDockWidget::title {
+    background: #1b1b1b;
+    padding: 6px 10px;
+    border-bottom: 1px solid #2a2a2a;
+    font-weight: bold;
+}
+
+/* ── Trees & Tables ──────────────────────────────────────────── */
+QTreeWidget, QTableWidget {
+    background: #141414;
+    alternate-background-color: #181818;
+    color: #bbb;
+    border: none;
+    gridline-color: #222;
+    outline: none;
+}
+QTreeWidget::item, QTableWidget::item {
+    padding: 3px 6px;
+}
+QTreeWidget::item:selected, QTableWidget::item:selected {
+    background: #1a3a56;
+    color: #ddd;
+}
+QTreeWidget::item:hover, QTableWidget::item:hover {
+    background: #1e1e1e;
+}
+QHeaderView::section {
+    background: #1b1b1b;
+    color: #777;
+    border: none;
+    border-right: 1px solid #2a2a2a;
+    border-bottom: 1px solid #2a2a2a;
+    padding: 5px 8px;
+    font-weight: normal;
+}
+QTreeWidget::branch { background: #141414; }
+QTreeWidget::branch:has-children:!has-siblings:closed,
+QTreeWidget::branch:closed:has-children:has-siblings {
+    image: none;
+    border-image: none;
+}
+
+/* ── Text edit (header info) ─────────────────────────────────── */
+QTextEdit {
+    background: #141414;
+    color: #bbb;
+    border: none;
+    selection-background-color: #1a3a56;
+    font-family: "Monospace", monospace;
+    font-size: 12px;
+}
+
+/* ── Line edit (filter) ──────────────────────────────────────── */
+QLineEdit {
+    background: #1e1e1e;
+    color: #ccc;
+    border: 1px solid #333;
+    border-radius: 3px;
+    padding: 5px 8px;
+    selection-background-color: #3d5a80;
+}
+QLineEdit:focus { border-color: #5a9ecf; }
+
+/* ── Scrollbars ──────────────────────────────────────────────── */
+QScrollBar:vertical {
+    background: transparent;
+    width: 10px;
+    margin: 0;
+}
+QScrollBar::handle:vertical {
+    background: #3a3a3a;
+    min-height: 30px;
+    border-radius: 5px;
+    margin: 2px;
+}
+QScrollBar::handle:vertical:hover { background: #555; }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }
+
+QScrollBar:horizontal {
+    background: transparent;
+    height: 10px;
+    margin: 0;
+}
+QScrollBar::handle:horizontal {
+    background: #3a3a3a;
+    min-width: 30px;
+    border-radius: 5px;
+    margin: 2px;
+}
+QScrollBar::handle:horizontal:hover { background: #555; }
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
+QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: transparent; }
+
+/* ── Status bar ──────────────────────────────────────────────── */
+QStatusBar {
+    background: #0e639c;
+    color: #fff;
+    border: none;
+    font-size: 12px;
+}
+QStatusBar QLabel {
+    color: #fff;
+    padding: 0 8px;
+}
+)";
+
 MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
-    setWindowTitle("dis — Mach-O Disassembler");
+    setWindowTitle("dis");
     resize(1400, 900);
 
-    // Dark palette
+    // Set dark palette as base, then layer stylesheet on top
     QPalette pal;
-    pal.setColor(QPalette::Window,          QColor(0x1E, 0x1E, 0x2E));
-    pal.setColor(QPalette::WindowText,      QColor(0xCD, 0xD6, 0xF4));
-    pal.setColor(QPalette::Base,            QColor(0x18, 0x18, 0x25));
-    pal.setColor(QPalette::AlternateBase,   QColor(0x20, 0x20, 0x30));
-    pal.setColor(QPalette::Text,            QColor(0xCD, 0xD6, 0xF4));
-    pal.setColor(QPalette::Button,          QColor(0x2A, 0x2A, 0x3A));
-    pal.setColor(QPalette::ButtonText,      QColor(0xCD, 0xD6, 0xF4));
-    pal.setColor(QPalette::Highlight,       QColor(0x45, 0x47, 0x5A));
+    pal.setColor(QPalette::Window,          QColor(0x18, 0x18, 0x18));
+    pal.setColor(QPalette::WindowText,      QColor(0xCC, 0xCC, 0xCC));
+    pal.setColor(QPalette::Base,            QColor(0x14, 0x14, 0x14));
+    pal.setColor(QPalette::AlternateBase,   QColor(0x18, 0x18, 0x18));
+    pal.setColor(QPalette::Text,            QColor(0xCC, 0xCC, 0xCC));
+    pal.setColor(QPalette::Button,          QColor(0x25, 0x25, 0x25));
+    pal.setColor(QPalette::ButtonText,      QColor(0xCC, 0xCC, 0xCC));
+    pal.setColor(QPalette::Highlight,       QColor(0x1A, 0x3A, 0x56));
     pal.setColor(QPalette::HighlightedText, QColor(0xFF, 0xFF, 0xFF));
-    pal.setColor(QPalette::ToolTipBase,     QColor(0x30, 0x30, 0x40));
-    pal.setColor(QPalette::ToolTipText,     QColor(0xCD, 0xD6, 0xF4));
     QApplication::setPalette(pal);
+    qApp->setStyleSheet(kStyleSheet);
 
-    setStyleSheet(
-        "QMainWindow { background: #1e1e2e; }"
-        "QTabWidget::pane { border: 1px solid #313244; }"
-        "QTabBar::tab { background: #2a2a3a; color: #cdd6f4; padding: 6px 14px; }"
-        "QTabBar::tab:selected { background: #45475a; }"
-        "QHeaderView::section { background: #2a2a3a; color: #cdd6f4; padding: 3px; border: 1px solid #313244; }"
-        "QTreeWidget, QTableWidget, QTextEdit { background: #181825; color: #cdd6f4; border: 1px solid #313244; }"
-        "QLineEdit { background: #1e1e2e; color: #cdd6f4; border: 1px solid #45475a; padding: 3px; }"
-        "QComboBox { background: #2a2a3a; color: #cdd6f4; border: 1px solid #45475a; padding: 3px 8px; }"
-        "QComboBox QAbstractItemView { background: #1e1e2e; color: #cdd6f4; }"
-        "QMenuBar { background: #1e1e2e; color: #cdd6f4; }"
-        "QMenuBar::item:selected { background: #45475a; }"
-        "QMenu { background: #1e1e2e; color: #cdd6f4; border: 1px solid #313244; }"
-        "QMenu::item:selected { background: #45475a; }"
-        "QToolBar { background: #1e1e2e; border: none; spacing: 4px; }"
-        "QStatusBar { background: #181825; color: #a6adc8; }"
-        "QDockWidget { color: #cdd6f4; }"
-        "QDockWidget::title { background: #2a2a3a; padding: 4px; }"
-        "QScrollBar:vertical { background: #181825; width: 12px; }"
-        "QScrollBar::handle:vertical { background: #45475a; min-height: 20px; border-radius: 4px; }"
-        "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"
-        "QScrollBar:horizontal { background: #181825; height: 12px; }"
-        "QScrollBar::handle:horizontal { background: #45475a; min-width: 20px; border-radius: 4px; }"
-        "QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }"
-    );
-
-    // Central widget: tabs for Disasm and Hex
+    // Central: tabs for Disasm + Hex
     m_centralTabs = new QTabWidget;
     m_disasmWidget = new DisasmWidget;
     m_hexWidget = new HexWidget;
@@ -62,31 +216,30 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     m_centralTabs->addTab(m_hexWidget, "Hex Editor");
     setCentralWidget(m_centralTabs);
 
-    // Info dock
+    // Info dock on the left
     m_infoWidget = new InfoWidget;
-    auto *dock = new QDockWidget("Info", this);
+    auto *dock = new QDockWidget("Inspector", this);
     dock->setWidget(m_infoWidget);
-    dock->setMinimumWidth(380);
+    dock->setMinimumWidth(400);
     addDockWidget(Qt::LeftDockWidgetArea, dock);
 
     createMenus();
     createStatusBar();
 
-    // Wire signals
+    // ── Wire signals ────────────────────────────────────────────────
     connect(m_hexWidget, &HexWidget::offsetChanged, this, [this](int64_t off) {
-        m_statusOffset->setText(QString("  Offset: 0x%1").arg((uint32_t)off, 8, 16, QChar('0')).toUpper());
+        m_statusOffset->setText(QString("Offset: 0x%1").arg((uint32_t)off, 8, 16, QChar('0')).toUpper());
         int64_t addr = m_macho ? m_macho->addressForFileOffset(off) : -1;
-        if (addr >= 0)
-            m_statusAddr->setText(QString("  Addr: 0x%1").arg((uint32_t)addr, 8, 16, QChar('0')).toUpper());
-        else
-            m_statusAddr->setText("  Addr: N/A");
+        m_statusAddr->setText(addr >= 0
+            ? QString("VM: 0x%1").arg((uint32_t)addr, 8, 16, QChar('0')).toUpper()
+            : QString("VM: ---"));
     });
 
     connect(m_disasmWidget, &DisasmWidget::addressChanged, this, [this](uint32_t addr) {
-        m_statusAddr->setText(QString("  Addr: 0x%1").arg(addr, 8, 16, QChar('0')).toUpper());
+        m_statusAddr->setText(QString("VM: 0x%1").arg(addr, 8, 16, QChar('0')).toUpper());
         int64_t off = m_macho ? m_macho->fileOffsetForAddress(addr) : -1;
         if (off >= 0)
-            m_statusOffset->setText(QString("  Offset: 0x%1").arg((uint32_t)off, 8, 16, QChar('0')).toUpper());
+            m_statusOffset->setText(QString("Offset: 0x%1").arg((uint32_t)off, 8, 16, QChar('0')).toUpper());
     });
 
     connect(m_disasmWidget, &DisasmWidget::goToHexOffset, this, [this](int64_t off) {
@@ -95,27 +248,22 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     });
 
     connect(m_disasmWidget, &DisasmWidget::statusMessage, this, [this](const QString &msg) {
-        m_statusInfo->setText("  " + msg);
+        m_statusInfo->setText(msg);
     });
 
     connect(m_infoWidget, &InfoWidget::sectionSelected, this,
         [this](uint32_t fileoff, uint32_t size, uint32_t vmaddr, const QString &name) {
             m_hexWidget->goToOffset(fileoff);
             m_hexWidget->setHighlight(fileoff, size);
-
-            // Check if this is a code section
             if (name.contains("text", Qt::CaseInsensitive) ||
                 name.contains("stub", Qt::CaseInsensitive)) {
-                // Find and disassemble this section
-                for (auto &seg : m_macho->segments()) {
-                    for (auto &sec : seg.sections) {
+                for (auto &seg : m_macho->segments())
+                    for (auto &sec : seg.sections)
                         if (sec.addr == vmaddr && sec.offset == fileoff) {
                             m_disasmWidget->disassembleSection(sec);
                             m_centralTabs->setCurrentWidget(m_disasmWidget);
                             return;
                         }
-                    }
-                }
             }
         });
 
@@ -133,83 +281,58 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
 }
 
 void MainWindow::createMenus() {
-    // File menu
     auto *fileMenu = menuBar()->addMenu("&File");
-
     auto *openAct = fileMenu->addAction("&Open...");
     openAct->setShortcut(QKeySequence::Open);
     connect(openAct, &QAction::triggered, this, [this]() {
-        QString path = QFileDialog::getOpenFileName(this, "Open Mach-O Binary", "",
-            "All Files (*)");
+        QString path = QFileDialog::getOpenFileName(this, "Open Mach-O Binary", "", "All Files (*)");
         if (!path.isEmpty()) loadFile(path);
     });
-
     fileMenu->addSeparator();
     auto *quitAct = fileMenu->addAction("&Quit");
     quitAct->setShortcut(QKeySequence::Quit);
     connect(quitAct, &QAction::triggered, this, &QWidget::close);
 
-    // Navigate menu
     auto *navMenu = menuBar()->addMenu("&Navigate");
-
     auto *goAddrAct = navMenu->addAction("Go to &Address...");
     goAddrAct->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_G));
     connect(goAddrAct, &QAction::triggered, this, [this]() {
         bool ok;
-        QString text = QInputDialog::getText(this, "Go to Address",
-            "Virtual address (hex):", QLineEdit::Normal, "", &ok);
+        QString text = QInputDialog::getText(this, "Go to Address", "Virtual address (hex):", QLineEdit::Normal, "", &ok);
         if (ok && !text.isEmpty()) {
-            bool convOk;
-            uint32_t addr = text.toUInt(&convOk, 16);
-            if (convOk) {
-                m_disasmWidget->goToAddress(addr);
+            bool c; uint32_t addr = text.toUInt(&c, 16);
+            if (c) { m_disasmWidget->goToAddress(addr);
                 int64_t off = m_macho ? m_macho->fileOffsetForAddress(addr) : -1;
-                if (off >= 0) m_hexWidget->goToOffset(off);
-            }
+                if (off >= 0) m_hexWidget->goToOffset(off); }
         }
     });
-
     auto *goOffAct = navMenu->addAction("Go to &Offset...");
     goOffAct->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_G));
     connect(goOffAct, &QAction::triggered, this, [this]() {
         bool ok;
-        QString text = QInputDialog::getText(this, "Go to Offset",
-            "File offset (hex):", QLineEdit::Normal, "", &ok);
-        if (ok && !text.isEmpty()) {
-            bool convOk;
-            int64_t off = text.toLongLong(&convOk, 16);
-            if (convOk) m_hexWidget->goToOffset(off);
-        }
+        QString text = QInputDialog::getText(this, "Go to Offset", "File offset (hex):", QLineEdit::Normal, "", &ok);
+        if (ok && !text.isEmpty()) { bool c; int64_t off = text.toLongLong(&c, 16); if (c) m_hexWidget->goToOffset(off); }
     });
-
     navMenu->addSeparator();
     auto *entryAct = navMenu->addAction("Go to &Entry Point");
     entryAct->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_E));
     connect(entryAct, &QAction::triggered, this, [this]() {
-        if (m_macho) {
-            m_disasmWidget->goToAddress(m_macho->entryPoint());
-            m_centralTabs->setCurrentWidget(m_disasmWidget);
-        }
+        if (m_macho) { m_disasmWidget->goToAddress(m_macho->entryPoint()); m_centralTabs->setCurrentWidget(m_disasmWidget); }
     });
 
-    // View menu
     auto *viewMenu = menuBar()->addMenu("&View");
     auto *disasmAct = viewMenu->addAction("&Disassembly");
     disasmAct->setShortcut(QKeySequence(Qt::Key_1));
-    connect(disasmAct, &QAction::triggered, this, [this]() {
-        m_centralTabs->setCurrentWidget(m_disasmWidget);
-    });
+    connect(disasmAct, &QAction::triggered, this, [this]() { m_centralTabs->setCurrentWidget(m_disasmWidget); });
     auto *hexAct = viewMenu->addAction("&Hex Editor");
     hexAct->setShortcut(QKeySequence(Qt::Key_2));
-    connect(hexAct, &QAction::triggered, this, [this]() {
-        m_centralTabs->setCurrentWidget(m_hexWidget);
-    });
+    connect(hexAct, &QAction::triggered, this, [this]() { m_centralTabs->setCurrentWidget(m_hexWidget); });
 
-    // Disasm section selector in toolbar
+    // Toolbar
     auto *toolbar = addToolBar("Sections");
-    toolbar->addWidget(new QLabel("  Section: "));
+    toolbar->setMovable(false);
+    toolbar->addWidget(new QLabel("Section:"));
     m_sectionCombo = new QComboBox;
-    m_sectionCombo->setMinimumWidth(200);
     toolbar->addWidget(m_sectionCombo);
 
     connect(m_sectionCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
@@ -217,9 +340,9 @@ void MainWindow::createMenus() {
 }
 
 void MainWindow::createStatusBar() {
-    m_statusOffset = new QLabel("  Offset: 0x00000000");
-    m_statusAddr   = new QLabel("  Addr: 0x00000000");
-    m_statusInfo   = new QLabel;
+    m_statusOffset = new QLabel("Offset: ---");
+    m_statusAddr   = new QLabel("VM: ---");
+    m_statusInfo   = new QLabel("Ready");
     statusBar()->addWidget(m_statusOffset);
     statusBar()->addWidget(m_statusAddr);
     statusBar()->addPermanentWidget(m_statusInfo);
@@ -228,28 +351,18 @@ void MainWindow::createStatusBar() {
 void MainWindow::loadFile(const QString &path) {
     m_macho = std::make_unique<MachOFile>();
     if (!m_macho->load(path.toStdString())) {
-        QMessageBox::critical(this, "Error",
-            "Failed to load Mach-O file.\nMake sure it's a valid Mach-O i386 binary.");
+        QMessageBox::critical(this, "Error", "Failed to load Mach-O file.\nMake sure it's a valid Mach-O i386 binary.");
         m_macho.reset();
         return;
     }
 
-    setWindowTitle(QString("dis — %1").arg(path));
-
-    // Set up hex view with raw file data
+    setWindowTitle(QString("dis  |  %1").arg(QFileInfo(path).fileName()));
     m_hexWidget->setData(m_macho->data(), m_macho->size());
-
-    // Set up disassembler
     m_disasmWidget->setMachO(m_macho.get());
-
-    // Set up info panel
     m_infoWidget->setMachO(m_macho.get());
-
-    // Populate section combo with code sections
     populateSectionCombo();
-
-    m_statusInfo->setText(QString("  Loaded: %1 (%2 KB)")
-        .arg(path).arg(m_macho->size() / 1024));
+    m_statusInfo->setText(QString("%1  |  %2 KB  |  Mach-O i386")
+        .arg(QFileInfo(path).fileName()).arg(m_macho->size() / 1024));
 }
 
 void MainWindow::populateSectionCombo() {
@@ -259,15 +372,12 @@ void MainWindow::populateSectionCombo() {
 
     for (auto &seg : m_macho->segments()) {
         for (auto &sec : seg.sections) {
-            // Include code-like sections
-            uint32_t stype = sec.flags & 0xFF;
-            bool isCode = (stype == 0 && sec.sectname.find("text") != std::string::npos) ||
-                          (sec.flags & 0x80000000) || // S_ATTR_PURE_INSTRUCTIONS
-                          (sec.flags & 0x00000400);   // S_ATTR_SOME_INSTRUCTIONS
+            bool isCode = (sec.flags & 0x80000000) || (sec.flags & 0x00000400) ||
+                          ((sec.flags & 0xFF) == 0 && sec.sectname.find("text") != std::string::npos);
             if (isCode && sec.size > 0) {
                 m_codeSections.push_back(&sec);
                 m_sectionCombo->addItem(
-                    QString("%1,%2 (0x%3, %4 bytes)")
+                    QString("%1,%2  (0x%3  %4 bytes)")
                         .arg(QString::fromStdString(sec.segname))
                         .arg(QString::fromStdString(sec.sectname))
                         .arg(sec.addr, 8, 16, QChar('0'))
@@ -277,10 +387,8 @@ void MainWindow::populateSectionCombo() {
     }
     m_sectionCombo->blockSignals(false);
 
-    // Auto-select __TEXT,__text
     for (int i = 0; i < (int)m_codeSections.size(); ++i) {
-        if (m_codeSections[i]->sectname == "__text" &&
-            m_codeSections[i]->segname == "__TEXT") {
+        if (m_codeSections[i]->sectname == "__text" && m_codeSections[i]->segname == "__TEXT") {
             m_sectionCombo->setCurrentIndex(i);
             disassembleCurrentSection();
             break;
@@ -292,8 +400,6 @@ void MainWindow::disassembleCurrentSection() {
     int idx = m_sectionCombo->currentIndex();
     if (idx < 0 || idx >= (int)m_codeSections.size()) return;
     m_disasmWidget->disassembleSection(*m_codeSections[idx]);
-
-    // Navigate to entry point if in this section
     if (m_macho) {
         uint32_t ep = m_macho->entryPoint();
         auto &sec = *m_codeSections[idx];

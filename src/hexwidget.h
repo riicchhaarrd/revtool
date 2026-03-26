@@ -36,10 +36,12 @@ protected:
     void resizeEvent(QResizeEvent *e) override;
 
 private:
+    void recalcLayout();
     void updateScrollBar();
     int64_t posFromPoint(const QPoint &pt) const;
     int visibleLines() const;
     int lineHeight() const;
+    int headerHeight() const;
 
     const uint8_t *m_data = nullptr;
     size_t   m_dataSize = 0;
@@ -51,8 +53,9 @@ private:
     int      m_bytesPerLine = 16;
     int      m_charW = 0;
     int      m_charH = 0;
-    int      m_addrColW = 0;  // width of address column
-    int      m_hexColX = 0;   // start x of hex column
-    int      m_asciiColX = 0; // start x of ascii column
+    int      m_margin = 0;
+    int      m_addrColW = 0;
+    int      m_hexColX = 0;
+    int      m_asciiColX = 0;
     QFont    m_font;
 };
