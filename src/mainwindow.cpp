@@ -1,5 +1,7 @@
 #include "mainwindow.h"
 #include "decompiler.h"
+#include "csyntax.h"
+
 #include <QMenuBar>
 #include <QMenu>
 #include <QToolBar>
@@ -34,6 +36,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     m_decompView = new QTextEdit;
     m_decompView->setReadOnly(true);
     m_decompView->setFont(QFont("Monospace", 11));
+    m_cHighlight = new CSyntaxHighlighter(m_decompView->document());
     m_decompDock = new QDockWidget("Pseudo-C", this);
     m_decompDock->setWidget(m_decompView);
     m_decompDock->setMinimumWidth(380);
@@ -125,12 +128,13 @@ void MainWindow::applyTheme(bool dark) {
     m_hexWidget->setTheme(t);
     m_disasmWidget->setTheme(t);
 
-    // Decompile view colors
+    // Decompile view colors + highlighter
     if (m_decompView) {
         m_decompView->setStyleSheet(dark
             ? "QTextEdit { background: #1e1e1e; color: #d4d4d4; border: none; font-family: Monospace; font-size: 12px; }"
             : "QTextEdit { background: #fff; color: #1e1e1e; border: none; font-family: Monospace; font-size: 12px; }");
     }
+    if (m_cHighlight) m_cHighlight->setDark(dark);
 
     // Update toggle text
     if (m_themeToggle)

@@ -13,6 +13,8 @@
 #include <QTextEdit>
 #include <memory>
 
+class CSyntaxHighlighter;
+
 class MainWindow : public QMainWindow {
     Q_OBJECT
 public:
@@ -49,8 +51,9 @@ private:
     std::vector<const Section*> m_codeSections;
 
     // Decompile panel
-    QDockWidget *m_decompDock = nullptr;
-    QTextEdit   *m_decompView = nullptr;
+    QDockWidget        *m_decompDock = nullptr;
+    QTextEdit          *m_decompView = nullptr;
+    CSyntaxHighlighter *m_cHighlight = nullptr;
 
     // Theme
     bool     m_darkTheme = true;

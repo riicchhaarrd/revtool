@@ -15,6 +15,7 @@ add_executable(dis
     src/hexwidget.cpp
     src/disasmwidget.cpp
     src/infowidget.cpp
+    src/csyntax.cpp
 )
 
 target_include_directories(dis PRIVATE src ${CAPSTONE_INCLUDE_DIRS})
