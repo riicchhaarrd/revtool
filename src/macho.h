@@ -513,6 +513,8 @@ private:
                     sf.address = sym.n_value;
                     curSourceIdx = (int)m_stabsSources.size();
                     m_stabsSources.push_back(std::move(sf));
+                    // Scope types per compilation unit
+                    m_typeTable.setCompilationUnit(curSourceIdx);
                 }
                 break;
             }
@@ -520,7 +522,7 @@ private:
                 if (!sym.name.empty() && sym.n_sect != 0) {
                     StabsFunction fn;
                     fn.rawName = sym.name;
-                    fn.name = demangle(cleanStabsName(sym.name));
+                    fn.name = demangleNameOnly(cleanStabsName(sym.name));
                     fn.address = sym.n_value;
                     fn.isGlobal = (sym.name.find(":F") != std::string::npos);
                     fn.sourceFileIdx = curSourceIdx;
@@ -617,7 +619,7 @@ private:
             if (sym.n_type & N_STAB) continue;
             if ((sym.n_type & N_TYPE) == N_SECT && sym.n_value) {
                 if (m_funcMap.find(sym.n_value) == m_funcMap.end())
-                    m_funcMap[sym.n_value] = demangle(sym.name);
+                    m_funcMap[sym.n_value] = demangleNameOnly(sym.name);
             }
         }
     }

@@ -84,6 +84,12 @@ struct StabsGlobalVar {
 
 class StabsTypeTable {
 public:
+    // Set the current compilation unit index. Call this when encountering
+    // each new N_SO (source file) boundary. Types are scoped per unit so
+    // that (0,5) in unit 0 doesn't collide with (0,5) in unit 1.
+    void setCompilationUnit(int unit) { m_unit = unit; }
+    int  compilationUnit() const { return m_unit; }
+
     // ── Parse a raw STABS symbol string ──────────────────────────────
     // Called for each STABS symbol during binary parsing.
     // stabType: the N_xxx type (N_LSYM, N_GSYM, N_PSYM, etc.)
@@ -409,6 +415,7 @@ private:
     std::vector<StabsGlobalVar>              m_globals;
     std::unordered_map<uint32_t, size_t>     m_globalByAddr;
     std::vector<std::string>                 m_includes;
+    int                                      m_unit = 0;
 
     // ── Find the descriptor colon ────────────────────────────────────
     // STABS uses 'name:descriptor...' but names can contain '::' for C++.
@@ -433,12 +440,13 @@ private:
             if (pos < s.size() && s[pos] == ',') pos++;
             int typeNum = parseIntVal(s, pos);
             if (pos < s.size() && s[pos] == ')') pos++;
-            return {fileNum, typeNum};
+            // Scope by compilation unit to prevent cross-CU type collisions
+            return {m_unit * 10000 + fileNum, typeNum};
         }
         // Bare type number (no parens, file=0)
         if (s[pos] == '-' || (s[pos] >= '0' && s[pos] <= '9')) {
             int typeNum = parseIntVal(s, pos);
-            return {0, typeNum};
+            return {m_unit * 10000, typeNum};
         }
         return NullType;
     }
