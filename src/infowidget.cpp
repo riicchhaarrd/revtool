@@ -58,7 +58,23 @@ InfoWidget::InfoWidget(QWidget *parent) : QTabWidget(parent) {
     m_segTree->setAlternatingRowColors(true);
     addTab(m_segTree, "Segments");
 
-    // Functions tab (dedicated, easy-to-use)
+    // Source Tree tab
+    {
+        auto *w = new QWidget;
+        auto *lay = new QVBoxLayout(w);
+        lay->setContentsMargins(0,0,0,0);
+        m_srcFilter = new QLineEdit;
+        m_srcFilter->setPlaceholderText("Filter source files and functions...");
+        lay->addWidget(m_srcFilter);
+        m_sourceTree = new QTreeWidget;
+        m_sourceTree->setHeaderLabels({"Name", "Address", "Info"});
+        m_sourceTree->setAlternatingRowColors(true);
+        m_sourceTree->setIndentation(16);
+        lay->addWidget(m_sourceTree);
+        addTab(w, "Source Tree");
+    }
+
+    // Functions tab (flat, filterable)
     {
         auto *w = new QWidget;
         auto *lay = new QVBoxLayout(w);
@@ -109,6 +125,7 @@ void InfoWidget::setMachO(MachOFile *macho) {
     buildHeaderTab();
     buildLoadCmdsTab();
     buildSegmentsTab();
+    buildSourceTreeTab();
     buildFunctionsTab();
     buildSymbolsTab();
     buildStabsTab();
@@ -196,6 +213,231 @@ void InfoWidget::buildSegmentsTab() {
             uint32_t addr = item->data(0, Qt::UserRole + 2).toUInt();
             emit sectionSelected(foff, sz, addr, item->text(0));
         }
+    });
+}
+
+// ── Source Tree tab ─────────────────────────────────────────────────
+void InfoWidget::buildSourceTreeTab() {
+    m_sourceTree->clear();
+
+    // Build a directory tree from STABS source file paths.
+    // Each path is split into components; directories become tree nodes,
+    // source files become leaves, and functions are children of their file.
+
+    // Helper: given a path like "/a/b/c.cpp", split into {"a","b","c.cpp"}
+    auto splitPath = [](const std::string &path) -> std::vector<std::string> {
+        std::vector<std::string> parts;
+        std::string cur;
+        for (char c : path) {
+            if (c == '/') {
+                if (!cur.empty()) parts.push_back(cur);
+                cur.clear();
+            } else {
+                cur += c;
+            }
+        }
+        if (!cur.empty()) parts.push_back(cur);
+        return parts;
+    };
+
+    // Find or create a child node under parent with the given name
+    auto findOrCreate = [](QTreeWidgetItem *parent, const QString &name) -> QTreeWidgetItem* {
+        for (int i = 0; i < parent->childCount(); ++i)
+            if (parent->child(i)->text(0) == name)
+                return parent->child(i);
+        auto *item = new QTreeWidgetItem(parent);
+        item->setText(0, name);
+        return item;
+    };
+
+    // Root-level helper for the tree widget itself
+    auto findOrCreateRoot = [&](const QString &name) -> QTreeWidgetItem* {
+        for (int i = 0; i < m_sourceTree->topLevelItemCount(); ++i)
+            if (m_sourceTree->topLevelItem(i)->text(0) == name)
+                return m_sourceTree->topLevelItem(i);
+        auto *item = new QTreeWidgetItem(m_sourceTree);
+        item->setText(0, name);
+        return item;
+    };
+
+    // Try to find a common prefix to shorten the tree
+    std::vector<std::string> allPaths;
+    for (auto &sf : m_macho->stabsSourceFiles()) {
+        QString dir = QString::fromStdString(sf.directory);
+        QString fname = QString::fromStdString(sf.filename);
+        QString full = fname.startsWith(dir) ? fname : dir + fname;
+        allPaths.push_back(full.toStdString());
+    }
+
+    // Find longest common prefix
+    std::string prefix;
+    if (!allPaths.empty()) {
+        auto parts0 = splitPath(allPaths[0]);
+        for (size_t depth = 0; depth < parts0.size(); ++depth) {
+            bool allMatch = true;
+            for (size_t j = 1; j < allPaths.size(); ++j) {
+                auto pj = splitPath(allPaths[j]);
+                if (depth >= pj.size() || pj[depth] != parts0[depth])
+                    { allMatch = false; break; }
+            }
+            if (allMatch) {
+                prefix += "/" + parts0[depth];
+            } else break;
+        }
+    }
+    auto prefixParts = splitPath(prefix);
+    size_t prefixDepth = prefixParts.size();
+
+    // Build the tree
+    for (size_t si = 0; si < m_macho->stabsSourceFiles().size(); ++si) {
+        auto &sf = m_macho->stabsSourceFiles()[si];
+        std::string fullPath = allPaths[si];
+        auto parts = splitPath(fullPath);
+
+        // Skip common prefix
+        std::vector<std::string> relParts;
+        for (size_t d = prefixDepth; d < parts.size(); ++d)
+            relParts.push_back(parts[d]);
+        if (relParts.empty()) relParts.push_back(sf.filename);
+
+        // Walk/create the tree nodes for directories
+        QTreeWidgetItem *parent = nullptr;
+        for (size_t d = 0; d < relParts.size(); ++d) {
+            QString name = QString::fromStdString(relParts[d]);
+            bool isFile = (d == relParts.size() - 1);
+
+            QTreeWidgetItem *node;
+            if (!parent)
+                node = findOrCreateRoot(name);
+            else
+                node = findOrCreate(parent, name);
+
+            if (isFile) {
+                // This is the source file node
+                node->setText(1, hex32(sf.address));
+                int nFuncs = (int)sf.functionIndices.size();
+                node->setText(2, QString("%1 function%2").arg(nFuncs).arg(nFuncs != 1 ? "s" : ""));
+
+                // Add functions as children
+                for (size_t fi : sf.functionIndices) {
+                    auto &fn = m_macho->stabsFunctions()[fi];
+                    auto *fnItem = new QTreeWidgetItem(node);
+                    fnItem->setText(0, QString::fromStdString(fn.name));
+                    fnItem->setText(1, hex32(fn.address));
+                    if (fn.size > 0)
+                        fnItem->setText(2, QString("%1 bytes").arg(fn.size));
+                    fnItem->setData(0, Qt::UserRole, fn.address);
+                    // Distinguish functions visually
+                    fnItem->setForeground(0, QColor(0x4E, 0xC9, 0xB0));
+                }
+            } else {
+                // Directory node — show count
+                // (will be updated after all files are added)
+            }
+            parent = node;
+        }
+    }
+
+    // Add functions without source files
+    std::set<uint32_t> coveredAddrs;
+    for (auto &sf : m_macho->stabsSourceFiles())
+        for (size_t fi : sf.functionIndices)
+            coveredAddrs.insert(m_macho->stabsFunctions()[fi].address);
+
+    auto *noSrc = new QTreeWidgetItem(m_sourceTree);
+    noSrc->setText(0, "[No Source]");
+    int noSrcCount = 0;
+
+    // STABS funcs without source
+    for (auto &fn : m_macho->stabsFunctions()) {
+        if (fn.sourceFileIdx >= 0) continue;
+        auto *fnItem = new QTreeWidgetItem(noSrc);
+        fnItem->setText(0, QString::fromStdString(fn.name));
+        fnItem->setText(1, hex32(fn.address));
+        if (fn.size > 0) fnItem->setText(2, QString("%1 bytes").arg(fn.size));
+        fnItem->setData(0, Qt::UserRole, fn.address);
+        fnItem->setForeground(0, QColor(0x4E, 0xC9, 0xB0));
+        coveredAddrs.insert(fn.address);
+        noSrcCount++;
+    }
+
+    // Regular code symbols not covered by STABS
+    auto secs = m_macho->allSections();
+    for (auto &sym : m_macho->symbols()) {
+        if (sym.n_type & N_STAB) continue;
+        if ((sym.n_type & N_TYPE) != N_SECT || sym.n_sect == 0) continue;
+        int si = sym.n_sect - 1;
+        if (si < 0 || si >= (int)secs.size()) continue;
+        if (secs[si]->sectname != "__text" && secs[si]->sectname != "__textcoal_nt") continue;
+        if (coveredAddrs.count(sym.n_value)) continue;
+        coveredAddrs.insert(sym.n_value);
+
+        auto *fnItem = new QTreeWidgetItem(noSrc);
+        fnItem->setText(0, QString::fromStdString(demangle(sym.name)));
+        fnItem->setText(1, hex32(sym.n_value));
+        fnItem->setData(0, Qt::UserRole, sym.n_value);
+        fnItem->setForeground(0, QColor(0x4E, 0xC9, 0xB0));
+        noSrcCount++;
+    }
+    noSrc->setText(2, QString("%1 functions").arg(noSrcCount));
+
+    // Update directory node counts recursively
+    std::function<int(QTreeWidgetItem*)> countFuncs = [&](QTreeWidgetItem *item) -> int {
+        int count = 0;
+        for (int i = 0; i < item->childCount(); ++i) {
+            auto *child = item->child(i);
+            if (child->data(0, Qt::UserRole).isValid())
+                count++; // it's a function
+            else
+                count += countFuncs(child);
+        }
+        // If this is a directory (no address data, has children that aren't all functions)
+        if (!item->data(0, Qt::UserRole).isValid() && item->text(2).isEmpty() && count > 0)
+            item->setText(2, QString("%1 functions").arg(count));
+        return count;
+    };
+    for (int i = 0; i < m_sourceTree->topLevelItemCount(); ++i)
+        countFuncs(m_sourceTree->topLevelItem(i));
+
+    m_sourceTree->resizeColumnToContents(0);
+    m_sourceTree->resizeColumnToContents(1);
+
+    // Expand top two levels by default
+    for (int i = 0; i < m_sourceTree->topLevelItemCount(); ++i) {
+        m_sourceTree->topLevelItem(i)->setExpanded(true);
+        for (int j = 0; j < m_sourceTree->topLevelItem(i)->childCount(); ++j)
+            m_sourceTree->topLevelItem(i)->child(j)->setExpanded(true);
+    }
+
+    // Double-click: navigate to function
+    connect(m_sourceTree, &QTreeWidget::itemDoubleClicked, this, [this](QTreeWidgetItem *item, int) {
+        QVariant v = item->data(0, Qt::UserRole);
+        if (v.isValid()) {
+            uint32_t addr = v.toUInt();
+            if (addr) emit goToAddress(addr);
+        }
+    });
+
+    // Filter
+    connect(m_srcFilter, &QLineEdit::textChanged, this, [this](const QString &text) {
+        QRegularExpression re(text, QRegularExpression::CaseInsensitiveOption);
+        bool hasFilter = !text.isEmpty() && re.isValid();
+
+        std::function<bool(QTreeWidgetItem*)> filterItem = [&](QTreeWidgetItem *item) -> bool {
+            bool anyChildVisible = false;
+            for (int i = 0; i < item->childCount(); ++i) {
+                if (filterItem(item->child(i)))
+                    anyChildVisible = true;
+            }
+            bool selfMatch = !hasFilter || re.match(item->text(0)).hasMatch();
+            bool visible = selfMatch || anyChildVisible;
+            item->setHidden(!visible);
+            if (visible && hasFilter) item->setExpanded(true);
+            return visible;
+        };
+
+        for (int i = 0; i < m_sourceTree->topLevelItemCount(); ++i)
+            filterItem(m_sourceTree->topLevelItem(i));
     });
 }
 
