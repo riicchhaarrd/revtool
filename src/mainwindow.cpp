@@ -102,6 +102,41 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
         m_disasmWidget->goToAddress(addr);
         m_centralTabs->setCurrentWidget(m_disasmWidget);
     });
+
+    connect(m_infoWidget, &InfoWidget::decompileFileRequested, this, [this](int srcIdx) {
+        if (!m_macho) return;
+        auto &sources = m_macho->stabsSourceFiles();
+        if (srcIdx < 0 || srcIdx >= (int)sources.size()) return;
+        auto &sf = sources[srcIdx];
+
+        QString dir = QString::fromStdString(sf.directory);
+        QString fname = QString::fromStdString(sf.filename);
+        QString path = fname.startsWith(dir) ? fname : dir + fname;
+
+        QString out;
+        out += "// ============================================================\n";
+        out += "// Pseudo-C reconstruction of: " + path + "\n";
+        out += QString("// %1 function(s)\n").arg(sf.functionIndices.size());
+        out += "// ============================================================\n\n";
+
+        // Decompile each function in address order
+        std::vector<size_t> sorted = sf.functionIndices;
+        std::sort(sorted.begin(), sorted.end(), [&](size_t a, size_t b) {
+            return m_macho->stabsFunctions()[a].address < m_macho->stabsFunctions()[b].address;
+        });
+
+        for (size_t fi : sorted) {
+            auto &fn = m_macho->stabsFunctions()[fi];
+            if (fn.address == 0) continue;
+            out += PseudoDecompiler::decompile(*m_macho, fn.address);
+            out += "\n";
+        }
+
+        m_decompView->setPlainText(out);
+        m_decompDock->setWindowTitle("Pseudo-C  |  " + fname);
+        m_decompDock->show();
+        m_decompDock->raise();
+    });
 }
 
 void MainWindow::applyTheme(bool dark) {

@@ -9,6 +9,8 @@
 #include <QLineEdit>
 #include <QComboBox>
 #include <QLabel>
+#include <QPushButton>
+#include <QMenu>
 #include <cstdint>
 
 class InfoWidget : public QTabWidget {
@@ -21,6 +23,7 @@ signals:
     void sectionSelected(uint32_t fileoff, uint32_t size, uint32_t vmaddr, const QString &name);
     void symbolSelected(uint32_t addr);
     void goToAddress(uint32_t addr);
+    void decompileFileRequested(int stabsSourceIdx);
 
 private:
     void buildHeaderTab();
