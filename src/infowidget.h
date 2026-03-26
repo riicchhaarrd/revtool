@@ -7,6 +7,7 @@
 #include <QVBoxLayout>
 #include <QHeaderView>
 #include <QLineEdit>
+#include <QComboBox>
 #include <QLabel>
 #include <cstdint>
 
@@ -25,19 +26,22 @@ private:
     void buildHeaderTab();
     void buildLoadCmdsTab();
     void buildSegmentsTab();
+    void buildFunctionsTab();
     void buildSymbolsTab();
     void buildStabsTab();
     void buildDylibsTab();
+    void repopulateSymbols();
 
     MachOFile *m_macho = nullptr;
 
     QTextEdit    *m_headerInfo   = nullptr;
     QTableWidget *m_lcTable      = nullptr;
     QTreeWidget  *m_segTree      = nullptr;
+    QTableWidget *m_funcTable    = nullptr;
+    QLineEdit    *m_funcFilter   = nullptr;
     QTableWidget *m_symTable     = nullptr;
     QLineEdit    *m_symFilter    = nullptr;
+    QComboBox    *m_symKindCombo = nullptr;
     QTreeWidget  *m_stabsTree    = nullptr;
     QTableWidget *m_dylibTable   = nullptr;
-
-    std::vector<NList> m_filteredSyms;
 };
