@@ -51,8 +51,10 @@ public:
             // Only emit .h files, skip the source file itself
             if (inc.find(".h") == std::string::npos) continue;
             std::string incName = inc;
-            size_t slash = inc.rfind('/');
-            if (slash != std::string::npos) incName = inc.substr(slash + 1);
+            // Normalize backslashes
+            for (auto &c : incName) if (c == '\\') c = '/';
+            size_t slash = incName.rfind('/');
+            if (slash != std::string::npos) incName = incName.substr(slash + 1);
             if (emitted.count(incName)) continue;
             emitted.insert(incName);
             if (inc.find("/usr/") != std::string::npos || inc.find("/System/") != std::string::npos)
@@ -72,15 +74,23 @@ public:
         }
         emitTypeDefs(out, types, usedTypes);
 
-        // Emit global/static variables for this file
+        // Emit global/static variables that belong to this source file
+        // Determine address range of the file
+        uint32_t fileStartAddr = sf.address;
+        uint32_t fileEndAddr = (srcIdx + 1 < (int)sources.size()) ?
+            sources[srcIdx + 1].address : 0xFFFFFFFF;
+        std::set<std::string> emittedGlobals;
+        bool anyGlobals = false;
         for (auto &g : types.globals()) {
             if (g.address == 0) continue;
-            std::string typeStr = types.formatType(g.typeRef);
-            if (typeStr.empty()) typeStr = "int";
+            if (g.address < fileStartAddr || g.address >= fileEndAddr) continue;
+            if (emittedGlobals.count(g.name)) continue;
+            emittedGlobals.insert(g.name);
             out += QString::fromStdString(
                 (g.isStatic ? "static " : "") + types.formatDecl(g.typeRef, g.name)) + ";\n";
+            anyGlobals = true;
         }
-        if (!types.globals().empty()) out += "\n";
+        if (anyGlobals) out += "\n";
 
         // Decompile each function
         std::vector<size_t> sorted = sf.functionIndices;
@@ -175,8 +185,9 @@ private:
                 retType = m_types.formatType(m_func.returnType);
 
             std::string qual = m_func.isStatic ? "static " : "";
+            std::string funcName = cName(m_func.name);
             out += QString::fromStdString(qual + retType) + " " +
-                   QString::fromStdString(m_func.name) + "(";
+                   QString::fromStdString(funcName) + "(";
 
             if (!m_func.params.empty()) {
                 for (size_t i = 0; i < m_func.params.size(); ++i) {
@@ -482,9 +493,21 @@ private:
                     char fname[32]; snprintf(fname, sizeof(fname), "field_%X", (unsigned)off);
                     result = base + "->" + fname;
                 }
-                // bare var/temp dereference → var->field_0 (first field)
+                // bare pointer dereference — only use -> if we know it's a struct pointer
                 else if (addr && (addr->op == IROp::Var || addr->op == IROp::Temp)) {
-                    result = emitExpr(addr) + "->field_0";
+                    TypeRef addrType = exprType(addr);
+                    if (addrType != NullType && m_types.isStructPointer(addrType)) {
+                        // Resolve first field name
+                        TypeRef structRef = m_types.getPointedStruct(addrType);
+                        std::string access = structRef != NullType ?
+                            m_types.formatFieldAccess(structRef, 0) : "";
+                        if (!access.empty())
+                            result = emitExpr(addr) + "->" + access;
+                        else
+                            result = "*(" + emitExpr(addr) + ")";
+                    } else {
+                        result = "*(" + emitExpr(addr) + ")";
+                    }
                 } else {
                     result = "*(" + emitExpr(addr) + ")";
                 }
@@ -615,7 +638,7 @@ private:
                 break;
 
             case IROp::Call: {
-                result = e->name + "(";
+                result = cName(e->name) + "(";
                 for (size_t i = 0; i < e->kids.size(); ++i) {
                     if (i) result += ", ";
                     result += emitExpr(e->kids[i].get());
@@ -636,6 +659,25 @@ private:
             }
 
             return result;
+        }
+
+        // Convert C++ scope operator :: to _ for valid C identifiers
+        static std::string cName(const std::string &name) {
+            std::string out = name;
+            // Replace :: with _
+            size_t pos = 0;
+            while ((pos = out.find("::", pos)) != std::string::npos) {
+                out.replace(pos, 2, "_");
+            }
+            // Replace operator symbols
+            pos = 0;
+            while ((pos = out.find(" ", pos)) != std::string::npos) out.replace(pos, 1, "_");
+            pos = 0;
+            while ((pos = out.find("~", pos)) != std::string::npos) out.replace(pos, 1, "dtor_");
+            // Remove & from references in names
+            pos = 0;
+            while ((pos = out.find("&", pos)) != std::string::npos) out.erase(pos, 1);
+            return out;
         }
 
         std::string emitCast(IRExpr *e) {
