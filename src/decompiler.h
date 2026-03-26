@@ -185,6 +185,7 @@ public:
             "typedef void *FILE;\n"
             "typedef void *YY_BUFFER_STATE;\n"
             "typedef int yy_state_type;\n"
+            "typedef unsigned int u_int;\n"
             "typedef int jmp_buf[64];\n"
             "\n"
         );
@@ -222,15 +223,28 @@ private:
         auto *t = types.getType(ref);
         if (!t) return;
 
-        // Resolve through pointers/typedefs to find underlying struct/enum
+        // Resolve through pointers/typedefs/arrays to find underlying struct/enum
         if (t->kind == StabsTypeKind::Pointer || t->kind == StabsTypeKind::Typedef ||
-            t->kind == StabsTypeKind::Const || t->kind == StabsTypeKind::Volatile) {
+            t->kind == StabsTypeKind::Const || t->kind == StabsTypeKind::Volatile ||
+            t->kind == StabsTypeKind::Array) {
             if (t->targetType != NullType)
                 emitTypeDefsRecursive(out, types, t->targetType, emitted, depth + 1);
             return;
         }
         if (t->kind == StabsTypeKind::Struct || t->kind == StabsTypeKind::Union) {
-            if (t->name.empty() || t->fields.empty()) return;
+            if (t->name.empty()) return;
+            if (t->fields.empty()) {
+                // Forward declaration for struct with no known fields
+                std::string kw = (t->kind == StabsTypeKind::Union) ? "union" : "struct";
+                // Emit as opaque struct with size placeholder if we know the size
+                if (t->sizeBytes > 0) {
+                    out += QString::fromStdString(kw + " " + t->name +
+                        " { char _opaque[" + std::to_string(t->sizeBytes) + "]; };\n\n");
+                } else {
+                    out += QString::fromStdString(kw + " " + t->name + ";\n");
+                }
+                return;
+            }
             // Emit fields' types first
             for (auto &f : t->fields)
                 emitTypeDefsRecursive(out, types, f.typeRef, emitted, depth + 1);
@@ -308,18 +322,17 @@ private:
             for (auto &[id, type] : m_func.tempTypes) {
                 if (m_tempUseCount[id] > 1) {
                     std::string tname = "t" + std::to_string(id);
-                    std::string ttype = (type != NullType) ? m_types.formatType(type) : "int";
+                    std::string ttype = (type != NullType) ? m_types.formatType(type) : inferTempType(id);
                     out += "    " + QString::fromStdString(ttype + " " + tname) + ";\n";
                     declared.insert(tname);
                 }
             }
-            // Also scan for any temp references in the output that might not be in tempTypes
-            // (temps created without type info). Declare them as int.
+            // Also scan for any temp references not in tempTypes
             for (auto &[id, count] : m_tempUseCount) {
                 if (count <= 1) continue;
                 std::string tname = "t" + std::to_string(id);
                 if (declared.count(tname)) continue;
-                out += "    int " + QString::fromStdString(tname) + ";\n";
+                out += "    " + QString::fromStdString(inferTempType(id) + " " + tname) + ";\n";
                 declared.insert(tname);
             }
             if (!declared.empty()) out += "\n";
@@ -520,7 +533,14 @@ private:
             }
             case IRStmtKind::VarSet: {
                 std::string val = stmt.expr ? emitExpr(stmt.expr.get()) : "0";
-                out += pad(indent) + QString::fromStdString(stmt.destVar + " = " + val) + ";\n";
+                std::string dest = stmt.destVar;
+                // Check if destination is an array type — use dest[0] instead
+                if (stmt.destType != NullType) {
+                    auto *dt = m_types.resolveType(stmt.destType);
+                    if (dt && dt->kind == StabsTypeKind::Array)
+                        dest += "[0]";
+                }
+                out += pad(indent) + QString::fromStdString(dest + " = " + val) + ";\n";
                 break;
             }
             case IRStmtKind::Call: {
@@ -775,6 +795,30 @@ private:
             }
 
             return result;
+        }
+
+        // Infer temp type from its defining expression
+        std::string inferTempType(int id) {
+            auto it = m_tempDef.find(id);
+            if (it == m_tempDef.end() || !it->second) return "int";
+            auto *e = it->second;
+            // Float operations → float
+            if (e->op == IROp::Const && !tryFloatConst((uint32_t)e->value).empty()) return "float";
+            if (e->op == IROp::Cast &&
+                (e->castKind == CastKind::IntToFloat || e->castKind == CastKind::FloatToInt))
+                return e->castKind == CastKind::IntToFloat ? "float" : "int";
+            if (e->op == IROp::Var && (e->name.find(".0f") != std::string::npos ||
+                                        e->name.find(".0") != std::string::npos))
+                return "float";
+            // Comparison results → int (boolean)
+            if (e->op >= IROp::Eq && e->op <= IROp::Uge) return "int";
+            // Field access → use field type
+            if (e->op == IROp::Field && e->typeRef != NullType)
+                return m_types.formatType(e->typeRef);
+            // Call → use return type
+            if (e->op == IROp::Call && e->typeRef != NullType)
+                return m_types.formatType(e->typeRef);
+            return "int";
         }
 
         // Convert C++ scope operator :: to _ for valid C identifiers

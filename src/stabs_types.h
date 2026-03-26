@@ -339,8 +339,24 @@ public:
         int bitTarget = byteOffset * 8;
         // Exact match first
         for (auto &f : t->fields) {
-            if (f.bitOffset == bitTarget || f.bitOffset / 8 == byteOffset)
+            if (f.bitOffset == bitTarget || f.bitOffset / 8 == byteOffset) {
+                // If this field is a struct, the code might be accessing its first sub-field.
+                // We drill down one level if the struct has a known scalar first field.
+                auto *ft = resolveType(f.typeRef);
+                if (ft && (ft->kind == StabsTypeKind::Struct || ft->kind == StabsTypeKind::Union) &&
+                    !ft->fields.empty()) {
+                    auto *firstField = &ft->fields[0];
+                    auto *firstType = resolveType(firstField->typeRef);
+                    // Only drill if first field is a simple scalar (not another struct)
+                    if (firstType && firstType->kind != StabsTypeKind::Struct &&
+                        firstType->kind != StabsTypeKind::Union &&
+                        firstType->kind != StabsTypeKind::Array &&
+                        firstField->bitOffset == 0 && !firstField->name.empty()) {
+                        return f.name + "." + firstField->name;
+                    }
+                }
                 return f.name;
+            }
         }
         // Check if offset falls inside a larger field (array or sub-struct)
         for (auto &f : t->fields) {
@@ -799,30 +815,43 @@ private:
 
         // C++ inheritance: !N,offset,vis,...
         if (ch == '!') {
-            // Parse C++ base class info, then struct body
             pos++;
             int numBases = (int)parseIntVal(s, pos);
             if (pos < s.size() && s[pos] == ',') pos++;
+            auto &ti = m_types[ref];
+            if (ti.kind == StabsTypeKind::Unknown) ti.kind = StabsTypeKind::Struct;
+
             for (int b = 0; b < numBases; ++b) {
-                // Skip: virtual_flag, visibility_access, offset, base_type
-                while (pos < s.size() && s[pos] != ',' && s[pos] != ';') pos++;
+                // Parse: virtual_flag + visibility_access digits, then base type
+                while (pos < s.size() && s[pos] != ',' && s[pos] != ';' && s[pos] != '(') pos++;
                 if (pos < s.size() && s[pos] == ',') pos++;
-                // Skip base type ref (and possible inline def)
+                // Parse base type ref
+                TypeRef baseRef = NullType;
                 if (pos < s.size() && (s[pos] == '(' || (s[pos] >= '0' && s[pos] <= '9'))) {
-                    parseTypeRef(s, pos);
+                    baseRef = parseTypeRef(s, pos);
                     if (pos < s.size() && s[pos] == '=') {
                         pos++;
-                        skipTypeDef(s, pos);
+                        parseTypeDef(s, pos, baseRef);
                     }
                 }
                 if (pos < s.size() && s[pos] == ';') pos++;
                 if (pos < s.size() && s[pos] == ',') pos++;
+
+                // Copy base class fields into derived class
+                if (baseRef != NullType) {
+                    auto *baseType = getType(baseRef);
+                    if (!baseType) baseType = resolveType(baseRef);
+                    if (baseType && (baseType->kind == StabsTypeKind::Struct ||
+                                     baseType->kind == StabsTypeKind::Union)) {
+                        for (auto &bf : baseType->fields) {
+                            if (!bf.name.empty() && bf.name[0] != '/' && bf.name[0] != '!' &&
+                                bf.name.find("::") == std::string::npos)
+                                ti.fields.push_back(bf);
+                        }
+                    }
+                }
             }
-            // Now parse struct fields
-            auto &ti = m_types[ref];
-            if (ti.kind == StabsTypeKind::Unknown) {
-                ti.kind = StabsTypeKind::Struct;
-            }
+            // Parse derived class's own fields
             parseStructFields(s, pos, ti);
             return;
         }
