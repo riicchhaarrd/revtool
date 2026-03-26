@@ -413,9 +413,17 @@ private:
                     }
                 }
             }
+            // If we have a displacement but no struct type, use pointer arithmetic
             if (m.disp != 0) {
-                char fname[32]; snprintf(fname, sizeof(fname), "field_%X", (unsigned)(int)m.disp);
-                return IRExpr::mkField(std::move(base), fname, (int)m.disp);
+                // Only use ->field notation if base is known to be a pointer type
+                if (baseType != NullType) {
+                    auto *resolved = m_types.resolveType(baseType);
+                    if (resolved && resolved->kind == StabsTypeKind::Pointer) {
+                        char fname[32]; snprintf(fname, sizeof(fname), "field_%X", (unsigned)(int)m.disp);
+                        return IRExpr::mkField(std::move(base), fname, (int)m.disp);
+                    }
+                }
+                return IRExpr::mkLoad(IRExpr::mkBinary(IROp::Add, std::move(base), IRExpr::mkConst(m.disp)));
             }
             return IRExpr::mkLoad(std::move(base));
         }
@@ -1509,13 +1517,20 @@ private:
             double val;
             memcpy(&val, p, 8);
             char buf[64]; snprintf(buf, sizeof(buf), "%.10g", val);
+            // Ensure decimal point for valid C
+            if (strchr(buf, '.') == nullptr && strchr(buf, 'e') == nullptr)
+                strcat(buf, ".0");
             return IRExpr::mkVar(buf);
         } else {
             const uint8_t *p = m_mf.bytesAt((uint32_t)off, 4);
             if (!p) return nullptr;
             float val;
             memcpy(&val, p, 4);
-            char buf[64]; snprintf(buf, sizeof(buf), "%.7gf", val);
+            char buf[64]; snprintf(buf, sizeof(buf), "%.7g", val);
+            // Ensure decimal point for valid C float suffix
+            if (strchr(buf, '.') == nullptr && strchr(buf, 'e') == nullptr)
+                strcat(buf, ".0");
+            strcat(buf, "f");
             return IRExpr::mkVar(buf);
         }
     }

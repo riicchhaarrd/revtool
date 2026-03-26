@@ -44,6 +44,8 @@ public:
 
         QString out;
         out += "/* " + path + " */\n\n";
+        out += platformTypedefs();
+        out += "\n";
 
         // Emit includes relevant to this source file
         std::set<std::string> emitted;
@@ -106,6 +108,90 @@ public:
         }
 
         return clangFormat(out);
+    }
+
+    // Platform type definitions for compilable output
+    static QString platformTypedefs() {
+        return QString(
+            "/* Platform types */\n"
+            "#include <stdint.h>\n"
+            "#include <stddef.h>\n"
+            "typedef int BOOL;\n"
+            "typedef int Bool;\n"
+            "typedef int qboolean;\n"
+            "typedef unsigned int DWORD;\n"
+            "typedef unsigned int UINT;\n"
+            "typedef unsigned int UINT32;\n"
+            "typedef unsigned short UINT16;\n"
+            "typedef unsigned char UINT8;\n"
+            "typedef int INT32;\n"
+            "typedef short INT16;\n"
+            "typedef int HRESULT;\n"
+            "typedef unsigned int ULONG;\n"
+            "typedef long LONG;\n"
+            "typedef unsigned char BYTE;\n"
+            "typedef unsigned char byte;\n"
+            "typedef unsigned char GLubyte;\n"
+            "typedef unsigned int GLenum;\n"
+            "typedef int GLint;\n"
+            "typedef unsigned int GLuint;\n"
+            "typedef float GLfloat;\n"
+            "typedef int GLsizei;\n"
+            "typedef void *HANDLE;\n"
+            "typedef void *HCURSOR;\n"
+            "typedef void *HWND;\n"
+            "typedef void *WindowRef;\n"
+            "typedef void *ControlRef;\n"
+            "typedef void *EventLoopTimerRef;\n"
+            "typedef void *EventTargetRef;\n"
+            "typedef void *TXNObject;\n"
+            "typedef void *Handle;\n"
+            "typedef void *Movie;\n"
+            "typedef void *Track;\n"
+            "typedef void *Media;\n"
+            "typedef void *CGDirectDisplayID;\n"
+            "typedef void *CGGammaValue;\n"
+            "typedef void *CFStringRef;\n"
+            "typedef void *CFURLRef;\n"
+            "typedef unsigned int CGDisplayFadeReservationToken;\n"
+            "typedef float CGFloat;\n"
+            "typedef int Boolean;\n"
+            "typedef short SInt16;\n"
+            "typedef int SInt32;\n"
+            "typedef long long SInt64;\n"
+            "typedef unsigned char UInt8;\n"
+            "typedef unsigned short UInt16;\n"
+            "typedef unsigned int UInt32;\n"
+            "typedef unsigned long long UInt64;\n"
+            "typedef short OSErr;\n"
+            "typedef int OSStatus;\n"
+            "typedef unsigned int OSType;\n"
+            "typedef unsigned char Str255[256];\n"
+            "typedef float vec_t;\n"
+            "typedef vec_t vec2_t[2];\n"
+            "typedef vec_t vec3_t[3];\n"
+            "typedef vec_t vec4_t[4];\n"
+            "typedef int fileHandle_t;\n"
+            "typedef unsigned short r_index_t;\n"
+            "typedef int MaterialHandle;\n"
+            "typedef void *XAnim;\n"
+            "typedef void *XAnimNotify;\n"
+            "typedef void *ContextRef;\n"
+            "typedef void *FSRef;\n"
+            "typedef struct { float x, y; } CGPoint;\n"
+            "typedef struct { float width, height; } CGSize;\n"
+            "typedef struct { CGPoint origin; CGSize size; } CGRect;\n"
+            "typedef struct { short top, left, bottom, right; } MacRect;\n"
+            "typedef struct { int x, y; } Point;\n"
+            "typedef int D3DTEXTUREFILTERTYPE;\n"
+            "typedef int D3DFORMAT;\n"
+            "typedef int D3DDEVTYPE;\n"
+            "typedef void *FILE;\n"
+            "typedef void *YY_BUFFER_STATE;\n"
+            "typedef int yy_state_type;\n"
+            "typedef int jmp_buf[64];\n"
+            "\n"
+        );
     }
 
     // Run clang-format on the output for clean formatting
@@ -215,14 +301,23 @@ private:
                                           : "int " + l.name) + ";\n";
             }
 
-            // Declare temps that are used more than once and aren't copy-propagated away
+            // Declare temps that are used more than once
             for (auto &[id, type] : m_func.tempTypes) {
-                if (m_tempUseCount[id] > 1 && !m_copyPropagated.count(id)) {
+                if (m_tempUseCount[id] > 1) {
                     std::string tname = "t" + std::to_string(id);
                     std::string ttype = (type != NullType) ? m_types.formatType(type) : "int";
                     out += "    " + QString::fromStdString(ttype + " " + tname) + ";\n";
                     declared.insert(tname);
                 }
+            }
+            // Also scan for any temp references in the output that might not be in tempTypes
+            // (temps created without type info). Declare them as int.
+            for (auto &[id, count] : m_tempUseCount) {
+                if (count <= 1) continue;
+                std::string tname = "t" + std::to_string(id);
+                if (declared.count(tname)) continue;
+                out += "    int " + QString::fromStdString(tname) + ";\n";
+                declared.insert(tname);
             }
             if (!declared.empty()) out += "\n";
 
@@ -398,14 +493,23 @@ private:
                 if (a->op == IROp::Field) {
                     out += pad(indent) + QString::fromStdString(emitExpr(a) + " = " + val) + ";\n";
                 }
-                // Add(base, const) → base->field_XX = val
+                // Add(base, const) → base->field_XX = val (only for pointer types)
                 else if (a->op == IROp::Add && a->kids.size() == 2 &&
                          a->kids[1]->isConst() && a->kids[1]->value > 0 &&
                          (a->kids[0]->op == IROp::Var || a->kids[0]->op == IROp::Temp)) {
-                    std::string base = emitExpr(a->kids[0].get());
-                    int off = (int)a->kids[1]->value;
-                    char fname[32]; snprintf(fname, sizeof(fname), "field_%X", (unsigned)off);
-                    out += pad(indent) + QString::fromStdString(base + "->" + fname + " = " + val) + ";\n";
+                    TypeRef baseType = exprType(a->kids[0].get());
+                    bool isPtr = (baseType != NullType) &&
+                        (m_types.isStructPointer(baseType) ||
+                         (m_types.resolveType(baseType) &&
+                          m_types.resolveType(baseType)->kind == StabsTypeKind::Pointer));
+                    if (isPtr) {
+                        std::string base = emitExpr(a->kids[0].get());
+                        int off = (int)a->kids[1]->value;
+                        char fname[32]; snprintf(fname, sizeof(fname), "field_%X", (unsigned)off);
+                        out += pad(indent) + QString::fromStdString(base + "->" + fname + " = " + val) + ";\n";
+                    } else {
+                        out += pad(indent) + QString::fromStdString("*(" + emitExpr(a) + ") = " + val) + ";\n";
+                    }
                 } else {
                     out += pad(indent) + QString::fromStdString("*(" + emitExpr(a) + ") = " + val) + ";\n";
                 }
@@ -484,14 +588,23 @@ private:
 
             case IROp::Load: {
                 auto *addr = e->kids[0].get();
-                // (base + const) → base->field_XX
+                // (base + const) → base->field_XX (only if base looks like a pointer)
                 if (addr && addr->op == IROp::Add && addr->kids.size() == 2 &&
                     addr->kids[1]->isConst() && addr->kids[1]->value >= 0 &&
                     (addr->kids[0]->op == IROp::Var || addr->kids[0]->op == IROp::Temp)) {
-                    std::string base = emitExpr(addr->kids[0].get());
-                    int off = (int)addr->kids[1]->value;
-                    char fname[32]; snprintf(fname, sizeof(fname), "field_%X", (unsigned)off);
-                    result = base + "->" + fname;
+                    TypeRef baseType = exprType(addr->kids[0].get());
+                    bool isPtr = (baseType != NullType) &&
+                        (m_types.isStructPointer(baseType) ||
+                         (m_types.resolveType(baseType) &&
+                          m_types.resolveType(baseType)->kind == StabsTypeKind::Pointer));
+                    if (isPtr) {
+                        std::string base = emitExpr(addr->kids[0].get());
+                        int off = (int)addr->kids[1]->value;
+                        char fname[32]; snprintf(fname, sizeof(fname), "field_%X", (unsigned)off);
+                        result = base + "->" + fname;
+                    } else {
+                        result = "*(" + emitExpr(addr) + ")";
+                    }
                 }
                 // bare pointer dereference — only use -> if we know it's a struct pointer
                 else if (addr && (addr->op == IROp::Var || addr->op == IROp::Temp)) {
@@ -722,12 +835,12 @@ private:
             if (bits == 0xBF800000) return "-1.0f";
             if (bits == 0xC0000000) return "-2.0f";
             // For other float-range values, show the float
-            if (f > 0.001f && f < 1000000.0f) {
-                char buf[32]; snprintf(buf, sizeof(buf), "%.6gf", f);
-                return buf;
-            }
-            if (f < -0.001f && f > -1000000.0f) {
-                char buf[32]; snprintf(buf, sizeof(buf), "%.6gf", f);
+            if ((f > 0.001f && f < 1000000.0f) || (f < -0.001f && f > -1000000.0f)) {
+                char buf[32]; snprintf(buf, sizeof(buf), "%.6g", f);
+                // Ensure decimal point before 'f' suffix
+                if (strchr(buf, '.') == nullptr && strchr(buf, 'e') == nullptr)
+                    strcat(buf, ".0");
+                strcat(buf, "f");
                 return buf;
             }
             return "";
