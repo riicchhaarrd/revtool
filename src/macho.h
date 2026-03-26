@@ -1,5 +1,6 @@
 #pragma once
 #include "demangle.h"
+#include "stabs_types.h"
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -149,9 +150,10 @@ struct StabsFunction {
     uint32_t    size = 0;
     bool        isGlobal = false;
     int         sourceFileIdx = -1;
+    TypeRef     returnType = NullType;
     std::vector<std::pair<uint32_t, int>> lineMap; // addr -> line number
-    std::vector<std::string> params;
-    std::vector<std::string> locals;
+    std::vector<StabsTypedVar> params;
+    std::vector<StabsTypedVar> locals;
 };
 
 struct StabsSourceFile {
@@ -188,6 +190,7 @@ public:
     const std::vector<Dylib>&       dylibs()       const { return m_dylibs; }
     const std::vector<StabsFunction>&   stabsFunctions()   const { return m_stabsFuncs; }
     const std::vector<StabsSourceFile>& stabsSourceFiles() const { return m_stabsSources; }
+    const StabsTypeTable&               typeTable()        const { return m_typeTable; }
     uint32_t entryPoint() const { return m_entryPoint; }
 
     // Build a flat section list
@@ -499,7 +502,6 @@ private:
             switch (sym.n_type) {
             case N_SO: {
                 if (sym.name.empty()) {
-                    // End of source file
                     curSourceIdx = -1;
                     curDir.clear();
                 } else if (sym.name.back() == '/') {
@@ -516,19 +518,20 @@ private:
             }
             case N_FUN: {
                 if (!sym.name.empty() && sym.n_sect != 0) {
-                    // Function start
                     StabsFunction fn;
                     fn.rawName = sym.name;
                     fn.name = demangle(cleanStabsName(sym.name));
                     fn.address = sym.n_value;
                     fn.isGlobal = (sym.name.find(":F") != std::string::npos);
                     fn.sourceFileIdx = curSourceIdx;
+                    // Parse return type from STABS encoding
+                    auto parsed = m_typeTable.parseSymbol(sym.name);
+                    fn.returnType = parsed.typeRef;
                     m_stabsFuncs.push_back(std::move(fn));
                     curFunc = &m_stabsFuncs.back();
                     if (curSourceIdx >= 0)
                         m_stabsSources[curSourceIdx].functionIndices.push_back(m_stabsFuncs.size()-1);
                 } else if (sym.name.empty() || sym.n_sect == 0) {
-                    // Function end — n_value is the size
                     if (curFunc) {
                         curFunc->size = sym.n_value;
                         curFunc = nullptr;
@@ -540,13 +543,63 @@ private:
                 if (curFunc)
                     curFunc->lineMap.push_back({sym.n_value, sym.n_desc});
                 break;
-            case N_PSYM:
-                if (curFunc)
-                    curFunc->params.push_back(cleanStabsName(sym.name));
+            case N_PSYM: {
+                auto parsed = m_typeTable.parseSymbol(sym.name);
+                if (curFunc) {
+                    StabsTypedVar tv;
+                    tv.name = parsed.name;
+                    tv.typeRef = parsed.typeRef;
+                    tv.stackOffset = (int32_t)sym.n_value; // ebp-relative offset
+                    curFunc->params.push_back(tv);
+                }
                 break;
-            case N_LSYM:
-                if (curFunc)
-                    curFunc->locals.push_back(cleanStabsName(sym.name));
+            }
+            case N_LSYM: {
+                auto parsed = m_typeTable.parseSymbol(sym.name);
+                if (parsed.isType || parsed.descriptor == 't' || parsed.descriptor == 'T') {
+                    // Type definition — already registered in type table
+                } else if (curFunc) {
+                    // Local variable
+                    StabsTypedVar tv;
+                    tv.name = parsed.name;
+                    tv.typeRef = parsed.typeRef;
+                    tv.stackOffset = (int32_t)sym.n_value; // ebp-relative offset
+                    curFunc->locals.push_back(tv);
+                } else {
+                    // File-scope type definition (no current function)
+                    m_typeTable.parseSymbol(sym.name);
+                }
+                break;
+            }
+            case N_GSYM: {
+                auto parsed = m_typeTable.parseSymbol(sym.name);
+                if (parsed.descriptor == 'G')
+                    m_typeTable.addGlobal(parsed.name, sym.n_value, parsed.typeRef, false);
+                break;
+            }
+            case N_STSYM:
+            case N_LCSYM: {
+                auto parsed = m_typeTable.parseSymbol(sym.name);
+                m_typeTable.addGlobal(parsed.name, sym.n_value, parsed.typeRef, true);
+                break;
+            }
+            case N_RSYM: {
+                // Register variable — parse type info
+                auto parsed = m_typeTable.parseSymbol(sym.name);
+                if (curFunc) {
+                    StabsTypedVar tv;
+                    tv.name = parsed.name;
+                    tv.typeRef = parsed.typeRef;
+                    tv.stackOffset = 0; // register, not stack
+                    curFunc->locals.push_back(tv);
+                }
+                break;
+            }
+            case N_BINCL:
+                m_typeTable.addInclude(sym.name);
+                break;
+            case N_SOL:
+                m_typeTable.addInclude(sym.name);
                 break;
             default:
                 break;
@@ -603,4 +656,5 @@ private:
     std::vector<StabsFunction>   m_stabsFuncs;
     std::vector<StabsSourceFile> m_stabsSources;
     std::unordered_map<uint32_t, std::string> m_funcMap;
+    StabsTypeTable               m_typeTable;
 };

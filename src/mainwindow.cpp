@@ -37,7 +37,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     m_decompView->setReadOnly(true);
     m_decompView->setFont(QFont("Monospace", 11));
     m_cHighlight = new CSyntaxHighlighter(m_decompView->document());
-    m_decompDock = new QDockWidget("Pseudo-C", this);
+    m_decompDock = new QDockWidget("Decompiled C", this);
     m_decompDock->setWidget(m_decompView);
     m_decompDock->setMinimumWidth(380);
     addDockWidget(Qt::RightDockWidgetArea, m_decompDock);
@@ -115,7 +115,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
 
         QString out;
         out += "// ============================================================\n";
-        out += "// Pseudo-C reconstruction of: " + path + "\n";
+        out += "// Decompiled C reconstruction of: " + path + "\n";
         out += QString("// %1 function(s)\n").arg(sf.functionIndices.size());
         out += "// ============================================================\n\n";
 
@@ -128,12 +128,12 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
         for (size_t fi : sorted) {
             auto &fn = m_macho->stabsFunctions()[fi];
             if (fn.address == 0) continue;
-            out += PseudoDecompiler::decompile(*m_macho, fn.address);
+            out += Decompiler::decompile(*m_macho, fn.address);
             out += "\n";
         }
 
         m_decompView->setPlainText(out);
-        m_decompDock->setWindowTitle("Pseudo-C  |  " + fname);
+        m_decompDock->setWindowTitle("Decompiled C  |  " + fname);
         m_decompDock->show();
         m_decompDock->raise();
     });
@@ -301,7 +301,7 @@ void MainWindow::disassembleCurrentSection() {
 
 void MainWindow::decompileFunction(uint32_t addr) {
     if (!m_macho) return;
-    QString code = PseudoDecompiler::decompile(*m_macho, addr);
+    QString code = Decompiler::decompile(*m_macho, addr);
     m_decompView->setPlainText(code);
     m_decompDock->show();
     m_decompDock->raise();

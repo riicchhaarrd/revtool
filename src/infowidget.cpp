@@ -631,7 +631,13 @@ void InfoWidget::buildStabsTab() {
                 details += "params: ";
                 for (size_t p = 0; p < fn.params.size(); ++p) {
                     if (p) details += ", ";
-                    details += QString::fromStdString(fn.params[p]);
+                    auto &param = fn.params[p];
+                    if (param.typeRef != NullType) {
+                        details += QString::fromStdString(
+                            m_macho->typeTable().formatDecl(param.typeRef, param.name));
+                    } else {
+                        details += QString::fromStdString(param.name);
+                    }
                 }
             }
             if (!fn.lineMap.empty()) {
