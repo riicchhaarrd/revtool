@@ -21,7 +21,18 @@ public:
     IRFunc liftFunction(uint32_t funcAddr) {
         IRFunc func;
         const StabsFunction *sfn = m_mf.stabsFunctionAt(funcAddr);
-        uint32_t endAddr = sfn && sfn->size > 0 ? funcAddr + sfn->size : funcAddr + 0x2000;
+        uint32_t endAddr;
+        if (sfn && sfn->size > 0) {
+            endAddr = funcAddr + sfn->size;
+        } else {
+            // Find the next function's address as an upper bound
+            endAddr = funcAddr + 0x2000;
+            auto &funcMap = m_mf.functionMap();
+            for (auto &[addr, name] : funcMap) {
+                if (addr > funcAddr && addr < endAddr)
+                    endAddr = addr;
+            }
+        }
         auto &funcMap = m_mf.functionMap();
 
         // Function metadata from STABS
@@ -54,19 +65,40 @@ public:
         size_t count = cs_disasm(cs, code, codeLen, funcAddr, 0, &insn);
         if (count == 0) { cs_close(&cs); return func; }
 
-        // Find actual end (first ret)
+        // Find actual end — use STABS size if available, else find the right ret
         size_t funcEndIdx = count;
-        for (size_t i = 0; i < count; ++i) {
-            if (insn[i].detail) {
-                for (uint8_t g = 0; g < insn[i].detail->groups_count; ++g) {
-                    if (insn[i].detail->groups[g] == CS_GRP_RET) {
-                        funcEndIdx = i + 1;
-                        goto found_end;
-                    }
+        if (sfn && sfn->size > 0) {
+            // Use the known function size from STABS
+            uint32_t funcEnd = funcAddr + sfn->size;
+            for (size_t i = 0; i < count; ++i) {
+                if (insn[i].address >= funcEnd) {
+                    funcEndIdx = i;
+                    break;
                 }
             }
+        } else {
+            // If we detect jump tables, use last ret; otherwise use first ret
+            bool hasJumpTable = false;
+            size_t firstRet = count, lastRet = 0;
+            for (size_t i = 0; i < count; ++i) {
+                if (insn[i].detail) {
+                    for (uint8_t g = 0; g < insn[i].detail->groups_count; ++g) {
+                        if (insn[i].detail->groups[g] == CS_GRP_RET) {
+                            if (firstRet == count) firstRet = i + 1;
+                            lastRet = i + 1;
+                        }
+                    }
+                    // Quick check for indirect jmp with scale=4 (potential jump table)
+                    if (std::string(insn[i].mnemonic) == "jmp" &&
+                        insn[i].detail->x86.op_count > 0 &&
+                        insn[i].detail->x86.operands[0].type == X86_OP_MEM &&
+                        insn[i].detail->x86.operands[0].mem.scale == 4)
+                        hasJumpTable = true;
+                }
+            }
+            funcEndIdx = hasJumpTable ? lastRet : firstRet;
+            if (funcEndIdx == 0) funcEndIdx = count;
         }
-        found_end:
 
         // ── Pass 1: find all branch targets → basic block boundaries ─
         std::set<uint32_t> blockStarts;
@@ -104,21 +136,31 @@ public:
                         tableAddr = m_picBase + (int)mem.disp;
 
                     if (tableAddr) {
-                        // Find the bounds check (cmp + ja) preceding this jmp
+                        // Find the bounds check (cmp + ja/jbe) preceding this jmp
                         int numCases = 0;
                         int switchBase = 0;
                         uint32_t defaultAddr = 0;
-                        for (int back = (int)i - 1; back >= 0 && back >= (int)i - 5; --back) {
+                        for (int back = (int)i - 1; back >= 0 && back >= (int)i - 8; --back) {
                             std::string bmn = insn[back].mnemonic;
-                            if (bmn == "ja" && insn[back].detail &&
+                            // ja default_label (unsigned above = out of range)
+                            if ((bmn == "ja" || bmn == "jnbe") && insn[back].detail &&
                                 insn[back].detail->x86.op_count > 0 &&
                                 insn[back].detail->x86.operands[0].type == X86_OP_IMM) {
                                 defaultAddr = (uint32_t)insn[back].detail->x86.operands[0].imm;
                             }
+                            // jbe in_range → default is the fallthrough after jbe (next insn)
+                            if ((bmn == "jbe" || bmn == "jna") && !defaultAddr && insn[back].detail &&
+                                insn[back].detail->x86.op_count > 0 &&
+                                insn[back].detail->x86.operands[0].type == X86_OP_IMM) {
+                                // jbe jumps INTO the switch; default is where we'd go if NOT taken
+                                // Actually for switch: cmp + ja is the normal pattern.
+                                // cmp + jbe means jbe goes to the switch body, and fall-through is default
+                                // This is less common; skip for now
+                            }
                             if (bmn == "cmp" && insn[back].detail &&
-                                insn[back].detail->x86.op_count == 2 &&
-                                insn[back].detail->x86.operands[1].type == X86_OP_IMM) {
-                                numCases = (int)insn[back].detail->x86.operands[1].imm + 1;
+                                insn[back].detail->x86.op_count >= 2 &&
+                                insn[back].detail->x86.operands[insn[back].detail->x86.op_count-1].type == X86_OP_IMM) {
+                                numCases = (int)insn[back].detail->x86.operands[insn[back].detail->x86.op_count-1].imm + 1;
                             }
                             if (bmn == "sub" && insn[back].detail &&
                                 insn[back].detail->x86.op_count == 2 &&

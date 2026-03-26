@@ -97,6 +97,15 @@ public:
         int n = (int)func.blocks.size();
         if (n == 0) return StructNode::mkBlock();
 
+        // For large functions, skip expensive structuring and emit flat blocks
+        if (n > 80) {
+            auto block = StructNode::mkBlock();
+            for (int i = 0; i < n; ++i)
+                if (!func.blocks[i].stmts.empty())
+                    block->children.push_back(StructNode::mkSeq(i, 0, (int)func.blocks[i].stmts.size()));
+            return block;
+        }
+
         // Compute dominators and loop info
         computeDominators();
         findLoops();
@@ -117,47 +126,70 @@ private:
         int n = (int)m_func->blocks.size();
         m_idom.assign(n, -1);
         m_idom[0] = 0;
+        if (n <= 1) return;
 
-        // Iterative dominator computation
-        std::vector<std::set<int>> doms(n);
-        for (int i = 0; i < n; ++i)
-            for (int j = 0; j < n; ++j)
-                doms[i].insert(j);
-        doms[0] = {0};
+        // Cooper-Harvey-Kennedy algorithm for immediate dominators
+        // Much faster than the iterative set-based approach for large CFGs
+        // Uses reverse postorder numbering
 
-        bool changed = true;
-        for (int iter = 0; iter < n * 2 && changed; ++iter) {
-            changed = false;
-            for (int i = 1; i < n; ++i) {
-                auto &bb = m_func->blocks[i];
-                std::set<int> newDom;
-                bool first = true;
-                for (int p : bb.preds) {
-                    if (p < 0 || p >= n) continue;
-                    if (first) { newDom = doms[p]; first = false; }
-                    else {
-                        std::set<int> inter;
-                        std::set_intersection(newDom.begin(), newDom.end(),
-                                              doms[p].begin(), doms[p].end(),
-                                              std::inserter(inter, inter.begin()));
-                        newDom = inter;
+        // Compute reverse postorder
+        std::vector<int> rpo;       // rpo[i] = block id at position i
+        std::vector<int> rpoNum(n, -1); // rpoNum[blockId] = position in rpo
+        {
+            std::vector<bool> visited(n, false);
+            std::vector<int> postorder;
+            // Iterative DFS
+            std::vector<std::pair<int, int>> stack = {{0, 0}}; // (block, child_index)
+            visited[0] = true;
+            while (!stack.empty()) {
+                auto &[node, ci] = stack.back();
+                auto &succs = m_func->blocks[node].succs;
+                if (ci < (int)succs.size()) {
+                    int s = succs[ci++];
+                    if (s >= 0 && s < n && !visited[s]) {
+                        visited[s] = true;
+                        stack.push_back({s, 0});
                     }
+                } else {
+                    postorder.push_back(node);
+                    stack.pop_back();
                 }
-                newDom.insert(i);
-                if (newDom != doms[i]) { doms[i] = newDom; changed = true; }
+            }
+            rpo.resize(postorder.size());
+            for (int i = 0; i < (int)postorder.size(); ++i) {
+                rpo[postorder.size() - 1 - i] = postorder[i];
+                rpoNum[postorder[i]] = (int)postorder.size() - 1 - i;
             }
         }
 
-        // Extract immediate dominators
-        for (int i = 1; i < n; ++i) {
-            auto d = doms[i];
-            d.erase(i);
-            if (d.empty()) { m_idom[i] = 0; continue; }
-            // idom = the dominator of i that is dominated by all others in d
-            int best = *d.rbegin(); // heuristic: pick the highest-numbered
-            for (int c : d)
-                if (doms[c].count(best) == 0) best = c;
-            m_idom[i] = best;
+        // Intersect two nodes in the dominator tree
+        auto intersect = [&](int b1, int b2) -> int {
+            int f1 = b1, f2 = b2;
+            while (f1 != f2) {
+                while (rpoNum[f1] > rpoNum[f2]) f1 = m_idom[f1];
+                while (rpoNum[f2] > rpoNum[f1]) f2 = m_idom[f2];
+            }
+            return f1;
+        };
+
+        // Iterative dominator computation
+        bool changed = true;
+        for (int iter = 0; iter < n && changed; ++iter) {
+            changed = false;
+            for (int idx = 1; idx < (int)rpo.size(); ++idx) {
+                int b = rpo[idx];
+                int newIdom = -1;
+                for (int p : m_func->blocks[b].preds) {
+                    if (p < 0 || p >= n || m_idom[p] == -1) continue;
+                    if (newIdom == -1) newIdom = p;
+                    else newIdom = intersect(newIdom, p);
+                }
+                if (newIdom == -1) newIdom = 0;
+                if (m_idom[b] != newIdom) {
+                    m_idom[b] = newIdom;
+                    changed = true;
+                }
+            }
         }
     }
 
@@ -402,10 +434,12 @@ private:
     int findConvergence(int a, int b, int regionEnd, const std::set<int> &visited) {
         int n = (int)m_func->blocks.size();
         // Walk both paths forward and find first common reachable block
+        // Limit search depth to avoid O(n^3) on large functions
         std::set<int> reachA, reachB;
         std::vector<int> workA = {a}, workB = {b};
+        int maxSteps = std::min(n, 50);
 
-        for (int step = 0; step < n; ++step) {
+        for (int step = 0; step < maxSteps; ++step) {
             std::vector<int> nextA, nextB;
             for (int x : workA) {
                 if (x < 0 || x >= n || reachA.count(x)) continue;

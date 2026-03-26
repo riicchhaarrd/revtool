@@ -19,7 +19,7 @@
 class Decompiler {
 public:
     // Decompile a single function
-    static QString decompile(const MachOFile &mf, uint32_t funcAddr) {
+    static QString decompile(const MachOFile &mf, uint32_t funcAddr, bool format = true) {
         Lifter lifter(mf);
         IRFunc func = lifter.liftFunction(funcAddr);
         if (func.blocks.empty()) return "/* could not decompile */\n";
@@ -28,7 +28,8 @@ public:
         auto tree = structurer.structure(func);
 
         Emitter em(mf, func);
-        return clangFormat(em.generate(tree.get()));
+        QString code = em.generate(tree.get());
+        return format ? clangFormat(code) : code;
     }
 
     // Decompile a whole source file
@@ -100,55 +101,63 @@ public:
         std::set<uint32_t> localAddrs;
         for (size_t fi : sorted) localAddrs.insert(mf.stabsFunctions()[fi].address);
 
-        // Generate forward declarations for cross-CU functions that are called
-        // by functions in this file. We do a quick IR lift to find call targets.
+        // Generate forward declarations for cross-CU functions by scanning
+        // the function map for call targets (lightweight — no lifting needed)
         {
             std::set<std::string> emittedProtos;
-            Lifter lifter(mf);
+            auto &funcMap = mf.functionMap();
+            // Collect all call target addresses from all functions in this file
+            // by quick-scanning for x86 CALL instructions in binary data
+            std::set<uint32_t> callTargets;
             for (size_t fi : sorted) {
                 auto &fn = mf.stabsFunctions()[fi];
-                if (fn.address == 0) continue;
-                IRFunc irfn = lifter.liftFunction(fn.address);
-                for (auto &bb : irfn.blocks) {
-                    for (auto &stmt : bb.stmts) {
-                        // Look for Call expressions
-                        IRExpr *callExpr = nullptr;
-                        if (stmt.kind == IRStmtKind::Call) callExpr = stmt.expr.get();
-                        else if (stmt.kind == IRStmtKind::Assign && stmt.expr &&
-                                 stmt.expr->op == IROp::Call) callExpr = stmt.expr.get();
-                        if (!callExpr || callExpr->op != IROp::Call) continue;
-                        const std::string &calleeName = callExpr->name;
-                        if (calleeName.empty() || emittedProtos.count(calleeName)) continue;
-                        // Skip if defined locally
-                        bool isLocal = false;
-                        for (auto &lfn : mf.stabsFunctions())
-                            if (lfn.name == calleeName && localAddrs.count(lfn.address))
-                                { isLocal = true; break; }
-                        if (isLocal) continue;
-                        // Look up the callee's STABS info
-                        const StabsFunction *callee = mf.stabsFunctionByName(calleeName);
-                        if (!callee || callee->returnType == NullType) continue;
-                        emittedProtos.insert(calleeName);
-                        // Emit prototype — sanitize C++ names for C
-                        std::string cname = calleeName;
-                        { size_t p = 0; while ((p = cname.find("::", p)) != std::string::npos)
-                            cname.replace(p, 2, "_"); }
-                        { size_t p = 0; while ((p = cname.find("~", p)) != std::string::npos)
-                            cname.replace(p, 1, "dtor_"); }
-                        std::string retStr = types.formatType(callee->returnType);
-                        std::string proto = retStr + " " + cname + "(";
-                        if (!callee->params.empty()) {
-                            for (size_t p = 0; p < callee->params.size(); ++p) {
-                                if (p) proto += ", ";
-                                auto &par = callee->params[p];
-                                proto += par.typeRef != NullType ?
-                                    types.formatType(par.typeRef) : "int";
-                            }
-                        }
-                        proto += ");\n";
-                        out += QString::fromStdString(proto);
+                if (fn.address == 0 || fn.size == 0) continue;
+                const Section *sec = mf.sectionForAddress(fn.address);
+                if (!sec) continue;
+                uint32_t foff = fn.address - sec->addr;
+                const uint8_t *code = mf.bytesAt(sec->offset + foff,
+                    std::min(fn.size, sec->size - foff));
+                if (!code) continue;
+                // Scan for E8 xx xx xx xx (near call) instructions
+                for (uint32_t j = 0; j + 4 < fn.size; ++j) {
+                    if (code[j] == 0xE8) {
+                        int32_t rel;
+                        memcpy(&rel, code + j + 1, 4);
+                        uint32_t target = fn.address + j + 5 + rel;
+                        callTargets.insert(target);
+                        j += 4; // skip operand
                     }
                 }
+            }
+            for (uint32_t target : callTargets) {
+                if (localAddrs.count(target)) continue;
+                auto fit = funcMap.find(target);
+                if (fit == funcMap.end()) continue;
+                const std::string &calleeName = fit->second;
+                if (calleeName.empty() || emittedProtos.count(calleeName)) continue;
+                // Look up STABS info (by addr first, then by name)
+                const StabsFunction *callee = mf.stabsFunctionAt(target);
+                if (!callee) callee = mf.stabsFunctionByName(calleeName);
+                if (!callee || callee->returnType == NullType) continue;
+                emittedProtos.insert(calleeName);
+                // Sanitize C++ names for C
+                std::string cname = calleeName;
+                { size_t p = 0; while ((p = cname.find("::", p)) != std::string::npos)
+                    cname.replace(p, 2, "_"); }
+                { size_t p = 0; while ((p = cname.find("~", p)) != std::string::npos)
+                    cname.replace(p, 1, "dtor_"); }
+                std::string retStr = types.formatType(callee->returnType);
+                std::string proto = retStr + " " + cname + "(";
+                if (!callee->params.empty()) {
+                    for (size_t p = 0; p < callee->params.size(); ++p) {
+                        if (p) proto += ", ";
+                        auto &par = callee->params[p];
+                        proto += par.typeRef != NullType ?
+                            types.formatType(par.typeRef) : "int";
+                    }
+                }
+                proto += ");\n";
+                out += QString::fromStdString(proto);
             }
             if (!emittedProtos.empty()) out += "\n";
         }
@@ -156,11 +165,11 @@ public:
         for (size_t fi : sorted) {
             auto &fn = mf.stabsFunctions()[fi];
             if (fn.address == 0) continue;
-            out += decompile(mf, fn.address);
+            out += decompile(mf, fn.address, false); // skip per-function formatting
             out += "\n";
         }
 
-        return clangFormat(out);
+        return clangFormat(out); // format the whole file once
     }
 
     // Platform type definitions for compilable output
@@ -263,6 +272,8 @@ public:
 
     // Run clang-format on the output for clean formatting
     static QString clangFormat(const QString &code) {
+        // Skip clang-format for very large outputs (>500KB) to avoid timeout
+        if (code.size() > 500000) return code;
         QProcess proc;
         proc.start("clang-format", QStringList()
             << "-style={BasedOnStyle: LLVM, IndentWidth: 4, ColumnLimit: 100}"
@@ -270,7 +281,7 @@ public:
         if (!proc.waitForStarted(1000)) return code;
         proc.write(code.toUtf8());
         proc.closeWriteChannel();
-        if (!proc.waitForFinished(5000)) return code;
+        if (!proc.waitForFinished(30000)) { proc.kill(); return code; }
         if (proc.exitCode() != 0) return code;
         return QString::fromUtf8(proc.readAllStandardOutput());
     }
@@ -479,20 +490,31 @@ private:
                 for (auto &stmt : bb.stmts)
                     if (stmt.kind == IRStmtKind::Assign && stmt.destTemp >= 0)
                         defBlock[stmt.destTemp] = bb.id;
-            // Check each block for temp uses that are defined in a different block
-            for (auto &bb : m_func.blocks) {
+            // Single pass: flag temps used in a different block than their definition
+            std::set<int> crossBlock;
+            for (auto &bb : m_func.blocks)
                 for (auto &stmt : bb.stmts) {
-                    std::set<int> usedTemps;
-                    collectTempIds(stmt.expr.get(), usedTemps);
-                    collectTempIds(stmt.addr.get(), usedTemps);
-                    for (auto &a : stmt.args) collectTempIds(a.get(), usedTemps);
-                    for (int tid : usedTemps) {
-                        auto it = defBlock.find(tid);
-                        if (it != defBlock.end() && it->second != bb.id)
-                            m_tempUseCount[tid] = std::max(m_tempUseCount[tid], 2);
-                    }
+                    auto checkExpr = [&](const IRExpr *e) {
+                        if (!e) return;
+                        // Flat iteration to avoid deep recursion overhead
+                        std::vector<const IRExpr *> stack = {e};
+                        while (!stack.empty()) {
+                            auto *n = stack.back(); stack.pop_back();
+                            if (n->op == IROp::Temp) {
+                                int tid = n->tempId();
+                                auto it = defBlock.find(tid);
+                                if (it != defBlock.end() && it->second != bb.id)
+                                    crossBlock.insert(tid);
+                            }
+                            for (auto &k : n->kids) stack.push_back(k.get());
+                        }
+                    };
+                    checkExpr(stmt.expr.get());
+                    checkExpr(stmt.addr.get());
+                    for (auto &a : stmt.args) checkExpr(a.get());
                 }
-            }
+            for (int tid : crossBlock)
+                m_tempUseCount[tid] = std::max(m_tempUseCount[tid], 2);
         }
         void collectTempIds(const IRExpr *e, std::set<int> &ids) {
             if (!e) return;
