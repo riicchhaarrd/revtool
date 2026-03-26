@@ -1,4 +1,5 @@
 #include "mainwindow.h"
+#include "decompiler.h"
 #include <QMenuBar>
 #include <QMenu>
 #include <QToolBar>
@@ -29,6 +30,16 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     dock->setMinimumWidth(400);
     addDockWidget(Qt::LeftDockWidgetArea, dock);
 
+    // Decompile dock on the right (hidden by default)
+    m_decompView = new QTextEdit;
+    m_decompView->setReadOnly(true);
+    m_decompView->setFont(QFont("Monospace", 11));
+    m_decompDock = new QDockWidget("Pseudo-C", this);
+    m_decompDock->setWidget(m_decompView);
+    m_decompDock->setMinimumWidth(380);
+    addDockWidget(Qt::RightDockWidgetArea, m_decompDock);
+    m_decompDock->hide();
+
     createMenus();
     createStatusBar();
 
@@ -50,6 +61,8 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
         if (off >= 0)
             m_statusOffset->setText(QString("Offset: 0x%1").arg((uint32_t)off, 8, 16, QChar('0')).toUpper());
     });
+
+    connect(m_disasmWidget, &DisasmWidget::decompileRequested, this, &MainWindow::decompileFunction);
 
     connect(m_disasmWidget, &DisasmWidget::goToHexOffset, this, [this](int64_t off) {
         m_hexWidget->goToOffset(off);
@@ -111,6 +124,13 @@ void MainWindow::applyTheme(bool dark) {
     // Push theme to custom widgets
     m_hexWidget->setTheme(t);
     m_disasmWidget->setTheme(t);
+
+    // Decompile view colors
+    if (m_decompView) {
+        m_decompView->setStyleSheet(dark
+            ? "QTextEdit { background: #1e1e1e; color: #d4d4d4; border: none; font-family: Monospace; font-size: 12px; }"
+            : "QTextEdit { background: #fff; color: #1e1e1e; border: none; font-family: Monospace; font-size: 12px; }");
+    }
 
     // Update toggle text
     if (m_themeToggle)
@@ -238,4 +258,12 @@ void MainWindow::disassembleCurrentSection() {
         auto &sec = *m_codeSections[idx];
         if (ep >= sec.addr && ep < sec.addr + sec.size) m_disasmWidget->goToAddress(ep);
     }
+}
+
+void MainWindow::decompileFunction(uint32_t addr) {
+    if (!m_macho) return;
+    QString code = PseudoDecompiler::decompile(*m_macho, addr);
+    m_decompView->setPlainText(code);
+    m_decompDock->show();
+    m_decompDock->raise();
 }

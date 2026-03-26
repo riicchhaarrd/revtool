@@ -1,4 +1,5 @@
 #pragma once
+#include "demangle.h"
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -518,7 +519,7 @@ private:
                     // Function start
                     StabsFunction fn;
                     fn.rawName = sym.name;
-                    fn.name = cleanStabsName(sym.name);
+                    fn.name = demangle(cleanStabsName(sym.name));
                     fn.address = sym.n_value;
                     fn.isGlobal = (sym.name.find(":F") != std::string::npos);
                     fn.sourceFileIdx = curSourceIdx;
@@ -558,15 +559,35 @@ private:
             if (fn.address)
                 m_funcMap[fn.address] = fn.name;
         }
-        // Also add non-STABS external symbols
+        // Also add non-STABS external symbols (demangled)
         for (auto &sym : m_symbols) {
             if (sym.n_type & N_STAB) continue;
             if ((sym.n_type & N_TYPE) == N_SECT && sym.n_value) {
                 if (m_funcMap.find(sym.n_value) == m_funcMap.end())
-                    m_funcMap[sym.n_value] = sym.name;
+                    m_funcMap[sym.n_value] = demangle(sym.name);
             }
         }
     }
+
+    // Look up StabsFunction by address
+    public:
+    const StabsFunction* stabsFunctionAt(uint32_t addr) const {
+        for (auto &fn : m_stabsFuncs)
+            if (fn.address == addr) return &fn;
+        return nullptr;
+    }
+    // Find enclosing function for any address
+    const StabsFunction* stabsFunctionContaining(uint32_t addr) const {
+        const StabsFunction *best = nullptr;
+        for (auto &fn : m_stabsFuncs) {
+            if (addr >= fn.address && (fn.size == 0 || addr < fn.address + fn.size)) {
+                if (!best || fn.address > best->address)
+                    best = &fn;
+            }
+        }
+        return best;
+    }
+    private:
 
     std::string         m_path;
     std::vector<uint8_t> m_data;

@@ -43,12 +43,14 @@ signals:
     void addressChanged(uint32_t addr);
     void statusMessage(const QString &msg);
     void goToHexOffset(int64_t offset);
+    void decompileRequested(uint32_t addr);
 
 protected:
     void paintEvent(QPaintEvent *e) override;
     void keyPressEvent(QKeyEvent *e) override;
     void mousePressEvent(QMouseEvent *e) override;
     void mouseDoubleClickEvent(QMouseEvent *e) override;
+    void contextMenuEvent(QContextMenuEvent *e) override;
     void resizeEvent(QResizeEvent *e) override;
 
 private:

@@ -3,6 +3,8 @@
 #include <QApplication>
 #include <QMouseEvent>
 #include <QKeyEvent>
+#include <QContextMenuEvent>
+#include <QMenu>
 #include <QClipboard>
 #include <algorithm>
 
@@ -122,6 +124,69 @@ void DisasmWidget::mouseDoubleClickEvent(QMouseEvent *e) {
     }
 }
 
+void DisasmWidget::contextMenuEvent(QContextMenuEvent *e) {
+    if (m_lines.empty()) return;
+    int idx = indexFromY(e->pos().y());
+    if (idx < 0 || idx >= (int)m_lines.size()) return;
+    m_currentLine = idx;
+    viewport()->update();
+
+    auto &line = m_lines[idx];
+    QMenu menu(this);
+
+    // Decompile
+    auto *decompAct = menu.addAction("Decompile Function (F5)");
+    connect(decompAct, &QAction::triggered, this, [this, &line]() {
+        // Walk backward to find function start (label line)
+        uint32_t funcAddr = line.address;
+        if (m_macho) {
+            auto *fn = m_macho->stabsFunctionContaining(line.address);
+            if (fn) funcAddr = fn->address;
+            else {
+                // Fall back: find nearest label line above
+                for (int j = m_currentLine; j >= 0; --j) {
+                    if (!m_lines[j].label.empty()) { funcAddr = m_lines[j].address; break; }
+                }
+            }
+        }
+        emit decompileRequested(funcAddr);
+    });
+
+    menu.addSeparator();
+
+    // Copy
+    auto *copyAddr = menu.addAction(QString("Copy Address  (0x%1)").arg(line.address, 8, 16, QChar('0')).toUpper());
+    connect(copyAddr, &QAction::triggered, this, [&line]() {
+        QApplication::clipboard()->setText(QString("0x%1").arg(line.address, 8, 16, QChar('0')));
+    });
+
+    auto *copyLine = menu.addAction("Copy Line");
+    connect(copyLine, &QAction::triggered, this, [&line]() {
+        QApplication::clipboard()->setText(QString("%1  %2  %3 %4").arg(line.address,8,16,QChar('0'))
+            .arg(QString::fromStdString(line.bytes)).arg(QString::fromStdString(line.mnemonic))
+            .arg(QString::fromStdString(line.operands)));
+    });
+
+    menu.addSeparator();
+
+    // Show in hex
+    auto *hexAct = menu.addAction("Show in Hex Editor");
+    connect(hexAct, &QAction::triggered, this, [this, &line]() {
+        if (m_macho) { int64_t off = m_macho->fileOffsetForAddress(line.address); if (off >= 0) emit goToHexOffset(off); }
+    });
+
+    // Follow call/jump
+    if (line.isCall || line.isJump) {
+        auto *followAct = menu.addAction("Follow Target");
+        connect(followAct, &QAction::triggered, this, [this, &line]() {
+            bool ok; uint32_t t = QString::fromStdString(line.operands).trimmed().replace("0x","").toUInt(&ok,16);
+            if (ok) goToAddress(t);
+        });
+    }
+
+    menu.exec(e->globalPos());
+}
+
 void DisasmWidget::keyPressEvent(QKeyEvent *e) {
     if (m_lines.empty()) return;
     switch (e->key()) {
@@ -139,6 +204,16 @@ void DisasmWidget::keyPressEvent(QKeyEvent *e) {
         if (m_macho && m_currentLine < (int)m_lines.size()) { int64_t foff = m_macho->fileOffsetForAddress(m_lines[m_currentLine].address); if (foff >= 0) emit goToHexOffset(foff); } break;
     case Qt::Key_C:
         if (e->modifiers() & Qt::ControlModifier) { auto &l = m_lines[m_currentLine]; QApplication::clipboard()->setText(QString("%1  %2  %3 %4").arg(l.address,8,16,QChar('0')).arg(QString::fromStdString(l.bytes)).arg(QString::fromStdString(l.mnemonic)).arg(QString::fromStdString(l.operands))); } break;
+    case Qt::Key_F5: {
+        uint32_t funcAddr = m_lines[m_currentLine].address;
+        if (m_macho) {
+            auto *fn = m_macho->stabsFunctionContaining(funcAddr);
+            if (fn) funcAddr = fn->address;
+            else { for (int j = m_currentLine; j >= 0; --j) { if (!m_lines[j].label.empty()) { funcAddr = m_lines[j].address; break; } } }
+        }
+        emit decompileRequested(funcAddr);
+        break;
+    }
     default: QAbstractScrollArea::keyPressEvent(e); return;
     }
 }

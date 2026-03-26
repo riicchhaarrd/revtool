@@ -10,6 +10,7 @@
 #include <QLabel>
 #include <QComboBox>
 #include <QAction>
+#include <QTextEdit>
 #include <memory>
 
 class MainWindow : public QMainWindow {
@@ -24,6 +25,7 @@ private:
     void populateSectionCombo();
     void disassembleCurrentSection();
     void applyTheme(bool dark);
+    void decompileFunction(uint32_t addr);
 
     std::unique_ptr<MachOFile> m_macho;
 
@@ -45,6 +47,10 @@ private:
 
     // Section list for the combo
     std::vector<const Section*> m_codeSections;
+
+    // Decompile panel
+    QDockWidget *m_decompDock = nullptr;
+    QTextEdit   *m_decompView = nullptr;
 
     // Theme
     bool     m_darkTheme = true;
