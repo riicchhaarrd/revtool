@@ -21,3 +21,9 @@ add_executable(dis
 target_include_directories(dis PRIVATE src ${CAPSTONE_INCLUDE_DIRS})
 target_link_libraries(dis PRIVATE Qt6::Widgets ${CAPSTONE_LIBRARIES})
 target_link_directories(dis PRIVATE ${CAPSTONE_LIBRARY_DIRS})
+
+# CLI decompiler test tool (no GUI, just Qt Core for QProcess)
+add_executable(decomp src/decomp_cli.cpp)
+target_include_directories(decomp PRIVATE src ${CAPSTONE_INCLUDE_DIRS})
+target_link_libraries(decomp PRIVATE Qt6::Widgets ${CAPSTONE_LIBRARIES})
+target_link_directories(decomp PRIVATE ${CAPSTONE_LIBRARY_DIRS})

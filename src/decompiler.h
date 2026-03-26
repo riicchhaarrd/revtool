@@ -112,6 +112,10 @@ public:
             "/* Platform types */\n"
             "#include <stdint.h>\n"
             "#include <stddef.h>\n"
+            "#include <stdarg.h>\n"
+            "#include <math.h>\n"
+            "#include <string.h>\n"
+            "#include <stdio.h>\n"
             "typedef int BOOL;\n"
             "typedef int Bool;\n"
             "typedef int qboolean;\n"
@@ -182,11 +186,20 @@ public:
             "typedef int D3DTEXTUREFILTERTYPE;\n"
             "typedef int D3DFORMAT;\n"
             "typedef int D3DDEVTYPE;\n"
-            "typedef void *FILE;\n"
+            "/* FILE from <stdio.h> */\n"
             "typedef void *YY_BUFFER_STATE;\n"
             "typedef int yy_state_type;\n"
             "typedef unsigned int u_int;\n"
             "typedef int jmp_buf[64];\n"
+            "typedef int bool;\n"
+            "typedef signed char SInt8;\n"
+            "typedef char *StringPtr;\n"
+            "typedef char *Ptr;\n"
+            "typedef int INT;\n"
+            "typedef int QElemPtr;\n"
+            "typedef void *IOCompletionUPP;\n"
+            "typedef struct { unsigned int lo, hi; } UTCDateTime;\n"
+            "typedef struct { unsigned int signature; int id; } ControlID;\n"
             "\n"
         );
     }
@@ -318,7 +331,20 @@ private:
                                           : "int " + l.name) + ";\n";
             }
 
-            // Declare temps that are used more than once
+            // Collect goto targets and emitted blocks BEFORE declaring temps
+            std::set<int> emittedBlocks;
+            collectGotoTargets(root, m_gotoTargets);
+            collectEmittedBlocks(root, emittedBlocks);
+
+            // Force-declare temps used in fallback (goto target) blocks
+            for (int bbId : m_gotoTargets) {
+                if (emittedBlocks.count(bbId)) continue;
+                if (bbId < 0 || bbId >= (int)m_func.blocks.size()) continue;
+                for (auto &stmt : m_func.blocks[bbId].stmts)
+                    forceDeclareTempRefs(stmt);
+            }
+
+            // Declare temps that are used more than once (or used in fallback blocks)
             for (auto &[id, type] : m_func.tempTypes) {
                 if (m_tempUseCount[id] > 1) {
                     std::string tname = "t" + std::to_string(id);
@@ -335,10 +361,39 @@ private:
                 out += "    " + QString::fromStdString(inferTempType(id) + " " + tname) + ";\n";
                 declared.insert(tname);
             }
+            // Declare synthetic stack variables (var_XX, arg_XX) not covered by STABS
+            std::set<std::string> synthVars;
+            for (auto &bb : m_func.blocks)
+                for (auto &stmt : bb.stmts)
+                    collectSynthVars(stmt, synthVars);
+            for (auto &name : synthVars) {
+                if (declared.count(name) || paramNames.count(name)) continue;
+                declared.insert(name);
+                out += "    int " + QString::fromStdString(name) + ";\n";
+            }
             if (!declared.empty()) out += "\n";
 
             // Emit structured body
             emitNode(out, root, 1);
+
+            // Emit fallback blocks for goto targets not in structured tree
+            for (int bbId : m_gotoTargets) {
+                if (emittedBlocks.count(bbId)) continue;
+                if (bbId < 0 || bbId >= (int)m_func.blocks.size()) continue;
+                auto &bb = m_func.blocks[bbId];
+                if (!m_emittedLabels.count(bbId)) {
+                    m_emittedLabels.insert(bbId);
+                    out += QString("bb_%1:\n").arg(bbId);
+                }
+                for (int i = 0; i < (int)bb.stmts.size(); ++i) {
+                    auto &s = bb.stmts[i];
+                    // Skip terminal branch/jump (structurer handles control flow)
+                    if (i == (int)bb.stmts.size() - 1 &&
+                        (s.kind == IRStmtKind::Branch || s.kind == IRStmtKind::Jump))
+                        continue;
+                    emitStmt(out, s, 1);
+                }
+            }
 
             out += "}\n";
             return out;
@@ -353,6 +408,8 @@ private:
         std::set<int>         m_copyPropagated; // temps eliminated by copy prop
         // Copy prop: temp → replacement name
         std::map<int, std::string> m_copyMap;
+        std::set<int>         m_gotoTargets;    // block IDs that are goto targets
+        std::set<int>         m_emittedLabels;  // labels already emitted (avoid duplicates)
 
         // Copy propagation: replace temps that are simple copies of vars/other temps
         void runCopyPropagation() {
@@ -384,7 +441,9 @@ private:
             if (e->op == IROp::Temp) {
                 auto it = m_copyMap.find(e->tempId());
                 if (it != m_copyMap.end()) {
+                    // Preserve the best available type: prefer expr annotation, then tempTypes
                     TypeRef t = e->typeRef;
+                    if (t == NullType) t = m_func.tempType(e->tempId());
                     e = IRExpr::mkVar(it->second, t);
                     return;
                 }
@@ -408,6 +467,67 @@ private:
         }
 
         QString pad(int indent) { return QString(indent * 4, ' '); }
+
+        // Find synthetic variable names (var_XX, arg_XX) used in IR
+        void collectSynthVars(const IRStmt &stmt, std::set<std::string> &vars) {
+            collectSynthVarsExpr(stmt.expr.get(), vars);
+            collectSynthVarsExpr(stmt.addr.get(), vars);
+            for (auto &a : stmt.args) collectSynthVarsExpr(a.get(), vars);
+            if (stmt.kind == IRStmtKind::VarSet &&
+                (stmt.destVar.find("var_") == 0 || stmt.destVar.find("arg_") == 0))
+                vars.insert(stmt.destVar);
+        }
+        bool tempUsedInStmt(const IRStmt &stmt, int tempId) const {
+            if (tempUsedInExpr(stmt.expr.get(), tempId)) return true;
+            if (tempUsedInExpr(stmt.addr.get(), tempId)) return true;
+            for (auto &a : stmt.args)
+                if (tempUsedInExpr(a.get(), tempId)) return true;
+            return false;
+        }
+        bool tempUsedInExpr(const IRExpr *e, int tempId) const {
+            if (!e) return false;
+            if (e->op == IROp::Temp && e->tempId() == tempId) return true;
+            for (auto &k : e->kids)
+                if (tempUsedInExpr(k.get(), tempId)) return true;
+            return false;
+        }
+
+        void forceDeclareTempRefs(IRStmt &stmt) {
+            forceDeclareExpr(stmt.expr.get());
+            forceDeclareExpr(stmt.addr.get());
+            for (auto &a : stmt.args) forceDeclareExpr(a.get());
+            // Also force the dest temp to be declared
+            if (stmt.kind == IRStmtKind::Assign)
+                m_tempUseCount[stmt.destTemp] = std::max(m_tempUseCount[stmt.destTemp], 2);
+        }
+        void forceDeclareExpr(IRExpr *e) {
+            if (!e) return;
+            if (e->op == IROp::Temp)
+                m_tempUseCount[e->tempId()] = std::max(m_tempUseCount[e->tempId()], 2);
+            for (auto &k : e->kids) forceDeclareExpr(k.get());
+        }
+
+        void collectSynthVarsExpr(const IRExpr *e, std::set<std::string> &vars) {
+            if (!e) return;
+            if (e->op == IROp::Var &&
+                (e->name.find("var_") == 0 || e->name.find("arg_") == 0))
+                vars.insert(e->name);
+            for (auto &k : e->kids) collectSynthVarsExpr(k.get(), vars);
+        }
+
+        void collectGotoTargets(StructNode *node, std::set<int> &targets) {
+            if (!node) return;
+            if (node->kind == StructKind::Goto) targets.insert(node->gotoTarget);
+            for (auto &c : node->children) collectGotoTargets(c.get(), targets);
+            if (node->elseNode) collectGotoTargets(node->elseNode.get(), targets);
+        }
+
+        void collectEmittedBlocks(StructNode *node, std::set<int> &blocks) {
+            if (!node) return;
+            if (node->kind == StructKind::Seq && node->bbId >= 0) blocks.insert(node->bbId);
+            for (auto &c : node->children) collectEmittedBlocks(c.get(), blocks);
+            if (node->elseNode) collectEmittedBlocks(node->elseNode.get(), blocks);
+        }
 
         void emitNode(QString &out, StructNode *node, int indent) {
             if (!node) return;
@@ -485,6 +605,11 @@ private:
         // ── Emit IR statements from a basic block range ─────────────
         void emitBlockStmts(QString &out, int bbId, int start, int end, int indent) {
             if (bbId < 0 || bbId >= (int)m_func.blocks.size()) return;
+            // Emit label if this block is a goto target (track to avoid duplicates)
+            if (start == 0 && m_gotoTargets.count(bbId) && !m_emittedLabels.count(bbId)) {
+                m_emittedLabels.insert(bbId);
+                out += QString("bb_%1:\n").arg(bbId);
+            }
             auto &bb = m_func.blocks[bbId];
             for (int i = start; i < end && i < (int)bb.stmts.size(); ++i) {
                 emitStmt(out, bb.stmts[i], indent);
@@ -524,10 +649,12 @@ private:
                         char fname[32]; snprintf(fname, sizeof(fname), "field_%X", (unsigned)off);
                         out += pad(indent) + QString::fromStdString(base + "->" + fname + " = " + val) + ";\n";
                     } else {
-                        out += pad(indent) + QString::fromStdString("*(" + emitExpr(a) + ") = " + val) + ";\n";
+                        out += pad(indent) + QString::fromStdString(
+                            emitStoreDeref(emitExpr(a), stmt.destType) + " = " + val) + ";\n";
                     }
                 } else {
-                    out += pad(indent) + QString::fromStdString("*(" + emitExpr(a) + ") = " + val) + ";\n";
+                    out += pad(indent) + QString::fromStdString(
+                        emitStoreDeref(emitExpr(a), stmt.destType) + " = " + val) + ";\n";
                 }
                 break;
             }
@@ -626,7 +753,7 @@ private:
                         char fname[32]; snprintf(fname, sizeof(fname), "field_%X", (unsigned)off);
                         result = base + "->" + fname;
                     } else {
-                        result = "*(" + emitExpr(addr) + ")";
+                        result = emitDeref(emitExpr(addr), e->typeRef);
                     }
                 }
                 // bare pointer dereference — only use -> if we know it's a struct pointer
@@ -640,12 +767,12 @@ private:
                         if (!access.empty())
                             result = emitExpr(addr) + "->" + access;
                         else
-                            result = "*(" + emitExpr(addr) + ")";
+                            result = emitDeref(emitExpr(addr), e->typeRef);
                     } else {
-                        result = "*(" + emitExpr(addr) + ")";
+                        result = emitDeref(emitExpr(addr), e->typeRef);
                     }
                 } else {
-                    result = "*(" + emitExpr(addr) + ")";
+                    result = emitDeref(emitExpr(addr), e->typeRef);
                 }
                 break;
             }
@@ -654,9 +781,42 @@ private:
                 result = "&" + emitExpr(e->kids[0].get());
                 break;
 
-            case IROp::Field:
-                result = emitExpr(e->kids[0].get()) + "->" + e->name;
+            case IROp::Field: {
+                std::string base = emitExpr(e->kids[0].get());
+                // Check if this is a synthetic field (field_XX) from an opaque/empty struct
+                bool isSynthField = (e->name.find("field_") == 0);
+                bool fieldValid = true;
+                if (isSynthField) {
+                    // Verify the struct type actually has a field at this offset
+                    TypeRef baseType = exprType(e->kids[0].get());
+                    if (baseType != NullType) {
+                        TypeRef structRef = m_types.getPointedStruct(baseType);
+                        if (structRef != NullType) {
+                            // Check if there's a real field at this offset
+                            auto *field = m_types.findFieldAtOffset(structRef, (int)e->value);
+                            if (!field || field->name.empty() || field->name[0] == '!')
+                                fieldValid = false;
+                        }
+                    } else {
+                        // No type info at all — use cast-based access for synthetic fields
+                        fieldValid = false;
+                    }
+                }
+                if (fieldValid) {
+                    result = base + "->" + e->name;
+                } else {
+                    // Emit as cast-based offset access for empty/opaque structs
+                    int off = (int)e->value;
+                    std::string targetType = "int";
+                    if (e->typeRef != NullType)
+                        targetType = m_types.formatType(e->typeRef);
+                    char buf[128];
+                    snprintf(buf, sizeof(buf), "((%s *)((char *)%s + 0x%X))",
+                             targetType.c_str(), base.c_str(), (unsigned)off);
+                    result = "*" + std::string(buf);
+                }
                 break;
+            }
 
             case IROp::Neg:     result = "-" + emitExpr(e->kids[0].get()); break;
             case IROp::Not:     result = "~" + emitExpr(e->kids[0].get()); break;
@@ -802,6 +962,15 @@ private:
             auto it = m_tempDef.find(id);
             if (it == m_tempDef.end() || !it->second) return "int";
             auto *e = it->second;
+            // If the expression itself has a type annotation, use it
+            if (e->typeRef != NullType) {
+                auto *rt = m_types.resolveType(e->typeRef);
+                // For array types assigned to temps, use pointer to element type
+                // (arrays decay to pointers when assigned in C)
+                if (rt && rt->kind == StabsTypeKind::Array)
+                    return m_types.formatType(rt->targetType) + " *";
+                return m_types.formatType(e->typeRef);
+            }
             // Float operations → float
             if (e->op == IROp::Const && !tryFloatConst((uint32_t)e->value).empty()) return "float";
             if (e->op == IROp::Cast &&
@@ -812,12 +981,6 @@ private:
                 return "float";
             // Comparison results → int (boolean)
             if (e->op >= IROp::Eq && e->op <= IROp::Uge) return "int";
-            // Field access → use field type
-            if (e->op == IROp::Field && e->typeRef != NullType)
-                return m_types.formatType(e->typeRef);
-            // Call → use return type
-            if (e->op == IROp::Call && e->typeRef != NullType)
-                return m_types.formatType(e->typeRef);
             return "int";
         }
 
@@ -838,6 +1001,25 @@ private:
             pos = 0;
             while ((pos = out.find("&", pos)) != std::string::npos) out.erase(pos, 1);
             return out;
+        }
+
+        // Emit a pointer dereference, adding a cast if the address isn't a pointer type.
+        // This prevents "invalid type argument of unary '*' (have 'int')" errors.
+        std::string emitDeref(const std::string &addrStr, TypeRef loadType = NullType) {
+            if (loadType != NullType) {
+                std::string t = m_types.formatType(loadType);
+                return "*((" + t + " *)(" + addrStr + "))";
+            }
+            return "*((int *)(" + addrStr + "))";
+        }
+
+        // Emit a store through a pointer, adding a cast if needed.
+        std::string emitStoreDeref(const std::string &addrStr, TypeRef storeType = NullType) {
+            if (storeType != NullType) {
+                std::string t = m_types.formatType(storeType);
+                return "*((" + t + " *)(" + addrStr + "))";
+            }
+            return "*((int *)(" + addrStr + "))";
         }
 
         std::string emitCast(IRExpr *e) {

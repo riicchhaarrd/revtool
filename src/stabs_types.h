@@ -295,11 +295,19 @@ public:
         auto *t = getType(ref);
         if (!t) return "int " + varName;
 
-        // Handle arrays specially
+        // Handle arrays specially — collect all dimensions for multi-dimensional arrays
         if (t->kind == StabsTypeKind::Array) {
-            std::string elem = formatType(t->targetType);
-            int count = t->arrayHigh - t->arrayLow + 1;
-            return elem + " " + varName + "[" + std::to_string(count) + "]";
+            std::string dims;
+            TypeRef cur = ref;
+            auto *ct = t;
+            while (ct && ct->kind == StabsTypeKind::Array) {
+                int count = ct->arrayHigh - ct->arrayLow + 1;
+                dims += "[" + std::to_string(count) + "]";
+                cur = ct->targetType;
+                ct = getType(cur);
+            }
+            std::string elem = formatType(cur);
+            return elem + " " + varName + dims;
         }
         // Handle function pointers
         if (t->kind == StabsTypeKind::Pointer) {
@@ -460,10 +468,16 @@ public:
             if (f.name.find("::") != std::string::npos) continue;
             if (f.name.find("(") != std::string::npos) continue;
             if (f.name[0] == '!' || f.name[0] == '#' || f.name[0] == '$') continue;
+            if (f.name[0] == '~') continue; // destructor
+            if (f.name.find("operator") == 0) continue; // operator overloads
+            // Skip names with C++ template or reference artifacts
+            if (f.name.find("<") != std::string::npos) continue;
+            if (f.name.find("&") != std::string::npos) continue;
+            if (f.name.find(">") != std::string::npos) continue;
             // Skip names with STABS type encoding artifacts
             if (f.name.find("=") != std::string::npos) continue;
-            // Skip fields with no size (C++ static members)
-            if (f.bitSize == 0 && f.bitOffset == 0 && f.name.find("_S_") != std::string::npos) continue;
+            // Skip fields with no size (C++ static members, vtable pointers)
+            if (f.bitSize == 0 && f.bitOffset == 0) continue;
             out += "    " + formatDecl(f.typeRef, f.name) + ";\n";
         }
         out += "}";

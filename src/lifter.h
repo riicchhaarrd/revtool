@@ -303,7 +303,11 @@ private:
     std::unique_ptr<IRExpr> readReg(x86_reg reg) {
         int t = regTemp(reg);
         if (t >= 0) return IRExpr::mkTemp(t, m_func->tempType(t));
-        return IRExpr::mkVar(cs_reg_name(m_cs, reg));
+        // No temp for this register — create one initialized to 0
+        // This avoids raw register names leaking into decompiled C
+        int newT = m_func->newTemp();
+        m_regTemps[canonReg(reg)] = newT;
+        return IRExpr::mkTemp(newT);
     }
 
     void writeReg(x86_reg reg, int temp, BasicBlock &bb) {
@@ -869,15 +873,21 @@ private:
 
         // ── Return ──────────────────────────────────────────────────
         if (mn == "ret") {
-            auto eax = readReg(X86_REG_EAX);
-            // Check if return type is void
+            // Check if return type is void (including through typedef chains)
             if (m_func->returnType != NullType) {
                 auto *rt = m_types.resolveType(m_func->returnType);
                 if (rt && rt->kind == StabsTypeKind::Void) {
                     bb.stmts.push_back(IRStmt::mkReturn());
                     return;
                 }
+                // Also check if formatType would produce "void"
+                std::string retStr = m_types.formatType(m_func->returnType);
+                if (retStr == "void") {
+                    bb.stmts.push_back(IRStmt::mkReturn());
+                    return;
+                }
             }
+            auto eax = readReg(X86_REG_EAX);
             bb.stmts.push_back(IRStmt::mkReturn(std::move(eax)));
             return;
         }
