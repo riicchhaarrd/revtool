@@ -401,15 +401,18 @@ private:
             int bt = regTemp(m.base);
             if (bt >= 0) baseType = m_func->tempType(bt);
 
+            // Try struct field resolution with array subscript support
             if (baseType != NullType && m_types.isStructPointer(baseType)) {
                 TypeRef structRef = m_types.getPointedStruct(baseType);
                 if (structRef != NullType) {
-                    auto *field = m_types.findFieldAtOffset(structRef, (int)m.disp);
-                    if (field && !field->name.empty())
-                        return IRExpr::mkField(std::move(base), field->name, (int)m.disp, field->typeRef);
+                    std::string access = m_types.formatFieldAccess(structRef, (int)m.disp);
+                    if (!access.empty()) {
+                        auto *field = m_types.findFieldAtOffset(structRef, (int)m.disp);
+                        TypeRef ft = field ? field->typeRef : NullType;
+                        return IRExpr::mkField(std::move(base), access, (int)m.disp, ft);
+                    }
                 }
             }
-
             if (m.disp != 0) {
                 char fname[32]; snprintf(fname, sizeof(fname), "field_%X", (unsigned)(int)m.disp);
                 return IRExpr::mkField(std::move(base), fname, (int)m.disp);
@@ -469,8 +472,8 @@ private:
             bb.stmts.push_back(IRStmt::mkVarSet(buf, std::move(val)));
             return;
         }
-        // Struct field write
-        if (m.base != X86_REG_INVALID && m.index == X86_REG_INVALID && m.disp != 0) {
+        // Struct field write (including offset 0)
+        if (m.base != X86_REG_INVALID && m.index == X86_REG_INVALID) {
             auto base = readReg(m.base);
             TypeRef baseType = NullType;
             int bt = regTemp(m.base);
@@ -478,9 +481,11 @@ private:
             if (baseType != NullType && m_types.isStructPointer(baseType)) {
                 TypeRef structRef = m_types.getPointedStruct(baseType);
                 if (structRef != NullType) {
-                    auto *field = m_types.findFieldAtOffset(structRef, (int)m.disp);
-                    if (field && !field->name.empty()) {
-                        auto fld = IRExpr::mkField(std::move(base), field->name, (int)m.disp, field->typeRef);
+                    std::string access = m_types.formatFieldAccess(structRef, (int)m.disp);
+                    if (!access.empty()) {
+                        auto *field = m_types.findFieldAtOffset(structRef, (int)m.disp);
+                        TypeRef ft = field ? field->typeRef : NullType;
+                        auto fld = IRExpr::mkField(std::move(base), access, (int)m.disp, ft);
                         bb.stmts.push_back(IRStmt::mkStore(std::move(fld), std::move(val)));
                         return;
                     }

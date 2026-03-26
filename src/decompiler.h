@@ -301,11 +301,23 @@ private:
                 break;
 
             case StructKind::If: {
+                // Skip empty if blocks with no else
+                bool hasBody = !node->children.empty();
+                bool hasElse = node->elseNode != nullptr;
+                if (!hasBody && !hasElse) break;
+                // If body is empty but else exists, invert the condition
+                if (!hasBody && hasElse) {
+                    std::string cond = node->cond ? emitExpr(node->cond, !node->negated) : "1";
+                    out += pad(indent) + "if (" + QString::fromStdString(cond) + ") {\n";
+                    emitNode(out, node->elseNode.get(), indent + 1);
+                    out += pad(indent) + "}\n";
+                    break;
+                }
                 std::string cond = node->cond ? emitExpr(node->cond, node->negated) : "1";
                 out += pad(indent) + "if (" + QString::fromStdString(cond) + ") {\n";
                 for (auto &child : node->children)
                     emitNode(out, child.get(), indent + 1);
-                if (node->elseNode) {
+                if (hasElse) {
                     out += pad(indent) + "} else {\n";
                     emitNode(out, node->elseNode.get(), indent + 1);
                 }
@@ -460,15 +472,19 @@ private:
             case IROp::FuncRef: result = e->name; break;
 
             case IROp::Load: {
-                // Check if load address is (base + const) → base->field_XX
                 auto *addr = e->kids[0].get();
+                // (base + const) → base->field_XX
                 if (addr && addr->op == IROp::Add && addr->kids.size() == 2 &&
-                    addr->kids[1]->isConst() && addr->kids[1]->value > 0 &&
+                    addr->kids[1]->isConst() && addr->kids[1]->value >= 0 &&
                     (addr->kids[0]->op == IROp::Var || addr->kids[0]->op == IROp::Temp)) {
                     std::string base = emitExpr(addr->kids[0].get());
                     int off = (int)addr->kids[1]->value;
                     char fname[32]; snprintf(fname, sizeof(fname), "field_%X", (unsigned)off);
                     result = base + "->" + fname;
+                }
+                // bare var/temp dereference → var->field_0 (first field)
+                else if (addr && (addr->op == IROp::Var || addr->op == IROp::Temp)) {
+                    result = emitExpr(addr) + "->field_0";
                 } else {
                     result = "*(" + emitExpr(addr) + ")";
                 }
@@ -495,6 +511,52 @@ private:
             case IROp::SDiv: case IROp::UDiv: case IROp::SMod: case IROp::UMod:
             case IROp::Shl: case IROp::Shr: case IROp::Sar:
             case IROp::And: case IROp::Or: case IROp::Xor: {
+                // Constant folding: evaluate at compile time if both operands are constant
+                if (e->kids[0]->isConst() && e->kids[1]->isConst()) {
+                    int64_t a = e->kids[0]->value, b = e->kids[1]->value;
+                    int64_t r = 0;
+                    bool folded = true;
+                    switch (e->op) {
+                    case IROp::Add: r = a + b; break;
+                    case IROp::Sub: r = a - b; break;
+                    case IROp::Mul: r = a * b; break;
+                    case IROp::SDiv: case IROp::UDiv: r = b ? a / b : 0; break;
+                    case IROp::SMod: case IROp::UMod: r = b ? a % b : 0; break;
+                    case IROp::Shl: r = a << b; break;
+                    case IROp::Shr: case IROp::Sar: r = a >> b; break;
+                    case IROp::And: r = a & b; break;
+                    case IROp::Or:  r = a | b; break;
+                    case IROp::Xor: r = a ^ b; break;
+                    default: folded = false;
+                    }
+                    if (folded) {
+                        result = tryFloatConst((uint32_t)r);
+                        if (result.empty()) result = std::to_string(r);
+                        break;
+                    }
+                }
+                // Identity folding: x + 0, x * 1, x - 0, x | 0, x & -1, x ^ 0
+                if (e->kids[1]->isConst()) {
+                    int64_t b = e->kids[1]->value;
+                    if ((e->op == IROp::Add || e->op == IROp::Sub || e->op == IROp::Or ||
+                         e->op == IROp::Xor) && b == 0) {
+                        result = emitExpr(e->kids[0].get()); break;
+                    }
+                    if ((e->op == IROp::Mul || e->op == IROp::SDiv || e->op == IROp::UDiv) && b == 1) {
+                        result = emitExpr(e->kids[0].get()); break;
+                    }
+                    if (e->op == IROp::Mul && b == 0) { result = "0"; break; }
+                }
+                if (e->kids[0]->isConst()) {
+                    int64_t a = e->kids[0]->value;
+                    if ((e->op == IROp::Add || e->op == IROp::Or || e->op == IROp::Xor) && a == 0) {
+                        result = emitExpr(e->kids[1].get()); break;
+                    }
+                    if (e->op == IROp::Mul && a == 1) {
+                        result = emitExpr(e->kids[1].get()); break;
+                    }
+                    if (e->op == IROp::Mul && a == 0) { result = "0"; break; }
+                }
                 std::string lhs = emitExpr(e->kids[0].get());
                 std::string rhs = emitExpr(e->kids[1].get());
                 std::string op;

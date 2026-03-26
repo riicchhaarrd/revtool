@@ -247,8 +247,16 @@ public:
             return inner + " *";
         }
         case StabsTypeKind::Reference: return formatType(t->targetType, depth + 1) + " &";
-        case StabsTypeKind::Const:     return "const " + formatType(t->targetType, depth + 1);
-        case StabsTypeKind::Volatile:  return "volatile " + formatType(t->targetType, depth + 1);
+        case StabsTypeKind::Const: {
+            std::string inner = formatType(t->targetType, depth + 1);
+            if (inner.find("const ") == 0) return inner; // avoid double const
+            return "const " + inner;
+        }
+        case StabsTypeKind::Volatile: {
+            std::string inner = formatType(t->targetType, depth + 1);
+            if (inner.find("volatile ") == 0) return inner;
+            return "volatile " + inner;
+        }
 
         case StabsTypeKind::Typedef:
             if (!t->name.empty()) return t->name;
@@ -311,7 +319,6 @@ public:
         int bitTarget = byteOffset * 8;
         for (auto &f : t->fields) {
             if (f.bitOffset == bitTarget) return &f;
-            // Also match by byte offset for fields wider than 8 bits
             if (f.bitOffset / 8 == byteOffset) return &f;
         }
         // Try nested: find the field whose range contains the offset
@@ -320,6 +327,50 @@ public:
                 return &f;
         }
         return nullptr;
+    }
+
+    // Format a field access with array subscript when the offset falls inside an array field.
+    // Returns "fieldName" for exact match, "fieldName[i]" for array, "fieldName.subfield" for nested struct.
+    std::string formatFieldAccess(TypeRef ref, int byteOffset) const {
+        auto *t = resolveType(ref);
+        if (!t || (t->kind != StabsTypeKind::Struct && t->kind != StabsTypeKind::Union))
+            return "";
+        int bitTarget = byteOffset * 8;
+        // Exact match first
+        for (auto &f : t->fields) {
+            if (f.bitOffset == bitTarget || f.bitOffset / 8 == byteOffset)
+                return f.name;
+        }
+        // Check if offset falls inside a larger field (array or sub-struct)
+        for (auto &f : t->fields) {
+            if (bitTarget >= f.bitOffset && bitTarget < f.bitOffset + f.bitSize) {
+                int fieldByteStart = f.bitOffset / 8;
+                int offsetInField = byteOffset - fieldByteStart;
+                // Check if field type is an array
+                auto *ft = getType(f.typeRef);
+                if (ft && ft->kind == StabsTypeKind::Array) {
+                    auto *elemT = resolveType(ft->targetType);
+                    int elemSize = elemT ? elemT->sizeBytes : 4;
+                    if (elemSize <= 0) elemSize = 4;
+                    int idx = offsetInField / elemSize;
+                    int subOff = offsetInField % elemSize;
+                    if (subOff == 0)
+                        return f.name + "[" + std::to_string(idx) + "]";
+                    // Access into array element's sub-field
+                    std::string sub = formatFieldAccess(ft->targetType, subOff);
+                    if (!sub.empty())
+                        return f.name + "[" + std::to_string(idx) + "]." + sub;
+                    return f.name + "[" + std::to_string(idx) + "]";
+                }
+                // Sub-struct access
+                if (ft && (ft->kind == StabsTypeKind::Struct || ft->kind == StabsTypeKind::Union)) {
+                    std::string sub = formatFieldAccess(f.typeRef, offsetInField);
+                    if (!sub.empty()) return f.name + "." + sub;
+                }
+                return f.name;
+            }
+        }
+        return "";
     }
 
     // Find enum value name
