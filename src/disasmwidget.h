@@ -1,4 +1,5 @@
 #pragma once
+#include "theme.h"
 #include "macho.h"
 #include <QAbstractScrollArea>
 #include <QFont>
@@ -36,6 +37,7 @@ public:
 
     uint32_t currentAddress() const;
     const std::vector<DisasmLine>& lines() const { return m_lines; }
+    void setTheme(const Theme &theme);
 
 signals:
     void addressChanged(uint32_t addr);
@@ -70,4 +72,5 @@ private:
     int m_mnemoX   = 0;
     int m_operX    = 0;
     int m_commentX = 0;
+    Theme m_theme;
 };

@@ -1,4 +1,5 @@
 #pragma once
+#include "theme.h"
 #include <QAbstractScrollArea>
 #include <QFont>
 #include <QFontMetrics>
@@ -22,6 +23,7 @@ public:
     void clearHighlight();
 
     int64_t currentOffset() const { return m_cursorPos; }
+    void setTheme(const Theme &theme);
 
 signals:
     void offsetChanged(int64_t offset);
@@ -58,4 +60,5 @@ private:
     int      m_hexColX = 0;
     int      m_asciiColX = 0;
     QFont    m_font;
+    Theme    m_theme;
 };

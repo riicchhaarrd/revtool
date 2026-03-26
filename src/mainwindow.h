@@ -1,4 +1,5 @@
 #pragma once
+#include "theme.h"
 #include "macho.h"
 #include "hexwidget.h"
 #include "disasmwidget.h"
@@ -8,6 +9,7 @@
 #include <QTabWidget>
 #include <QLabel>
 #include <QComboBox>
+#include <QAction>
 #include <memory>
 
 class MainWindow : public QMainWindow {
@@ -21,6 +23,7 @@ private:
     void createStatusBar();
     void populateSectionCombo();
     void disassembleCurrentSection();
+    void applyTheme(bool dark);
 
     std::unique_ptr<MachOFile> m_macho;
 
@@ -42,4 +45,8 @@ private:
 
     // Section list for the combo
     std::vector<const Section*> m_codeSections;
+
+    // Theme
+    bool     m_darkTheme = true;
+    QAction *m_themeToggle = nullptr;
 };
