@@ -97,8 +97,8 @@ public:
         int n = (int)func.blocks.size();
         if (n == 0) return StructNode::mkBlock();
 
-        // For large functions, skip expensive structuring and emit flat blocks
-        if (n > 80) {
+        // For very large functions, skip expensive structuring and emit flat blocks
+        if (n > 500) {
             auto block = StructNode::mkBlock();
             for (int i = 0; i < n; ++i)
                 if (!func.blocks[i].stmts.empty())
@@ -110,8 +110,8 @@ public:
         computeDominators();
         findLoops();
 
-        // Structure from the entry block
-        std::set<int> visited;
+        // Structure from the entry block (using bitvector for fast set ops)
+        std::vector<bool> visited(n, false);
         return structureRegion(0, -1, visited);
     }
 
@@ -237,13 +237,18 @@ private:
     }
 
     // ── Structure a region of blocks ────────────────────────────────
-    std::unique_ptr<StructNode> structureRegion(int start, int end, std::set<int> &visited) {
+    int m_depth = 0;
+    int m_totalCalls = 0;
+
+    std::unique_ptr<StructNode> structureRegion(int start, int end, std::vector<bool> &visited) {
         auto block = StructNode::mkBlock();
         int n = (int)m_func->blocks.size();
+        ++m_depth;
+        if (m_depth > 200 || ++m_totalCalls > n * 4) { --m_depth; return block; }
         int cur = start;
 
-        while (cur >= 0 && cur < n && cur != end && !visited.count(cur)) {
-            visited.insert(cur);
+        while (cur >= 0 && cur < n && cur != end && !visited[cur]) {
+            visited[cur] = true;
             auto &bb = m_func->blocks[cur];
 
             // Check if this is a loop header
@@ -278,10 +283,10 @@ private:
                     whileNode->negated = negCond;
 
                     // Structure the loop body
-                    std::set<int> bodyVisited = visited;
+                    std::vector<bool> bodyVisited = visited;
                     auto body = structureRegion(bodyTarget, cur, bodyVisited);
                     whileNode->children.push_back(std::move(body));
-                    visited.insert(bodyVisited.begin(), bodyVisited.end());
+                    for (int vi = 0; vi < n; ++vi) if (bodyVisited[vi]) visited[vi] = true;
 
                     block->children.push_back(std::move(whileNode));
                     cur = loopExit;
@@ -310,7 +315,7 @@ private:
 
                 // Check for loop break/continue
                 for (auto &[from, header] : m_backEdges) {
-                    if (trueB == header && visited.count(header)) {
+                    if (trueB == header && header >= 0 && header < n && visited[header]) {
                         // True branch is continue
                         auto ifNode = StructNode::mkIf(last.expr.get(), false);
                         ifNode->children.push_back(StructNode::mkContinue());
@@ -318,7 +323,7 @@ private:
                         cur = falseB;
                         goto next_block;
                     }
-                    if (falseB == header && visited.count(header)) {
+                    if (falseB == header && header >= 0 && header < n && visited[header]) {
                         auto ifNode = StructNode::mkIf(last.expr.get(), true);
                         ifNode->children.push_back(StructNode::mkContinue());
                         block->children.push_back(std::move(ifNode));
@@ -336,25 +341,24 @@ private:
                         // If/else: both arms converge
                         auto ifNode = StructNode::mkIf(last.expr.get(), false);
 
-                        std::set<int> thenVisited = visited;
+                        std::vector<bool> thenVisited = visited;
                         ifNode->children.push_back(structureRegion(trueB, convergence, thenVisited));
 
-                        std::set<int> elseVisited = visited;
+                        std::vector<bool> elseVisited = visited;
                         ifNode->elseNode = structureRegion(falseB, convergence, elseVisited);
 
-                        visited.insert(thenVisited.begin(), thenVisited.end());
-                        visited.insert(elseVisited.begin(), elseVisited.end());
+                        for (int vi = 0; vi < n; ++vi) if (thenVisited[vi] || elseVisited[vi]) visited[vi] = true;
 
                         block->children.push_back(std::move(ifNode));
                         cur = convergence;
-                    } else if (falseB == cur + 1 || !visited.count(falseB)) {
+                    } else if (falseB == cur + 1 || (falseB >= 0 && falseB < n && !visited[falseB])) {
                         // if (cond) { trueB } — false falls through
                         auto ifNode = StructNode::mkIf(last.expr.get(), false);
 
-                        if (trueB >= 0 && !visited.count(trueB) && trueB != falseB) {
-                            std::set<int> thenVisited = visited;
+                        if (trueB >= 0 && trueB < n && !visited[trueB] && trueB != falseB) {
+                            std::vector<bool> thenVisited = visited;
                             ifNode->children.push_back(structureRegion(trueB, falseB, thenVisited));
-                            visited.insert(thenVisited.begin(), thenVisited.end());
+                            for (int vi = 0; vi < n; ++vi) if (thenVisited[vi]) visited[vi] = true;
                         } else if (trueB >= 0) {
                             ifNode->children.push_back(StructNode::mkGoto(trueB));
                         }
@@ -365,10 +369,10 @@ private:
                         // if (!cond) { falseB } — true falls through
                         auto ifNode = StructNode::mkIf(last.expr.get(), true);
 
-                        if (falseB >= 0 && !visited.count(falseB)) {
-                            std::set<int> elseVisited = visited;
+                        if (falseB >= 0 && falseB < n && !visited[falseB]) {
+                            std::vector<bool> elseVisited = visited;
                             ifNode->children.push_back(structureRegion(falseB, trueB, elseVisited));
-                            visited.insert(elseVisited.begin(), elseVisited.end());
+                            for (int vi = 0; vi < n; ++vi) if (elseVisited[vi]) visited[vi] = true;
                         } else if (falseB >= 0) {
                             ifNode->children.push_back(StructNode::mkGoto(falseB));
                         }
@@ -393,7 +397,7 @@ private:
 
                 int target = last.jumpTarget;
                 // Check for loop back-edge
-                if (visited.count(target)) {
+                if (target >= 0 && target < n && visited[target]) {
                     // This might be a continue or end of loop body
                     bool isBackEdge = m_backEdges.count({cur, target}) > 0;
                     if (isBackEdge) {
@@ -427,33 +431,33 @@ private:
             next_block:;
         }
 
+        --m_depth;
         return block;
     }
 
     // Find where two block paths converge (meet point)
-    int findConvergence(int a, int b, int regionEnd, const std::set<int> &visited) {
+    int findConvergence(int a, int b, int regionEnd, const std::vector<bool> &visited) {
         int n = (int)m_func->blocks.size();
         // Walk both paths forward and find first common reachable block
-        // Limit search depth to avoid O(n^3) on large functions
-        std::set<int> reachA, reachB;
+        std::vector<bool> reachA(n, false), reachB(n, false);
         std::vector<int> workA = {a}, workB = {b};
         int maxSteps = std::min(n, 50);
 
         for (int step = 0; step < maxSteps; ++step) {
             std::vector<int> nextA, nextB;
             for (int x : workA) {
-                if (x < 0 || x >= n || reachA.count(x)) continue;
-                reachA.insert(x);
-                if (reachB.count(x)) return x;
+                if (x < 0 || x >= n || reachA[x]) continue;
+                reachA[x] = true;
+                if (reachB[x]) return x;
                 for (int s : m_func->blocks[x].succs)
-                    if (!visited.count(s) || s == regionEnd) nextA.push_back(s);
+                    if (s >= 0 && s < n && (!visited[s] || s == regionEnd)) nextA.push_back(s);
             }
             for (int x : workB) {
-                if (x < 0 || x >= n || reachB.count(x)) continue;
-                reachB.insert(x);
-                if (reachA.count(x)) return x;
+                if (x < 0 || x >= n || reachB[x]) continue;
+                reachB[x] = true;
+                if (reachA[x]) return x;
                 for (int s : m_func->blocks[x].succs)
-                    if (!visited.count(s) || s == regionEnd) nextB.push_back(s);
+                    if (s >= 0 && s < n && (!visited[s] || s == regionEnd)) nextB.push_back(s);
             }
             workA = nextA;
             workB = nextB;

@@ -140,7 +140,7 @@ public:
                         int numCases = 0;
                         int switchBase = 0;
                         uint32_t defaultAddr = 0;
-                        for (int back = (int)i - 1; back >= 0 && back >= (int)i - 8; --back) {
+                        for (int back = (int)i - 1; back >= 0 && back >= (int)i - 20; --back) {
                             std::string bmn = insn[back].mnemonic;
                             // ja default_label (unsigned above = out of range)
                             if ((bmn == "ja" || bmn == "jnbe") && insn[back].detail &&
@@ -148,14 +148,13 @@ public:
                                 insn[back].detail->x86.operands[0].type == X86_OP_IMM) {
                                 defaultAddr = (uint32_t)insn[back].detail->x86.operands[0].imm;
                             }
-                            // jbe in_range → default is the fallthrough after jbe (next insn)
+                            // jbe in_range → jbe jumps to switch body; NOT-taken is default
                             if ((bmn == "jbe" || bmn == "jna") && !defaultAddr && insn[back].detail &&
                                 insn[back].detail->x86.op_count > 0 &&
                                 insn[back].detail->x86.operands[0].type == X86_OP_IMM) {
-                                // jbe jumps INTO the switch; default is where we'd go if NOT taken
-                                // Actually for switch: cmp + ja is the normal pattern.
-                                // cmp + jbe means jbe goes to the switch body, and fall-through is default
-                                // This is less common; skip for now
+                                // Default = instruction after jbe (fall-through when NOT taken)
+                                if (back + 1 < (int)funcEndIdx)
+                                    defaultAddr = insn[back + 1].address;
                             }
                             if (bmn == "cmp" && insn[back].detail &&
                                 insn[back].detail->x86.op_count >= 2 &&
