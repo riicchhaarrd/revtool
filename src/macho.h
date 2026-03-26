@@ -622,6 +622,79 @@ private:
                     m_funcMap[sym.n_value] = demangleNameOnly(sym.name);
             }
         }
+        // Resolve import stubs via indirect symbol table
+        resolveImportStubs();
+    }
+
+    void resolveImportStubs() {
+        // Find LC_DYSYMTAB
+        uint32_t indirectSymOff = 0, nIndirect = 0;
+        for (auto &lc : m_loadCmds) {
+            if (lc.cmd == LC_DYSYMTAB && lc.fileOffset + 64 <= m_size) {
+                indirectSymOff = readLE<uint32_t>(lc.fileOffset + 56);
+                nIndirect = readLE<uint32_t>(lc.fileOffset + 60);
+                break;
+            }
+        }
+        if (!indirectSymOff || !nIndirect) return;
+
+        // For each section that has stubs (S_SYMBOL_STUBS = 0x08, S_LAZY_SYMBOL_POINTERS = 0x07,
+        // S_NON_LAZY_SYMBOL_POINTERS = 0x06), resolve entries via indirect symbol table
+        for (auto &seg : m_segments) {
+            uint32_t secOff = 0;
+            // Find the raw section offset to read reserved1/reserved2
+            for (auto &lc : m_loadCmds) {
+                if (lc.cmd != LC_SEGMENT) continue;
+                std::string sn = readFixedString(lc.fileOffset + 8, 16);
+                if (sn != seg.segname) continue;
+                secOff = lc.fileOffset + 56;
+                break;
+            }
+            if (!secOff) continue;
+
+            for (uint32_t si = 0; si < seg.nsects && secOff + (si+1)*68 <= m_size; ++si) {
+                uint32_t shOff = secOff + si * 68;
+                uint32_t sflags = readLE<uint32_t>(shOff + 56);
+                uint32_t reserved1 = readLE<uint32_t>(shOff + 60);
+                uint32_t reserved2 = readLE<uint32_t>(shOff + 64);
+                uint32_t saddr = readLE<uint32_t>(shOff + 32);
+                uint32_t ssize = readLE<uint32_t>(shOff + 36);
+                uint8_t secType = sflags & 0xFF;
+
+                if (secType == 0x08 && reserved2 > 0) {
+                    // S_SYMBOL_STUBS: each entry is reserved2 bytes
+                    uint32_t nstubs = ssize / reserved2;
+                    for (uint32_t j = 0; j < nstubs; ++j) {
+                        uint32_t idx = reserved1 + j;
+                        if (idx >= nIndirect) break;
+                        if (indirectSymOff + (idx+1)*4 > m_size) break;
+                        uint32_t symIdx = readLE<uint32_t>(indirectSymOff + idx * 4);
+                        if (symIdx >= m_symbols.size()) continue;
+                        uint32_t stubAddr = saddr + j * reserved2;
+                        if (m_funcMap.find(stubAddr) == m_funcMap.end()) {
+                            std::string name = demangleNameOnly(m_symbols[symIdx].name);
+                            m_funcMap[stubAddr] = name;
+                        }
+                    }
+                }
+                if (secType == 0x07 || secType == 0x06) {
+                    // Lazy/non-lazy symbol pointers: each entry is 4 bytes
+                    uint32_t nptrs = ssize / 4;
+                    for (uint32_t j = 0; j < nptrs; ++j) {
+                        uint32_t idx = reserved1 + j;
+                        if (idx >= nIndirect) break;
+                        if (indirectSymOff + (idx+1)*4 > m_size) break;
+                        uint32_t symIdx = readLE<uint32_t>(indirectSymOff + idx * 4);
+                        if (symIdx >= m_symbols.size()) continue;
+                        uint32_t ptrAddr = saddr + j * 4;
+                        if (m_funcMap.find(ptrAddr) == m_funcMap.end()) {
+                            std::string name = demangleNameOnly(m_symbols[symIdx].name);
+                            m_funcMap[ptrAddr] = name;
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // Look up StabsFunction by address

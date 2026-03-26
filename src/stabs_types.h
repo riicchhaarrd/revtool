@@ -76,6 +76,7 @@ struct StabsGlobalVar {
     uint32_t    address = 0;
     TypeRef     typeRef = NullType;
     bool        isStatic = false;
+    int         sourceFileIdx = -1;
 };
 
 // ── STABS Type Table ─────────────────────────────────────────────────
@@ -163,8 +164,8 @@ public:
     }
 
     // Register a global/static variable
-    void addGlobal(const std::string &name, uint32_t addr, TypeRef type, bool isStatic) {
-        m_globals.push_back({name, addr, type, isStatic});
+    void addGlobal(const std::string &name, uint32_t addr, TypeRef type, bool isStatic, int srcIdx = -1) {
+        m_globals.push_back({name, addr, type, isStatic, srcIdx >= 0 ? srcIdx : m_unit});
         if (addr) m_globalByAddr[addr] = m_globals.size() - 1;
     }
 
@@ -439,6 +440,14 @@ public:
         out += " {\n";
         for (auto &f : t->fields) {
             if (f.name.empty() || f.name[0] == '/') continue; // skip C++ visibility markers
+            // Skip C++ method stubs and inheritance specs
+            if (f.name.find("::") != std::string::npos) continue;
+            if (f.name.find("(") != std::string::npos) continue;
+            if (f.name[0] == '!' || f.name[0] == '#' || f.name[0] == '$') continue;
+            // Skip names with STABS type encoding artifacts
+            if (f.name.find("=") != std::string::npos) continue;
+            // Skip fields with no size (C++ static members)
+            if (f.bitSize == 0 && f.bitOffset == 0 && f.name.find("_S_") != std::string::npos) continue;
             out += "    " + formatDecl(f.typeRef, f.name) + ";\n";
         }
         out += "}";

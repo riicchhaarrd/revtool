@@ -29,6 +29,14 @@ inline std::string demangleNameOnly(const std::string &name) {
     // Find the outermost '(' that starts the parameter list.
     // Must handle nested templates like "Foo<Bar(int)>::baz(float)".
     // The param list is the LAST top-level '(' ... ')' at the end.
+    // Strip trailing " const" or " volatile" qualifiers
+    while (true) {
+        if (full.size() > 6 && full.substr(full.size() - 6) == " const")
+            full = full.substr(0, full.size() - 6);
+        else if (full.size() > 9 && full.substr(full.size() - 9) == " volatile")
+            full = full.substr(0, full.size() - 9);
+        else break;
+    }
     if (full.empty() || full.back() != ')') return full;
     int depth = 0;
     for (int i = (int)full.size() - 1; i >= 0; --i) {

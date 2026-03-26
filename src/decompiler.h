@@ -77,15 +77,11 @@ public:
         emitTypeDefs(out, types, usedTypes);
 
         // Emit global/static variables that belong to this source file
-        // Determine address range of the file
-        uint32_t fileStartAddr = sf.address;
-        uint32_t fileEndAddr = (srcIdx + 1 < (int)sources.size()) ?
-            sources[srcIdx + 1].address : 0xFFFFFFFF;
         std::set<std::string> emittedGlobals;
         bool anyGlobals = false;
         for (auto &g : types.globals()) {
             if (g.address == 0) continue;
-            if (g.address < fileStartAddr || g.address >= fileEndAddr) continue;
+            if (g.sourceFileIdx != srcIdx) continue;
             if (emittedGlobals.count(g.name)) continue;
             emittedGlobals.insert(g.name);
             out += QString::fromStdString(
@@ -279,9 +275,16 @@ private:
                 for (size_t i = 0; i < m_func.params.size(); ++i) {
                     if (i) out += ", ";
                     auto &p = m_func.params[i];
-                    out += QString::fromStdString(
-                        p.typeRef != NullType ? m_types.formatDecl(p.typeRef, p.name)
-                                              : "int " + p.name);
+                    std::string decl;
+                    if (p.typeRef != NullType) {
+                        decl = m_types.formatDecl(p.typeRef, p.name);
+                        // Strip const from 'this' pointer (C++ const methods make this const T*)
+                        if (p.name == "this" && decl.find("const ") == 0)
+                            decl = decl.substr(6);
+                    } else {
+                        decl = "int " + p.name;
+                    }
+                    out += QString::fromStdString(decl);
                 }
             } else {
                 out += "void";
