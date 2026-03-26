@@ -800,29 +800,98 @@ private:
                 break;
             }
             case IRStmtKind::Switch: {
-                std::string expr = stmt.expr ? emitExpr(stmt.expr.get()) : "0";
-                // Add back the base offset for readable case values
-                if (stmt.switchBase != 0)
-                    expr = "(" + expr + " + " + std::to_string(stmt.switchBase) + ")";
+                std::string expr;
+                // Try to recover the original switch variable by looking through
+                // the base subtraction: if expr is (var - base), switch on var directly
+                bool simplified = false;
+                if (stmt.switchBase != 0 && stmt.expr) {
+                    IRExpr *inner = stmt.expr.get();
+                    // Follow temp inlining
+                    if (inner->op == IROp::Temp && m_tempUseCount[inner->tempId()] <= 1) {
+                        auto it = m_tempDef.find(inner->tempId());
+                        if (it != m_tempDef.end()) inner = it->second;
+                    }
+                    // Check for (var - base) pattern
+                    if (inner && inner->op == IROp::Sub && inner->kids.size() == 2 &&
+                        inner->kids[1]->isConst() && inner->kids[1]->value == stmt.switchBase) {
+                        expr = emitExpr(inner->kids[0].get());
+                        simplified = true;
+                    }
+                }
+                if (!simplified) {
+                    expr = stmt.expr ? emitExpr(stmt.expr.get()) : "0";
+                    if (stmt.switchBase != 0)
+                        expr = "(" + expr + " + " + std::to_string(stmt.switchBase) + ")";
+                }
                 out += pad(indent) + "switch (" + QString::fromStdString(expr) + ") {\n";
-                // Group cases by target block
+                // Group cases by target block and sort by block order
                 std::map<int, std::vector<int>> blockCases;
-                for (auto &[caseVal, target] : stmt.switchCases)
+                std::set<int> caseTargets;
+                for (auto &[caseVal, target] : stmt.switchCases) {
                     blockCases[target].push_back(caseVal);
+                    caseTargets.insert(target);
+                }
+                if (stmt.switchDefault >= 0) caseTargets.insert(stmt.switchDefault);
+
+                // Determine which blocks are reachable only from this switch
+                // (safe to inline vs. needing goto for shared targets)
+                std::set<int> inlinedBlocks;
+
+                // Emit cases in block order
                 for (auto &[target, vals] : blockCases) {
+                    std::sort(vals.begin(), vals.end());
                     for (int v : vals)
                         out += pad(indent) + QString("case %1:\n").arg(v);
-                    out += pad(indent + 1) + QString("goto bb_%1;\n").arg(target);
+                    // Inline the case body: emit statements from the target block
+                    if (target >= 0 && target < (int)m_func.blocks.size()) {
+                        auto &cbb = m_func.blocks[target];
+                        inlinedBlocks.insert(target);
+                        // Emit non-terminal statements
+                        for (int si = 0; si < (int)cbb.stmts.size(); ++si) {
+                            auto &s = cbb.stmts[si];
+                            // Skip terminal jump/branch — we'll add break instead
+                            if (si == (int)cbb.stmts.size() - 1 &&
+                                (s.kind == IRStmtKind::Jump || s.kind == IRStmtKind::Branch))
+                                continue;
+                            if (s.kind == IRStmtKind::Return) {
+                                emitStmt(out, s, indent + 1);
+                                goto next_case; // return already exits, no break needed
+                            }
+                            emitStmt(out, s, indent + 1);
+                        }
+                        // Check if the block falls through to the next case target
+                        // (don't emit break for fall-through)
+                        if (!cbb.succs.empty() && caseTargets.count(cbb.succs[0])) {
+                            // Fall through to next case — no break
+                            out += pad(indent + 1) + "/* fall through */\n";
+                        } else {
+                            out += pad(indent + 1) + "break;\n";
+                        }
+                    } else {
+                        out += pad(indent + 1) + "break;\n";
+                    }
+                    next_case:;
                 }
                 if (stmt.switchDefault >= 0) {
                     out += pad(indent) + "default:\n";
-                    out += pad(indent + 1) + QString("goto bb_%1;\n").arg(stmt.switchDefault);
+                    if (stmt.switchDefault >= 0 && stmt.switchDefault < (int)m_func.blocks.size()) {
+                        auto &dbb = m_func.blocks[stmt.switchDefault];
+                        inlinedBlocks.insert(stmt.switchDefault);
+                        for (int si = 0; si < (int)dbb.stmts.size(); ++si) {
+                            auto &s = dbb.stmts[si];
+                            if (si == (int)dbb.stmts.size() - 1 &&
+                                (s.kind == IRStmtKind::Jump || s.kind == IRStmtKind::Branch))
+                                continue;
+                            emitStmt(out, s, indent + 1);
+                        }
+                    }
+                    out += pad(indent + 1) + "break;\n";
                 }
                 out += pad(indent) + "}\n";
-                // Ensure all targets are in gotoTargets for label emission
+                // Only add goto targets for blocks NOT inlined
                 for (auto &[caseVal, target] : stmt.switchCases)
-                    m_gotoTargets.insert(target);
-                if (stmt.switchDefault >= 0)
+                    if (!inlinedBlocks.count(target)) m_gotoTargets.insert(target);
+                if (stmt.switchDefault >= 0 && !inlinedBlocks.count(stmt.switchDefault))
                     m_gotoTargets.insert(stmt.switchDefault);
                 break;
             }
@@ -907,12 +976,12 @@ private:
                         if (!access.empty())
                             result = emitExpr(addr) + "->" + access;
                         else
-                            result = emitDeref(emitExpr(addr), e->typeRef);
+                            result = emitDeref(emitExpr(addr), e->typeRef, addrType);
                     } else {
-                        result = emitDeref(emitExpr(addr), e->typeRef);
+                        result = emitDeref(emitExpr(addr), e->typeRef, addrType);
                     }
                 } else {
-                    result = emitDeref(emitExpr(addr), e->typeRef);
+                    result = emitDeref(emitExpr(addr), e->typeRef, exprType(addr));
                 }
                 break;
             }
@@ -1145,7 +1214,14 @@ private:
 
         // Emit a pointer dereference, adding a cast if the address isn't a pointer type.
         // This prevents "invalid type argument of unary '*' (have 'int')" errors.
-        std::string emitDeref(const std::string &addrStr, TypeRef loadType = NullType) {
+        std::string emitDeref(const std::string &addrStr, TypeRef loadType = NullType,
+                              TypeRef addrType = NullType) {
+            // If the address is already a pointer type, just dereference without cast
+            if (addrType != NullType) {
+                auto *at = m_types.resolveType(addrType);
+                if (at && at->kind == StabsTypeKind::Pointer)
+                    return "*(" + addrStr + ")";
+            }
             if (loadType != NullType) {
                 std::string t = m_types.formatType(loadType);
                 return "*((" + t + " *)(" + addrStr + "))";
@@ -1154,7 +1230,13 @@ private:
         }
 
         // Emit a store through a pointer, adding a cast if needed.
-        std::string emitStoreDeref(const std::string &addrStr, TypeRef storeType = NullType) {
+        std::string emitStoreDeref(const std::string &addrStr, TypeRef storeType = NullType,
+                                   TypeRef addrType = NullType) {
+            if (addrType != NullType) {
+                auto *at = m_types.resolveType(addrType);
+                if (at && at->kind == StabsTypeKind::Pointer)
+                    return "*(" + addrStr + ")";
+            }
             if (storeType != NullType) {
                 std::string t = m_types.formatType(storeType);
                 return "*((" + t + " *)(" + addrStr + "))";
