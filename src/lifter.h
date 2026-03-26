@@ -90,6 +90,70 @@ public:
             }
             if (isRet && i + 1 < funcEndIdx)
                 blockStarts.insert(insn[i + 1].address);
+
+            // ── Jump table detection: jmp [index*4 + table] ──────────
+            if (isJump && in.detail->x86.op_count > 0 &&
+                in.detail->x86.operands[0].type == X86_OP_MEM) {
+                auto &mem = in.detail->x86.operands[0].mem;
+                // Pattern: jmp [reg*4 + addr] or jmp [ebx + reg*4 + disp] (PIC)
+                if (mem.scale == 4 && mem.index != X86_REG_INVALID) {
+                    uint32_t tableAddr = 0;
+                    if (mem.base == X86_REG_INVALID && mem.disp)
+                        tableAddr = (uint32_t)mem.disp;
+                    else if (m_hasPIC && mem.base == X86_REG_EBX && m_picBase)
+                        tableAddr = m_picBase + (int)mem.disp;
+
+                    if (tableAddr) {
+                        // Find the bounds check (cmp + ja) preceding this jmp
+                        int numCases = 0;
+                        int switchBase = 0;
+                        uint32_t defaultAddr = 0;
+                        for (int back = (int)i - 1; back >= 0 && back >= (int)i - 5; --back) {
+                            std::string bmn = insn[back].mnemonic;
+                            if (bmn == "ja" && insn[back].detail &&
+                                insn[back].detail->x86.op_count > 0 &&
+                                insn[back].detail->x86.operands[0].type == X86_OP_IMM) {
+                                defaultAddr = (uint32_t)insn[back].detail->x86.operands[0].imm;
+                            }
+                            if (bmn == "cmp" && insn[back].detail &&
+                                insn[back].detail->x86.op_count == 2 &&
+                                insn[back].detail->x86.operands[1].type == X86_OP_IMM) {
+                                numCases = (int)insn[back].detail->x86.operands[1].imm + 1;
+                            }
+                            if (bmn == "sub" && insn[back].detail &&
+                                insn[back].detail->x86.op_count == 2 &&
+                                insn[back].detail->x86.operands[1].type == X86_OP_IMM) {
+                                switchBase = (int)insn[back].detail->x86.operands[1].imm;
+                            }
+                        }
+                        if (numCases > 0 && numCases <= 1024) {
+                            // Read jump table and add targets as block starts
+                            SwitchInfo si;
+                            si.instrAddr = in.address;
+                            si.tableAddr = tableAddr;
+                            si.numCases = numCases;
+                            si.switchBase = switchBase;
+                            si.defaultAddr = defaultAddr;
+                            for (int c = 0; c < numCases; ++c) {
+                                int64_t off = m_mf.fileOffsetForAddress(tableAddr + c * 4);
+                                if (off < 0) break;
+                                const uint8_t *p = m_mf.bytesAt((uint32_t)off, 4);
+                                if (!p) break;
+                                uint32_t target;
+                                memcpy(&target, p, 4);
+                                si.targets.push_back(target);
+                                if (target >= funcAddr && target < funcAddr + codeLen)
+                                    blockStarts.insert(target);
+                            }
+                            if (defaultAddr >= funcAddr && defaultAddr < funcAddr + codeLen)
+                                blockStarts.insert(defaultAddr);
+                            m_switchTables[in.address] = std::move(si);
+                            if (i + 1 < funcEndIdx)
+                                blockStarts.insert(insn[i + 1].address);
+                        }
+                    }
+                }
+            }
         }
 
         // ── Pass 2: create basic blocks ──────────────────────────────
@@ -245,6 +309,21 @@ public:
                     bb.succs.push_back(last.falseTarget);
                     func.blocks[last.falseTarget].preds.push_back(bb.id);
                 }
+            } else if (last.kind == IRStmtKind::Switch) {
+                // Add edges for all case targets and default
+                std::set<int> added;
+                for (auto &[caseVal, target] : last.switchCases) {
+                    if (target >= 0 && target < (int)func.blocks.size() && !added.count(target)) {
+                        bb.succs.push_back(target);
+                        func.blocks[target].preds.push_back(bb.id);
+                        added.insert(target);
+                    }
+                }
+                if (last.switchDefault >= 0 && last.switchDefault < (int)func.blocks.size() &&
+                    !added.count(last.switchDefault)) {
+                    bb.succs.push_back(last.switchDefault);
+                    func.blocks[last.switchDefault].preds.push_back(bb.id);
+                }
             } else if (last.kind == IRStmtKind::Return) {
                 // no successors
             } else {
@@ -292,6 +371,17 @@ private:
     // Call argument collection
     std::map<int, std::unique_ptr<IRExpr>> m_espArgs;
     std::vector<std::unique_ptr<IRExpr>>   m_pushArgs;
+
+    // Switch table info collected in Pass 1
+    struct SwitchInfo {
+        uint32_t instrAddr = 0;       // address of the jmp instruction
+        uint32_t tableAddr = 0;       // address of the jump table
+        int numCases = 0;             // number of entries
+        int switchBase = 0;           // value subtracted before indexing
+        uint32_t defaultAddr = 0;     // default case target
+        std::vector<uint32_t> targets; // resolved target addresses
+    };
+    std::map<uint32_t, SwitchInfo> m_switchTables;
 
     // ── Register helpers ────────────────────────────────────────────
     int regTemp(x86_reg reg) {
@@ -902,6 +992,9 @@ private:
                 target = fit != m_mf.functionMap().end() ? fit->second :
                     ([&]{ char b[16]; snprintf(b,16,"sub_%X",addr); return std::string(b); })();
                 auto *callee = m_mf.stabsFunctionAt(addr);
+                // Fallback: look up by name (handles import stubs → real function)
+                if (!callee && !target.empty())
+                    callee = m_mf.stabsFunctionByName(target);
                 if (callee) retType = callee->returnType;
             } else {
                 auto tgt = readOp(o[0]);
@@ -1123,6 +1216,36 @@ private:
 
         // ── Indirect jump (switch/vtable) ───────────────────────────
         if (mn == "jmp" && n == 1 && o[0].type != X86_OP_IMM) {
+            // Check if this is a known switch table
+            auto sit = m_switchTables.find(in.address);
+            if (sit != m_switchTables.end()) {
+                auto &si = sit->second;
+                // Find the switch expression — look back for the sub/cmp pattern
+                // The index register holds (original_value - base)
+                // We want to switch on original_value
+                auto &mem = o[0].mem;
+                auto switchExpr = (mem.index != X86_REG_INVALID) ?
+                    readReg(mem.index) : IRExpr::mkConst(0);
+
+                // Build case list: (case_value, block_id)
+                std::vector<std::pair<int, int>> cases;
+                int defaultBlock = -1;
+                if (si.defaultAddr) {
+                    auto dit = addrToBlock.find(si.defaultAddr);
+                    if (dit != addrToBlock.end()) defaultBlock = dit->second;
+                }
+                for (int c = 0; c < (int)si.targets.size(); ++c) {
+                    uint32_t tgt = si.targets[c];
+                    if (tgt == si.defaultAddr) continue; // skip default entries
+                    auto tit = addrToBlock.find(tgt);
+                    if (tit == addrToBlock.end()) continue;
+                    int caseVal = c + si.switchBase;
+                    cases.push_back({caseVal, tit->second});
+                }
+                bb.stmts.push_back(IRStmt::mkSwitch(
+                    std::move(switchExpr), std::move(cases), defaultBlock, si.switchBase));
+                return;
+            }
             auto target = readOp(o[0]);
             bb.stmts.push_back(IRStmt::mkIntrinsic("indirect_jmp",
                 "goto *" + varText(std::move(target))));

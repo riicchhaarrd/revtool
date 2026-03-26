@@ -247,7 +247,7 @@ public:
                 return inner; // already formatted as function pointer
             return inner + " *";
         }
-        case StabsTypeKind::Reference: return formatType(t->targetType, depth + 1) + " &";
+        case StabsTypeKind::Reference: return formatType(t->targetType, depth + 1) + " *"; // C++ ref → C ptr
         case StabsTypeKind::Const: {
             std::string inner = formatType(t->targetType, depth + 1);
             if (inner.find("const ") == 0) return inner; // avoid double const
@@ -347,6 +347,15 @@ public:
         int bitTarget = byteOffset * 8;
         // Exact match first
         for (auto &f : t->fields) {
+            // Skip C++ artifacts (inheritance markers, methods, operators, etc.)
+            if (f.name.empty() || f.name[0] == '!' || f.name[0] == '/' ||
+                f.name[0] == '~' || f.name[0] == '#' || f.name[0] == '$' ||
+                f.name.find("::") != std::string::npos ||
+                f.name.find("(") != std::string::npos ||
+                f.name.find("<") != std::string::npos ||
+                f.name.find("operator") == 0 ||
+                (f.bitSize == 0 && f.bitOffset == 0))
+                continue;
             if (f.bitOffset == bitTarget || f.bitOffset / 8 == byteOffset) {
                 // If this field is a struct, the code might be accessing its first sub-field.
                 // We drill down one level if the struct has a known scalar first field.
@@ -368,6 +377,11 @@ public:
         }
         // Check if offset falls inside a larger field (array or sub-struct)
         for (auto &f : t->fields) {
+            // Skip C++ artifacts
+            if (f.name.empty() || f.name[0] == '!' || f.name[0] == '/' ||
+                f.name.find("::") != std::string::npos ||
+                (f.bitSize == 0 && f.bitOffset == 0))
+                continue;
             if (bitTarget >= f.bitOffset && bitTarget < f.bitOffset + f.bitSize) {
                 int fieldByteStart = f.bitOffset / 8;
                 int offsetInField = byteOffset - fieldByteStart;

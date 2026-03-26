@@ -704,6 +704,12 @@ private:
             if (fn.address == addr) return &fn;
         return nullptr;
     }
+    // Find a STABS function by demangled name (for cross-CU lookups when stub addr != real addr)
+    const StabsFunction* stabsFunctionByName(const std::string &name) const {
+        for (auto &fn : m_stabsFuncs)
+            if (fn.name == name) return &fn;
+        return nullptr;
+    }
     // Find enclosing function for any address
     const StabsFunction* stabsFunctionContaining(uint32_t addr) const {
         const StabsFunction *best = nullptr;

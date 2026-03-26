@@ -347,6 +347,13 @@ private:
                 }
                 continue;
 
+            } else if (last.kind == IRStmtKind::Switch) {
+                // Emit all statements including the switch — case targets will be
+                // emitted as labeled blocks by the fallback mechanism
+                block->children.push_back(StructNode::mkSeq(cur, 0, numStmts));
+                cur = -1;
+                continue;
+
             } else if (last.kind == IRStmtKind::Jump) {
                 // Emit all statements except the jump
                 if (numStmts > 1)

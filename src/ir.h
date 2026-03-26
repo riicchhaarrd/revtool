@@ -185,6 +185,7 @@ enum class IRStmtKind {
     Return,     // return expr (expr may be null for void)
     Label,      // block label (not a real statement, just a marker)
     Intrinsic,  // rep movsb / cpuid / etc — things with no C equivalent, emitted as inline comment or helper call
+    Switch,     // switch(expr) { case val: goto block; ... }
 };
 
 struct IRStmt {
@@ -211,6 +212,11 @@ struct IRStmt {
 
     // For Label
     int blockId = -1;
+
+    // For Switch: case_value → block_id, plus default block
+    std::vector<std::pair<int, int>> switchCases;  // (case_value, target_block_id)
+    int switchDefault = -1;
+    int switchBase = 0;  // value subtracted before indexing (e.g. sub eax, 7 → base=7)
 
     // ── Factories ───────────────────────────────────────────────────
     static IRStmt mkAssign(int temp, std::unique_ptr<IRExpr> rhs, TypeRef t = NullType) {
@@ -249,6 +255,16 @@ struct IRStmt {
     static IRStmt mkIntrinsic(const std::string &name, const std::string &cText) {
         IRStmt s; s.kind = IRStmtKind::Intrinsic;
         s.intrinsicName = name; s.intrinsicComment = cText;
+        return s;
+    }
+    static IRStmt mkSwitch(std::unique_ptr<IRExpr> expr,
+                           std::vector<std::pair<int, int>> cases,
+                           int defaultBlock, int base = 0) {
+        IRStmt s; s.kind = IRStmtKind::Switch;
+        s.expr = std::move(expr);
+        s.switchCases = std::move(cases);
+        s.switchDefault = defaultBlock;
+        s.switchBase = base;
         return s;
     }
 };

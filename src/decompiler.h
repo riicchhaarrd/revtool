@@ -96,6 +96,63 @@ public:
             return mf.stabsFunctions()[a].address < mf.stabsFunctions()[b].address;
         });
 
+        // Collect addresses of functions defined in this file
+        std::set<uint32_t> localAddrs;
+        for (size_t fi : sorted) localAddrs.insert(mf.stabsFunctions()[fi].address);
+
+        // Generate forward declarations for cross-CU functions that are called
+        // by functions in this file. We do a quick IR lift to find call targets.
+        {
+            std::set<std::string> emittedProtos;
+            Lifter lifter(mf);
+            for (size_t fi : sorted) {
+                auto &fn = mf.stabsFunctions()[fi];
+                if (fn.address == 0) continue;
+                IRFunc irfn = lifter.liftFunction(fn.address);
+                for (auto &bb : irfn.blocks) {
+                    for (auto &stmt : bb.stmts) {
+                        // Look for Call expressions
+                        IRExpr *callExpr = nullptr;
+                        if (stmt.kind == IRStmtKind::Call) callExpr = stmt.expr.get();
+                        else if (stmt.kind == IRStmtKind::Assign && stmt.expr &&
+                                 stmt.expr->op == IROp::Call) callExpr = stmt.expr.get();
+                        if (!callExpr || callExpr->op != IROp::Call) continue;
+                        const std::string &calleeName = callExpr->name;
+                        if (calleeName.empty() || emittedProtos.count(calleeName)) continue;
+                        // Skip if defined locally
+                        bool isLocal = false;
+                        for (auto &lfn : mf.stabsFunctions())
+                            if (lfn.name == calleeName && localAddrs.count(lfn.address))
+                                { isLocal = true; break; }
+                        if (isLocal) continue;
+                        // Look up the callee's STABS info
+                        const StabsFunction *callee = mf.stabsFunctionByName(calleeName);
+                        if (!callee || callee->returnType == NullType) continue;
+                        emittedProtos.insert(calleeName);
+                        // Emit prototype — sanitize C++ names for C
+                        std::string cname = calleeName;
+                        { size_t p = 0; while ((p = cname.find("::", p)) != std::string::npos)
+                            cname.replace(p, 2, "_"); }
+                        { size_t p = 0; while ((p = cname.find("~", p)) != std::string::npos)
+                            cname.replace(p, 1, "dtor_"); }
+                        std::string retStr = types.formatType(callee->returnType);
+                        std::string proto = retStr + " " + cname + "(";
+                        if (!callee->params.empty()) {
+                            for (size_t p = 0; p < callee->params.size(); ++p) {
+                                if (p) proto += ", ";
+                                auto &par = callee->params[p];
+                                proto += par.typeRef != NullType ?
+                                    types.formatType(par.typeRef) : "int";
+                            }
+                        }
+                        proto += ");\n";
+                        out += QString::fromStdString(proto);
+                    }
+                }
+            }
+            if (!emittedProtos.empty()) out += "\n";
+        }
+
         for (size_t fi : sorted) {
             auto &fn = mf.stabsFunctions()[fi];
             if (fn.address == 0) continue;
@@ -283,6 +340,9 @@ private:
             for (auto &bb : func.blocks)
                 for (auto &stmt : bb.stmts)
                     countTempUses(stmt);
+            // Force-declare temps whose def and use are in different blocks
+            // (cross-block inlining is unsafe because the defining expr's context may differ)
+            forceDeclCrossBlockTemps();
         }
 
         QString generate(StructNode *root) {
@@ -410,6 +470,35 @@ private:
         std::map<int, std::string> m_copyMap;
         std::set<int>         m_gotoTargets;    // block IDs that are goto targets
         std::set<int>         m_emittedLabels;  // labels already emitted (avoid duplicates)
+
+        // Force temps with cross-block def/use to be declared (not inlined)
+        void forceDeclCrossBlockTemps() {
+            // Build: temp → defining block id
+            std::map<int, int> defBlock;
+            for (auto &bb : m_func.blocks)
+                for (auto &stmt : bb.stmts)
+                    if (stmt.kind == IRStmtKind::Assign && stmt.destTemp >= 0)
+                        defBlock[stmt.destTemp] = bb.id;
+            // Check each block for temp uses that are defined in a different block
+            for (auto &bb : m_func.blocks) {
+                for (auto &stmt : bb.stmts) {
+                    std::set<int> usedTemps;
+                    collectTempIds(stmt.expr.get(), usedTemps);
+                    collectTempIds(stmt.addr.get(), usedTemps);
+                    for (auto &a : stmt.args) collectTempIds(a.get(), usedTemps);
+                    for (int tid : usedTemps) {
+                        auto it = defBlock.find(tid);
+                        if (it != defBlock.end() && it->second != bb.id)
+                            m_tempUseCount[tid] = std::max(m_tempUseCount[tid], 2);
+                    }
+                }
+            }
+        }
+        void collectTempIds(const IRExpr *e, std::set<int> &ids) {
+            if (!e) return;
+            if (e->op == IROp::Temp) ids.insert(e->tempId());
+            for (auto &k : e->kids) collectTempIds(k.get(), ids);
+        }
 
         // Copy propagation: replace temps that are simple copies of vars/other temps
         void runCopyPropagation() {
@@ -688,6 +777,33 @@ private:
                 out += pad(indent) + QString::fromStdString(stmt.intrinsicComment) + ";\n";
                 break;
             }
+            case IRStmtKind::Switch: {
+                std::string expr = stmt.expr ? emitExpr(stmt.expr.get()) : "0";
+                // Add back the base offset for readable case values
+                if (stmt.switchBase != 0)
+                    expr = "(" + expr + " + " + std::to_string(stmt.switchBase) + ")";
+                out += pad(indent) + "switch (" + QString::fromStdString(expr) + ") {\n";
+                // Group cases by target block
+                std::map<int, std::vector<int>> blockCases;
+                for (auto &[caseVal, target] : stmt.switchCases)
+                    blockCases[target].push_back(caseVal);
+                for (auto &[target, vals] : blockCases) {
+                    for (int v : vals)
+                        out += pad(indent) + QString("case %1:\n").arg(v);
+                    out += pad(indent + 1) + QString("goto bb_%1;\n").arg(target);
+                }
+                if (stmt.switchDefault >= 0) {
+                    out += pad(indent) + "default:\n";
+                    out += pad(indent + 1) + QString("goto bb_%1;\n").arg(stmt.switchDefault);
+                }
+                out += pad(indent) + "}\n";
+                // Ensure all targets are in gotoTargets for label emission
+                for (auto &[caseVal, target] : stmt.switchCases)
+                    m_gotoTargets.insert(target);
+                if (stmt.switchDefault >= 0)
+                    m_gotoTargets.insert(stmt.switchDefault);
+                break;
+            }
             case IRStmtKind::Branch:
             case IRStmtKind::Jump:
             case IRStmtKind::Label:
@@ -711,6 +827,8 @@ private:
                 }
                 // Check for IEEE 754 float bit patterns for common constants
                 result = tryFloatConst((uint32_t)e->value);
+                // Check for FourCC constants (4 printable ASCII bytes)
+                if (result.empty()) result = tryFourCC((uint32_t)e->value);
                 if (result.empty()) {
                     if (e->value >= -256 && e->value <= 4096)
                         result = std::to_string(e->value);
@@ -1036,6 +1154,28 @@ private:
             case CastKind::BitCast:    return inner;
             default: return inner;
             }
+        }
+
+        // Detect FourCC constants (e.g., 0x6E756C6C → 'null', 0x54455854 → 'TEXT')
+        static std::string tryFourCC(uint32_t val) {
+            if (val < 0x20202020) return ""; // at least all spaces
+            char c[4];
+            c[0] = (val >> 24) & 0xFF;
+            c[1] = (val >> 16) & 0xFF;
+            c[2] = (val >> 8) & 0xFF;
+            c[3] = val & 0xFF;
+            // All 4 bytes must be printable ASCII (0x20-0x7E)
+            for (int i = 0; i < 4; ++i)
+                if (c[i] < 0x20 || c[i] > 0x7E) return "";
+            // Emit as multi-character constant: 'abcd'
+            std::string r = "'";
+            for (int i = 0; i < 4; ++i) {
+                if (c[i] == '\'') r += "\\'";
+                else if (c[i] == '\\') r += "\\\\";
+                else r += c[i];
+            }
+            r += "'";
+            return r;
         }
 
         // Detect IEEE 754 float bit patterns in integer constants
