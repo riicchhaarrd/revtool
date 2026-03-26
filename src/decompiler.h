@@ -10,6 +10,7 @@
 #include <set>
 #include <vector>
 #include <cstdio>
+#include <cstring>
 
 // ── Decompiler: x86 → IR → CFG → Structured C ──────────────────────
 // Full pipeline: lift, build CFG, recover structure, fold expressions,
@@ -156,6 +157,9 @@ private:
     public:
         Emitter(const MachOFile &mf, IRFunc &func)
             : m_mf(mf), m_func(func), m_types(mf.typeTable()) {
+            // Copy propagation: if a temp is just assigned from a Var or another Temp,
+            // propagate the source everywhere and eliminate the temp.
+            runCopyPropagation();
             // Count temp uses for inlining decisions
             for (auto &bb : func.blocks)
                 for (auto &stmt : bb.stmts)
@@ -187,19 +191,22 @@ private:
             }
             out += ")\n{\n";
 
-            // Local variable declarations
+            // Local variable declarations — skip params (already declared in signature)
+            std::set<std::string> paramNames;
+            for (auto &p : m_func.params) paramNames.insert(p.name);
+
             std::set<std::string> declared;
             for (auto &l : m_func.locals) {
-                if (l.name.empty() || declared.count(l.name)) continue;
+                if (l.name.empty() || declared.count(l.name) || paramNames.count(l.name)) continue;
                 declared.insert(l.name);
                 out += "    " + QString::fromStdString(
                     l.typeRef != NullType ? m_types.formatDecl(l.typeRef, l.name)
                                           : "int " + l.name) + ";\n";
             }
 
-            // Declare temps that are used more than once
+            // Declare temps that are used more than once and aren't copy-propagated away
             for (auto &[id, type] : m_func.tempTypes) {
-                if (m_tempUseCount[id] > 1) {
+                if (m_tempUseCount[id] > 1 && !m_copyPropagated.count(id)) {
                     std::string tname = "t" + std::to_string(id);
                     std::string ttype = (type != NullType) ? m_types.formatType(type) : "int";
                     out += "    " + QString::fromStdString(ttype + " " + tname) + ";\n";
@@ -220,8 +227,48 @@ private:
         IRFunc               &m_func;
         const StabsTypeTable &m_types;
         std::map<int, int>    m_tempUseCount;
-        // Map temp → its defining expression (for inlining)
         std::map<int, IRExpr*> m_tempDef;
+        std::set<int>         m_copyPropagated; // temps eliminated by copy prop
+        // Copy prop: temp → replacement name
+        std::map<int, std::string> m_copyMap;
+
+        // Copy propagation: replace temps that are simple copies of vars/other temps
+        void runCopyPropagation() {
+            // Pass 1: find all temps that are simple copies
+            for (auto &bb : m_func.blocks) {
+                for (auto &stmt : bb.stmts) {
+                    if (stmt.kind != IRStmtKind::Assign) continue;
+                    if (!stmt.expr) continue;
+                    // t = var → replace all uses of t with var
+                    if (stmt.expr->op == IROp::Var) {
+                        m_copyMap[stmt.destTemp] = stmt.expr->name;
+                        m_copyPropagated.insert(stmt.destTemp);
+                    }
+                }
+            }
+            // Pass 2: rewrite all Temp refs in all expressions
+            if (!m_copyMap.empty()) {
+                for (auto &bb : m_func.blocks)
+                    for (auto &stmt : bb.stmts) {
+                        propagateInExpr(stmt.expr);
+                        propagateInExpr(stmt.addr);
+                        for (auto &a : stmt.args) propagateInExpr(a);
+                    }
+            }
+        }
+
+        void propagateInExpr(std::unique_ptr<IRExpr> &e) {
+            if (!e) return;
+            if (e->op == IROp::Temp) {
+                auto it = m_copyMap.find(e->tempId());
+                if (it != m_copyMap.end()) {
+                    TypeRef t = e->typeRef;
+                    e = IRExpr::mkVar(it->second, t);
+                    return;
+                }
+            }
+            for (auto &k : e->kids) propagateInExpr(k);
+        }
 
         void countTempUses(IRStmt &stmt) {
             if (stmt.expr) countInExpr(stmt.expr.get());
@@ -321,13 +368,23 @@ private:
                 break;
             }
             case IRStmtKind::Store: {
-                std::string addr = stmt.addr ? emitExpr(stmt.addr.get()) : "?";
-                std::string val  = stmt.expr ? emitExpr(stmt.expr.get()) : "0";
-                // If addr is a Field expression, emit as base->field = val
-                if (stmt.addr && stmt.addr->op == IROp::Field) {
-                    out += pad(indent) + QString::fromStdString(addr + " = " + val) + ";\n";
+                std::string val = stmt.expr ? emitExpr(stmt.expr.get()) : "0";
+                if (!stmt.addr) break;
+                auto *a = stmt.addr.get();
+                // Field expression → base->field = val
+                if (a->op == IROp::Field) {
+                    out += pad(indent) + QString::fromStdString(emitExpr(a) + " = " + val) + ";\n";
+                }
+                // Add(base, const) → base->field_XX = val
+                else if (a->op == IROp::Add && a->kids.size() == 2 &&
+                         a->kids[1]->isConst() && a->kids[1]->value > 0 &&
+                         (a->kids[0]->op == IROp::Var || a->kids[0]->op == IROp::Temp)) {
+                    std::string base = emitExpr(a->kids[0].get());
+                    int off = (int)a->kids[1]->value;
+                    char fname[32]; snprintf(fname, sizeof(fname), "field_%X", (unsigned)off);
+                    out += pad(indent) + QString::fromStdString(base + "->" + fname + " = " + val) + ";\n";
                 } else {
-                    out += pad(indent) + QString::fromStdString("*" + addr + " = " + val) + ";\n";
+                    out += pad(indent) + QString::fromStdString("*(" + emitExpr(a) + ") = " + val) + ";\n";
                 }
                 break;
             }
@@ -370,16 +427,20 @@ private:
 
             switch (e->op) {
             case IROp::Const: {
-                if (e->value >= -256 && e->value <= 4096)
-                    result = std::to_string(e->value);
-                else {
-                    char buf[32]; snprintf(buf, sizeof(buf), "0x%X", (unsigned)(uint32_t)e->value);
-                    result = buf;
-                }
                 // Try enum resolution if type is known
                 if (e->typeRef != NullType) {
                     std::string en = m_types.findEnumName(e->typeRef, e->value);
-                    if (!en.empty()) result = en;
+                    if (!en.empty()) { result = en; break; }
+                }
+                // Check for IEEE 754 float bit patterns for common constants
+                result = tryFloatConst((uint32_t)e->value);
+                if (result.empty()) {
+                    if (e->value >= -256 && e->value <= 4096)
+                        result = std::to_string(e->value);
+                    else {
+                        char buf[32]; snprintf(buf, sizeof(buf), "0x%X", (unsigned)(uint32_t)e->value);
+                        result = buf;
+                    }
                 }
                 break;
             }
@@ -398,9 +459,21 @@ private:
             case IROp::String: result = e->name; break;
             case IROp::FuncRef: result = e->name; break;
 
-            case IROp::Load:
-                result = "*(" + emitExpr(e->kids[0].get()) + ")";
+            case IROp::Load: {
+                // Check if load address is (base + const) → base->field_XX
+                auto *addr = e->kids[0].get();
+                if (addr && addr->op == IROp::Add && addr->kids.size() == 2 &&
+                    addr->kids[1]->isConst() && addr->kids[1]->value > 0 &&
+                    (addr->kids[0]->op == IROp::Var || addr->kids[0]->op == IROp::Temp)) {
+                    std::string base = emitExpr(addr->kids[0].get());
+                    int off = (int)addr->kids[1]->value;
+                    char fname[32]; snprintf(fname, sizeof(fname), "field_%X", (unsigned)off);
+                    result = base + "->" + fname;
+                } else {
+                    result = "*(" + emitExpr(addr) + ")";
+                }
                 break;
+            }
 
             case IROp::AddrOf:
                 result = "&" + emitExpr(e->kids[0].get());
@@ -517,6 +590,43 @@ private:
             case CastKind::BitCast:    return inner;
             default: return inner;
             }
+        }
+
+        // Detect IEEE 754 float bit patterns in integer constants
+        static std::string tryFloatConst(uint32_t bits) {
+            // Only trigger for values that look like floats (exponent != 0 and != 0xFF)
+            uint32_t exp = (bits >> 23) & 0xFF;
+            if (exp == 0 || exp == 0xFF) return ""; // 0, denormal, inf, nan
+            if (bits < 0x3E000000) return ""; // too small to be a common float constant
+            float f;
+            memcpy(&f, &bits, 4);
+            // Only show as float if it's a "nice" value (integral, or simple fraction)
+            if (f == (int)f && f >= -1000 && f <= 1000) {
+                char buf[32]; snprintf(buf, sizeof(buf), "%.1ff", f);
+                return buf;
+            }
+            // Common constants
+            if (bits == 0x3F800000) return "1.0f";
+            if (bits == 0x40000000) return "2.0f";
+            if (bits == 0x3F000000) return "0.5f";
+            if (bits == 0x40490FDB) return "3.14159f"; // pi
+            if (bits == 0x3FC90FDB) return "1.5708f";  // pi/2
+            if (bits == 0x40C90FDB) return "6.28318f"; // 2*pi
+            if (bits == 0x42C80000) return "100.0f";
+            if (bits == 0x447A0000) return "1000.0f";
+            if (bits == 0x3DCCCCCD) return "0.1f";
+            if (bits == 0xBF800000) return "-1.0f";
+            if (bits == 0xC0000000) return "-2.0f";
+            // For other float-range values, show the float
+            if (f > 0.001f && f < 1000000.0f) {
+                char buf[32]; snprintf(buf, sizeof(buf), "%.6gf", f);
+                return buf;
+            }
+            if (f < -0.001f && f > -1000000.0f) {
+                char buf[32]; snprintf(buf, sizeof(buf), "%.6gf", f);
+                return buf;
+            }
+            return "";
         }
 
         // Get the STABS type of an expression

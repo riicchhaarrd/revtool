@@ -594,11 +594,19 @@ private:
                     auto it = m_paramByOffset.find(disp);
                     if (it != m_paramByOffset.end())
                         addr = IRExpr::mkAddrOf(IRExpr::mkVar(it->second->name, it->second->typeRef));
+                    else {
+                        char buf[32]; snprintf(buf, sizeof(buf), "arg_%x", (disp - 8) / 4);
+                        addr = IRExpr::mkAddrOf(IRExpr::mkVar(buf));
+                    }
                 }
                 if (disp < 0) {
                     auto it = m_localByOffset.find(disp);
                     if (it != m_localByOffset.end())
                         addr = IRExpr::mkAddrOf(IRExpr::mkVar(it->second->name, it->second->typeRef));
+                    else {
+                        char buf[32]; snprintf(buf, sizeof(buf), "var_%x", (-disp) / 4);
+                        addr = IRExpr::mkAddrOf(IRExpr::mkVar(buf));
+                    }
                 }
             }
             // PIC-relative LEA
@@ -1296,14 +1304,32 @@ private:
             m_flags.op = IROp::Sub;
             return true;
         }
-        // ── cmpss/cmpsd/cmpps/cmppd (packed compare) ───────────────
-        if ((mn == "cmpss" || mn == "cmpsd" || mn == "cmpps" || mn == "cmppd") && n >= 2) {
-            auto lhs = readSSEOp(o[0], mn.find('d') != std::string::npos);
-            auto rhs = readSSEOp(o[1], mn.find('d') != std::string::npos);
+        // ── cmpss/cmpsd and all SSE comparison variants ──────────────
+        // Capstone emits: cmpss, cmpeqss, cmpltss, cmpless, cmpunordss,
+        // cmpneqss, cmpnltss, cmpnless, cmpordss (and *sd, *ps, *pd variants)
+        if ((mn.find("cmp") == 0 && (mn.find("ss") != std::string::npos ||
+             mn.find("sd") != std::string::npos || mn.find("ps") != std::string::npos ||
+             mn.find("pd") != std::string::npos) &&
+             mn != "cmpsb" && mn != "cmpsd" && mn != "cmpsw" && // not string ops
+             mn.find("cmpxchg") == std::string::npos) && n >= 2) {
+            bool dbl = (mn.find("sd") != std::string::npos || mn.find("pd") != std::string::npos);
+            auto lhs = readSSEOp(o[0], dbl);
+            auto rhs = readSSEOp(o[1], dbl);
+
+            // Determine comparison op from mnemonic
+            IROp cmpOp = IROp::Ne; // default
+            if (mn.find("cmpnlt") != std::string::npos) cmpOp = IROp::Sge;
+            else if (mn.find("cmpnle") != std::string::npos) cmpOp = IROp::Sgt;
+            else if (mn.find("cmpneq") != std::string::npos) cmpOp = IROp::Ne;
+            else if (mn.find("cmpeq") != std::string::npos) cmpOp = IROp::Eq;
+            else if (mn.find("cmplt") != std::string::npos) cmpOp = IROp::Slt;
+            else if (mn.find("cmple") != std::string::npos) cmpOp = IROp::Sle;
+            else if (mn.find("cmpord") != std::string::npos) cmpOp = IROp::Eq; // ordered = !NaN
+            else if (mn.find("cmpunord") != std::string::npos) cmpOp = IROp::Ne;
+
             if (lhs && rhs) {
-                m_flags.lhs = std::move(lhs);
-                m_flags.rhs = std::move(rhs);
-                m_flags.op = IROp::Sub;
+                auto cmpExpr = IRExpr::mkBinary(cmpOp, std::move(lhs), std::move(rhs));
+                writeOp(o[0], std::move(cmpExpr), bb);
             }
             return true;
         }
