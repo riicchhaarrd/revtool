@@ -733,16 +733,34 @@ private:
     void buildDataSymMap() const {
         for (auto &sym : m_symbols) {
             if (sym.n_value == 0 || sym.name.empty()) continue;
-            // Skip STABS entries (type has N_STAB bits set)
-            if (sym.n_type & 0xE0) continue;
-            // Only N_SECT symbols (defined in a section)
-            if ((sym.n_type & 0x0E) != 0x0E) continue;
+            if (sym.n_type & 0xE0) continue;  // Skip STABS
+            if ((sym.n_type & 0x0E) != 0x0E) continue;  // Only N_SECT
             std::string name = sym.name;
-            // Strip leading underscore (Mach-O convention)
             if (!name.empty() && name[0] == '_') name = name.substr(1);
-            // Skip names that look like STABS type strings
             if (name.find(':') != std::string::npos) continue;
+            // Demangle C++ names
+            std::string demangled = demangleNameOnly(sym.name);
+            if (!demangled.empty() && demangled != sym.name) name = demangled;
             m_dataSymMap[sym.n_value] = name;
+        }
+        // Also resolve import pointer targets: map import ptr address → target name
+        for (auto &seg : m_segments) {
+            if (seg.segname != "__IMPORT") continue;
+            for (auto &sec : seg.sections) {
+                if (sec.sectname != "__pointers") continue;
+                uint32_t nptrs = sec.size / 4;
+                for (uint32_t j = 0; j < nptrs; ++j) {
+                    uint32_t ptrAddr = sec.addr + j * 4;
+                    if (m_dataSymMap.count(ptrAddr)) continue; // already named
+                    int64_t foff = fileOffsetForAddress(ptrAddr);
+                    if (foff < 0 || foff + 4 > (int64_t)m_size) continue;
+                    uint32_t targetAddr;
+                    memcpy(&targetAddr, m_data.data() + foff, 4);
+                    auto it = m_dataSymMap.find(targetAddr);
+                    if (it != m_dataSymMap.end())
+                        m_dataSymMap[ptrAddr] = it->second;
+                }
+            }
         }
     }
 

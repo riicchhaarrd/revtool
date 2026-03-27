@@ -903,11 +903,13 @@ private:
                 std::string val = stmt.expr ? emitExpr(stmt.expr.get()) : "0";
                 std::string dest = stmt.destVar;
                 // Suppress dead stores to 'this' from register reuse
-                // (compiler reuses the this-register for unrelated values)
                 if (dest == "this" && stmt.expr) {
                     bool bogus = false;
-                    if (stmt.expr->isConst()) bogus = true; // this = 2884
-                    if (stmt.expr->op == IROp::Var && stmt.expr->name == "this") bogus = true; // this = this
+                    if (stmt.expr->isConst()) bogus = true;  // this = 2884
+                    if (stmt.expr->op == IROp::Var && stmt.expr->name == "this") bogus = true;  // this = this
+                    if (stmt.expr->op == IROp::Var && stmt.expr->name != "this") bogus = true;  // this = keys
+                    if (stmt.expr->op == IROp::Add || stmt.expr->op == IROp::Sub) bogus = true;  // this = (this + 136)
+                    if (stmt.expr->op == IROp::Temp) bogus = true;  // this = t7
                     if (bogus) break;
                 }
                 // Check if destination is an array type — use dest[0] instead
@@ -1058,6 +1060,11 @@ private:
                 result = tryFloatConst((uint32_t)e->value);
                 // Check for FourCC constants (4 printable ASCII bytes)
                 if (result.empty()) result = tryFourCC((uint32_t)e->value);
+                // Try to resolve large constants as global variable addresses
+                if (result.empty() && e->value > 0x10000) {
+                    std::string sym = m_mf.symbolNameAtAddress((uint32_t)e->value);
+                    if (!sym.empty()) result = sym;
+                }
                 if (result.empty()) {
                     if (e->value >= -256 && e->value <= 4096)
                         result = std::to_string(e->value);
@@ -1238,6 +1245,12 @@ private:
                     if (e->op == IROp::Mul && a == 0) { result = "0"; break; }
                 }
                 std::string lhs = emitExpr(e->kids[0].get());
+                // Simplify: (x + -N) → (x - N)
+                if (e->op == IROp::Add && e->kids[1] && e->kids[1]->isConst() &&
+                    e->kids[1]->value < 0) {
+                    result = "(" + lhs + " - " + std::to_string(-e->kids[1]->value) + ")";
+                    break;
+                }
                 std::string rhs = emitExpr(e->kids[1].get());
                 std::string op;
                 switch (e->op) {
