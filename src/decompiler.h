@@ -1030,6 +1030,8 @@ private:
                 if (m_tempUseCount[stmt.destTemp] <= 1) return;
                 if (m_copyPropagated.count(stmt.destTemp)) return;
                 std::string lhs = tempName(stmt.destTemp);
+                // Skip self-assignment (v = v) and trivial alias (v = param)
+                if (lhs == rhs) return;
                 out += pad(indent) + QString::fromStdString(lhs + " = " + rhs) + ";\n";
                 break;
             }
@@ -1128,7 +1130,29 @@ private:
                 break;
             }
             case IRStmtKind::Intrinsic: {
-                out += pad(indent) + QString::fromStdString(stmt.intrinsicComment) + ";\n";
+                // Rename tN → vN in intrinsic text using coalescing map
+                std::string text = stmt.intrinsicComment;
+                if (!m_func.tempToVar.empty()) {
+                    for (auto &[tid, vid] : m_func.tempToVar) {
+                        std::string from = "t" + std::to_string(tid);
+                        std::string to = m_func.varNames.count(vid) ? m_func.varNames[vid] :
+                                         "v" + std::to_string(vid);
+                        size_t pos = 0;
+                        while ((pos = text.find(from, pos)) != std::string::npos) {
+                            // Only replace if it's a whole word (not part of a longer name)
+                            size_t end = pos + from.size();
+                            bool wholeWord = (pos == 0 || !isalnum(text[pos-1])) &&
+                                             (end >= text.size() || !isalnum(text[end]));
+                            if (wholeWord) {
+                                text.replace(pos, from.size(), to);
+                                pos += to.size();
+                            } else {
+                                pos += from.size();
+                            }
+                        }
+                    }
+                }
+                out += pad(indent) + QString::fromStdString(text) + ";\n";
                 break;
             }
             case IRStmtKind::Switch: {
@@ -1479,6 +1503,16 @@ private:
                     result = "0"; break;
                 }
                 std::string lhs = emitExpr(e->kids[0].get());
+                // (base + const) in expression context → &base->field_XX
+                // This handles the common "sub-object pointer" pattern: t = (this + 1520)
+                if (e->op == IROp::Add && e->kids[1] && e->kids[1]->isConst() &&
+                    e->kids[1]->value > 0 && e->kids[1]->value < 0x10000 &&
+                    (e->kids[0]->op == IROp::Var || e->kids[0]->op == IROp::Temp)) {
+                    int off = (int)e->kids[1]->value;
+                    char fname[32]; snprintf(fname, sizeof(fname), "field_%X", (unsigned)off);
+                    result = "&" + lhs + "->" + fname;
+                    break;
+                }
                 // Simplify: (x + -N) → (x - N)
                 if (e->op == IROp::Add && e->kids[1] && e->kids[1]->isConst() &&
                     e->kids[1]->value < 0) {
