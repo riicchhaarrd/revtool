@@ -254,8 +254,13 @@ private:
         // Field(Temp(t), name, offset) -> t points to a struct
         if (e->op == IROp::Field && !e->kids.empty() && e->kids[0]) {
             auto *base = e->kids[0].get();
-            if (base->op == IROp::Temp)
-                markAsPointer(base->tempId());
+            if (base->op == IROp::Temp) {
+                // If the base has a type annotation (struct pointer), propagate it
+                if (base->typeRef != NullType)
+                    setType(base->tempId(), base->typeRef);
+                else
+                    markAsPointer(base->tempId());
+            }
         }
 
         // Call expression: collect arg type constraints

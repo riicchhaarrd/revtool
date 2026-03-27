@@ -341,6 +341,32 @@ public:
             "typedef int D3DTEXTUREFILTERTYPE;\n"
             "typedef int D3DFORMAT;\n"
             "typedef int D3DDEVTYPE;\n"
+            "typedef int D3DPRIMITIVETYPE;\n"
+            "typedef int D3DTRANSFORMSTATETYPE;\n"
+            "typedef int D3DRENDERSTATETYPE;\n"
+            "typedef int D3DTEXTURESTAGESTATETYPE;\n"
+            "typedef int D3DSAMPLERSTATETYPE;\n"
+            "typedef int D3DSTATEBLOCKTYPE;\n"
+            "typedef int D3DMULTISAMPLE_TYPE;\n"
+            "typedef int D3DSWAPEFFECT;\n"
+            "typedef int D3DRESOURCETYPE;\n"
+            "typedef int D3DQUERYTYPE;\n"
+            "typedef int D3DTEXTUREOP;\n"
+            "typedef int D3DBASISTYPE;\n"
+            "typedef int D3DDEGREETYPE;\n"
+            "typedef int D3DPOOL;\n"
+            "typedef int D3DBACKBUFFER_TYPE;\n"
+            "typedef int D3DCUBEMAP_FACES;\n"
+            "typedef int D3DMATRIX[16];\n"
+            "typedef void *IDirect3DBaseTexture9;\n"
+            "typedef void *IDirect3DSurface9;\n"
+            "typedef void *IDirect3DPixelShader9;\n"
+            "typedef void *IDirect3DVertexShader9;\n"
+            "typedef void *IDirect3DVertexDeclaration9;\n"
+            "typedef void *IDirect3DQuery9;\n"
+            "typedef int D3DVERTEXELEMENT9[8];\n"
+            "typedef struct { int left, top, right, bottom; } RECT;\n"
+            "typedef struct { int x, y; } POINT;\n"
             "/* FILE from <stdio.h> */\n"
             "typedef void *YY_BUFFER_STATE;\n"
             "typedef int yy_state_type;\n"
@@ -373,6 +399,37 @@ public:
             "typedef short DCTELEM;\n"
             "typedef short SHORT;\n"
             "typedef int LONG_PTR;\n"
+            "typedef unsigned long uLong;\n"
+            "typedef unsigned int uInt;\n"
+            "typedef unsigned char Bytef;\n"
+            "typedef int JDIMENSION;\n"
+            "typedef int boolean;\n"
+            "typedef int JCOEF;\n"
+            "typedef int JSAMPLE;\n"
+            "typedef void *xcommand_t;\n"
+            "typedef int D3DXMATRIX[16];\n"
+            "typedef float D3DXVECTOR4[4];\n"
+            "typedef float FLOAT;\n"
+            "/* Common game types (forward declared) */\n"
+            "typedef struct playerState_s playerState_t;\n"
+            "typedef struct gentity_s gentity_t;\n"
+            "typedef struct gclient_s gclient_t;\n"
+            "typedef struct entityState_s entityState_t;\n"
+            "typedef struct usercmd_s usercmd_t;\n"
+            "typedef struct dvar_s dvar_t;\n"
+            "typedef struct VariableValue_s VariableValue;\n"
+            "typedef struct sval_u sval_t;\n"
+            "typedef struct DObjAnimMat_s DObjAnimMat;\n"
+            "typedef struct DObj_s DObj;\n"
+            "typedef struct XAnimTree_s XAnimTree;\n"
+            "typedef struct XAnimParts_s XAnimParts;\n"
+            "typedef struct searchpath_s searchpath_t;\n"
+            "typedef struct LocalizeString_s LocalizeString;\n"
+            "typedef struct dheader_s dheader_t;\n"
+            "typedef struct cplane_s cplane_t;\n"
+            "typedef struct clipHandle_s { int _; } clipHandle_t;\n"
+            "typedef struct leafList_s leafList_t;\n"
+            "typedef int scr_entref_t;\n"
             "\n"
         );
     }
@@ -597,6 +654,29 @@ private:
                     checkLoadPtrs(stmt.addr.get());
                 }
 
+            // Collect struct pointer types from Field expressions
+            // If temp->field_X and the temp's Field has a base with typeRef, record it
+            for (auto &bb : m_func.blocks)
+                for (auto &stmt : bb.stmts) {
+                    auto scanFieldTypes = [&](const IRExpr *e) {
+                        if (!e) return;
+                        std::vector<const IRExpr *> stack = {e};
+                        while (!stack.empty()) {
+                            auto *n = stack.back(); stack.pop_back();
+                            if (n->op == IROp::Field && !n->kids.empty() && n->kids[0]) {
+                                auto *base = n->kids[0].get();
+                                if (base->op == IROp::Temp && base->typeRef != NullType) {
+                                    m_tempStructPtr[base->tempId()] = base->typeRef;
+                                }
+                            }
+                            for (auto &k : n->kids) if (k) stack.push_back(k.get());
+                        }
+                    };
+                    scanFieldTypes(stmt.expr.get());
+                    scanFieldTypes(stmt.addr.get());
+                    for (auto &a : stmt.args) scanFieldTypes(a.get());
+                }
+
             // Force-declare temps used in fallback (goto target) blocks
             for (int bbId : m_gotoTargets) {
                 if (emittedBlocks.count(bbId)) continue;
@@ -627,8 +707,14 @@ private:
                     }
                     if (ttype.empty())
                         ttype = (type != NullType) ? m_types.formatType(type) : inferTempType(id);
-                    // Override to pointer if temp is used as a dereference target
-                    if (m_pointerTemps.count(id) && ttype == "int") ttype = "int *";
+                    // Override to struct pointer if temp is used with -> field access
+                    if (ttype == "int" || ttype == "int *") {
+                        auto sit = m_tempStructPtr.find(id);
+                        if (sit != m_tempStructPtr.end() && sit->second != NullType)
+                            ttype = m_types.formatType(sit->second);
+                        else if (m_pointerTemps.count(id) && ttype == "int")
+                            ttype = "int *";
+                    }
                     out += "    " + QString::fromStdString(ttype + " " + tname) + ";\n";
                     declared.insert(tname);
                 }
@@ -710,6 +796,7 @@ private:
         std::set<int>         m_emittedLabels;  // labels already emitted (avoid duplicates)
         std::set<std::pair<int,int>> m_suppressedStmts; // (blockId, stmtIdx) to skip in emission
         std::set<int>         m_pointerTemps;   // temps used as pointers (dereference targets)
+        std::map<int, TypeRef> m_tempStructPtr;   // temp → struct pointer type (from Field access)
         std::set<int>         m_forceDeclareTemps; // temps that leak as raw tN and need declaration
 
         // Force temps with cross-block def/use to be declared (not inlined)
@@ -1888,7 +1975,7 @@ private:
                 case IROp::And:  op = " & "; break;
                 case IROp::Or:   op = " | "; break;
                 case IROp::Xor:  op = " ^ "; break;
-                default: op = " /* ?? */ "; break;
+                default: op = " + "; break; // fallback: treat unknown binary as addition
                 }
                 result = "(" + lhs + op + rhs + ")";
                 break;
@@ -2000,6 +2087,12 @@ private:
                 return "float";
             // Comparison results → int (boolean)
             if (e->op >= IROp::Eq && e->op <= IROp::Uge) return "int";
+            // If this temp has a known struct pointer type from Field access, use it
+            {
+                auto sit = m_tempStructPtr.find(id);
+                if (sit != m_tempStructPtr.end() && sit->second != NullType)
+                    return m_types.formatType(sit->second);
+            }
             // If this temp is used as a pointer (dereferenced), declare as int*
             if (m_pointerTemps.count(id)) return "int *";
             return "int";

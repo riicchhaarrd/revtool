@@ -665,6 +665,8 @@ private:
                     if (!access.empty()) {
                         auto *field = m_types.findFieldAtOffset(structRef, (int)m.disp);
                         TypeRef ft = field ? field->typeRef : NullType;
+                        // Annotate the base with the struct pointer type for type inference
+                        base->typeRef = baseType;
                         return IRExpr::mkField(std::move(base), access, (int)m.disp, ft);
                     }
                 }
@@ -675,6 +677,8 @@ private:
                 if ((int)m.disp > 0 && baseType != NullType) {
                     auto *resolved = m_types.resolveType(baseType);
                     if (resolved && resolved->kind == StabsTypeKind::Pointer) {
+                        // Annotate base with pointer type
+                        base->typeRef = baseType;
                         char fname[32]; snprintf(fname, sizeof(fname), "field_%X", (unsigned)(int)m.disp);
                         return IRExpr::mkField(std::move(base), fname, (int)m.disp);
                     }
