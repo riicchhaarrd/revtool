@@ -468,7 +468,7 @@ private:
 
             // Declare temps that are used more than once (or used in fallback blocks)
             for (auto &[id, type] : m_func.tempTypes) {
-                if (m_tempUseCount[id] > 1) {
+                if (m_tempUseCount[id] > 1 && !m_copyPropagated.count(id)) {
                     std::string tname = "t" + std::to_string(id);
                     std::string ttype = (type != NullType) ? m_types.formatType(type) : inferTempType(id);
                     // Override to pointer if temp is used as a dereference target
@@ -479,7 +479,7 @@ private:
             }
             // Also scan for any temp references not in tempTypes
             for (auto &[id, count] : m_tempUseCount) {
-                if (count <= 1) continue;
+                if (count <= 1 || m_copyPropagated.count(id)) continue;
                 std::string tname = "t" + std::to_string(id);
                 if (declared.count(tname)) continue;
                 out += "    " + QString::fromStdString(inferTempType(id) + " " + tname) + ";\n";
@@ -991,8 +991,9 @@ private:
             switch (stmt.kind) {
             case IRStmtKind::Assign: {
                 std::string rhs = stmt.expr ? emitExpr(stmt.expr.get()) : "0";
-                // If temp is used only once, skip the assignment (will be inlined)
+                // Skip assignment for inlined or propagated temps
                 if (m_tempUseCount[stmt.destTemp] <= 1) return;
+                if (m_copyPropagated.count(stmt.destTemp)) return;
                 std::string lhs = "t" + std::to_string(stmt.destTemp);
                 out += pad(indent) + QString::fromStdString(lhs + " = " + rhs) + ";\n";
                 break;
