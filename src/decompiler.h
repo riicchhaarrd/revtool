@@ -257,6 +257,8 @@ public:
             "typedef int yy_state_type;\n"
             "typedef unsigned int u_int;\n"
             "typedef int jmp_buf[64];\n"
+            "int stricmp(const char *, const char *);\n"
+            "int strnicmp(const char *, const char *, size_t);\n"
             "typedef int bool;\n"
             "typedef signed char SInt8;\n"
             "typedef char *StringPtr;\n"
@@ -481,6 +483,7 @@ private:
         std::map<int, std::string> m_copyMap;
         std::set<int>         m_gotoTargets;    // block IDs that are goto targets
         std::set<int>         m_emittedLabels;  // labels already emitted (avoid duplicates)
+        std::set<std::pair<int,int>> m_suppressedStmts; // (blockId, stmtIdx) to skip in emission
 
         // Force temps with cross-block def/use to be declared (not inlined)
         void forceDeclCrossBlockTemps() {
@@ -626,6 +629,38 @@ private:
             for (auto &k : e->kids) collectSynthVarsExpr(k.get(), vars);
         }
 
+        // Check if a struct node produces any actual output
+        bool nodeHasContent(StructNode *node) {
+            if (!node) return false;
+            if (node->kind == StructKind::Seq) {
+                if (node->bbId < 0 || node->bbId >= (int)m_func.blocks.size()) return false;
+                auto &bb = m_func.blocks[node->bbId];
+                for (int i = node->stmtStart; i < node->stmtEnd && i < (int)bb.stmts.size(); ++i) {
+                    if (m_suppressedStmts.count({node->bbId, i})) continue;
+                    auto k = bb.stmts[i].kind;
+                    // Skip terminal branch/jump and suppressed assigns
+                    if (k == IRStmtKind::Branch || k == IRStmtKind::Jump || k == IRStmtKind::Label)
+                        continue;
+                    if (k == IRStmtKind::Assign && m_tempUseCount[bb.stmts[i].destTemp] <= 1)
+                        continue; // would be inlined, not emitted
+                    return true;
+                }
+                return false;
+            }
+            if (node->kind == StructKind::Block) {
+                for (auto &c : node->children)
+                    if (nodeHasContent(c.get())) return true;
+                return false;
+            }
+            // All other kinds (If, While, Goto, Return, etc.) produce content
+            return true;
+        }
+        bool nodeHasContent(const std::vector<std::unique_ptr<StructNode>> &children) {
+            for (auto &c : children)
+                if (nodeHasContent(c.get())) return true;
+            return false;
+        }
+
         void collectGotoTargets(StructNode *node, std::set<int> &targets) {
             if (!node) return;
             if (node->kind == StructKind::Goto) targets.insert(node->gotoTarget);
@@ -655,8 +690,8 @@ private:
 
             case StructKind::If: {
                 // Skip empty if blocks with no else
-                bool hasBody = !node->children.empty();
-                bool hasElse = node->elseNode != nullptr;
+                bool hasBody = nodeHasContent(node->children);
+                bool hasElse = node->elseNode && nodeHasContent(node->elseNode.get());
                 if (!hasBody && !hasElse) break;
                 // If body is empty but else exists, invert the condition
                 if (!hasBody && hasElse) {
@@ -664,6 +699,12 @@ private:
                     out += pad(indent) + "if (" + QString::fromStdString(cond) + ") {\n";
                     emitNode(out, node->elseNode.get(), indent + 1);
                     out += pad(indent) + "}\n";
+                    break;
+                }
+                // Constant true condition — emit body without the if wrapper
+                if (node->cond && node->cond->isConst() && node->cond->value != 0 && !node->negated && !hasElse) {
+                    for (auto &child : node->children)
+                        emitNode(out, child.get(), indent);
                     break;
                 }
                 std::string cond = node->cond ? emitExpr(node->cond, node->negated) : "1";
@@ -687,6 +728,54 @@ private:
                 break;
             }
 
+            case StructKind::For: {
+                std::string cond = node->cond ? emitExpr(node->cond, node->negated) : "1";
+                // Emit init expression
+                std::string init;
+                if (node->forInitBB >= 0 && node->forInitBB < (int)m_func.blocks.size() &&
+                    node->forInitStmt >= 0) {
+                    auto &s = m_func.blocks[node->forInitBB].stmts[node->forInitStmt];
+                    if (s.kind == IRStmtKind::VarSet)
+                        init = s.destVar + " = " + (s.expr ? emitExpr(s.expr.get()) : "0");
+                    else if (s.kind == IRStmtKind::Assign)
+                        init = "t" + std::to_string(s.destTemp) + " = " + (s.expr ? emitExpr(s.expr.get()) : "0");
+                }
+                // Emit increment expression
+                std::string incr;
+                if (node->forIncrBB >= 0 && node->forIncrBB < (int)m_func.blocks.size() &&
+                    node->forIncrStmt >= 0) {
+                    auto &s = m_func.blocks[node->forIncrBB].stmts[node->forIncrStmt];
+                    std::string varName;
+                    if (s.kind == IRStmtKind::VarSet) varName = s.destVar;
+                    else if (s.kind == IRStmtKind::Assign) varName = "t" + std::to_string(s.destTemp);
+                    if (!varName.empty()) {
+                        // Simplify "i = i + 1" → "i++"
+                        if (s.expr && s.expr->op == IROp::Add && s.expr->kids.size() == 2 &&
+                            s.expr->kids[1]->isConst() && s.expr->kids[1]->value == 1)
+                            incr = varName + "++";
+                        else if (s.expr && s.expr->op == IROp::Sub && s.expr->kids.size() == 2 &&
+                                 s.expr->kids[1]->isConst() && s.expr->kids[1]->value == 1)
+                            incr = varName + "--";
+                        else {
+                            std::string val = s.expr ? emitExpr(s.expr.get()) : "0";
+                            incr = varName + " = " + val;
+                        }
+                    }
+                }
+                // Suppress init and increment stmts from being emitted in body
+                if (node->forInitBB >= 0 && node->forInitStmt >= 0)
+                    m_suppressedStmts.insert({node->forInitBB, node->forInitStmt});
+                if (node->forIncrBB >= 0 && node->forIncrStmt >= 0)
+                    m_suppressedStmts.insert({node->forIncrBB, node->forIncrStmt});
+                out += pad(indent) + "for (" + QString::fromStdString(init) + "; " +
+                       QString::fromStdString(cond) + "; " +
+                       QString::fromStdString(incr) + ") {\n";
+                for (auto &child : node->children)
+                    emitNode(out, child.get(), indent + 1);
+                out += pad(indent) + "}\n";
+                break;
+            }
+
             case StructKind::DoWhile: {
                 out += pad(indent) + "do {\n";
                 for (auto &child : node->children)
@@ -696,9 +785,34 @@ private:
                 break;
             }
 
-            case StructKind::Goto:
-                out += pad(indent) + QString("goto bb_%1;\n").arg(node->gotoTarget);
+            case StructKind::Goto: {
+                int gt = node->gotoTarget;
+                // Optimize: if target block is empty or has only a return, inline it
+                if (gt >= 0 && gt < (int)m_func.blocks.size()) {
+                    auto &tbb = m_func.blocks[gt];
+                    // Empty block → skip goto entirely
+                    bool allEmpty = true;
+                    IRStmt *retStmt = nullptr;
+                    for (auto &s : tbb.stmts) {
+                        if (s.kind == IRStmtKind::Return) { retStmt = &s; break; }
+                        if (s.kind != IRStmtKind::Jump && s.kind != IRStmtKind::Branch &&
+                            s.kind != IRStmtKind::Label) {
+                            // Check if this is a suppressed assign
+                            if (s.kind == IRStmtKind::Assign && m_tempUseCount[s.destTemp] <= 1)
+                                continue;
+                            allEmpty = false; break;
+                        }
+                    }
+                    if (retStmt) {
+                        // Inline the return (label stays for other gotos to same target)
+                        emitStmt(out, *retStmt, indent);
+                        break;
+                    }
+                    if (allEmpty) break; // skip goto to empty block
+                }
+                out += pad(indent) + QString("goto bb_%1;\n").arg(gt);
                 break;
+            }
 
             case StructKind::Break:
                 out += pad(indent) + "break;\n";
@@ -723,6 +837,7 @@ private:
             }
             auto &bb = m_func.blocks[bbId];
             for (int i = start; i < end && i < (int)bb.stmts.size(); ++i) {
+                if (m_suppressedStmts.count({bbId, i})) continue;
                 emitStmt(out, bb.stmts[i], indent);
             }
         }
@@ -745,33 +860,36 @@ private:
                 if (a->op == IROp::Field) {
                     out += pad(indent) + QString::fromStdString(emitExpr(a) + " = " + val) + ";\n";
                 }
-                // Add(base, const) → base->field_XX = val (only for pointer types)
+                // Add(base, const) → base->field_XX = val
                 else if (a->op == IROp::Add && a->kids.size() == 2 &&
                          a->kids[1]->isConst() && a->kids[1]->value > 0 &&
+                         a->kids[1]->value < 0x10000 &&
                          (a->kids[0]->op == IROp::Var || a->kids[0]->op == IROp::Temp)) {
-                    TypeRef baseType = exprType(a->kids[0].get());
-                    bool isPtr = (baseType != NullType) &&
-                        (m_types.isStructPointer(baseType) ||
-                         (m_types.resolveType(baseType) &&
-                          m_types.resolveType(baseType)->kind == StabsTypeKind::Pointer));
-                    if (isPtr) {
-                        std::string base = emitExpr(a->kids[0].get());
-                        int off = (int)a->kids[1]->value;
-                        char fname[32]; snprintf(fname, sizeof(fname), "field_%X", (unsigned)off);
-                        out += pad(indent) + QString::fromStdString(base + "->" + fname + " = " + val) + ";\n";
-                    } else {
-                        out += pad(indent) + QString::fromStdString(
-                            emitStoreDeref(emitExpr(a), stmt.destType) + " = " + val) + ";\n";
-                    }
+                    std::string base = emitExpr(a->kids[0].get());
+                    int off = (int)a->kids[1]->value;
+                    char fname[32]; snprintf(fname, sizeof(fname), "field_%X", (unsigned)off);
+                    out += pad(indent) + QString::fromStdString(base + "->" + fname + " = " + val) + ";\n";
+                } else if (a->op == IROp::Var || a->op == IROp::Temp) {
+                    // Simple pointer dereference — use clean *(var) syntax
+                    out += pad(indent) + QString::fromStdString(
+                        "*(" + emitExpr(a) + ") = " + val) + ";\n";
                 } else {
                     out += pad(indent) + QString::fromStdString(
-                        emitStoreDeref(emitExpr(a), stmt.destType) + " = " + val) + ";\n";
+                        emitStoreDeref(emitExpr(a), stmt.destType, exprType(a)) + " = " + val) + ";\n";
                 }
                 break;
             }
             case IRStmtKind::VarSet: {
                 std::string val = stmt.expr ? emitExpr(stmt.expr.get()) : "0";
                 std::string dest = stmt.destVar;
+                // Suppress dead stores to 'this' from register reuse
+                // (compiler reuses the this-register for unrelated values)
+                if (dest == "this" && stmt.expr) {
+                    bool bogus = false;
+                    if (stmt.expr->isConst()) bogus = true; // this = 2884
+                    if (stmt.expr->op == IROp::Var && stmt.expr->name == "this") bogus = true; // this = this
+                    if (bogus) break;
+                }
                 // Check if destination is an array type — use dest[0] instead
                 if (stmt.destType != NullType) {
                     auto *dt = m_types.resolveType(stmt.destType);
@@ -947,38 +1065,61 @@ private:
 
             case IROp::Load: {
                 auto *addr = e->kids[0].get();
-                // (base + const) → base->field_XX (only if base looks like a pointer)
+                // (base + index*scale + const) → base->array_NN[index] pattern
                 if (addr && addr->op == IROp::Add && addr->kids.size() == 2 &&
-                    addr->kids[1]->isConst() && addr->kids[1]->value >= 0 &&
-                    (addr->kids[0]->op == IROp::Var || addr->kids[0]->op == IROp::Temp)) {
-                    TypeRef baseType = exprType(addr->kids[0].get());
-                    bool isPtr = (baseType != NullType) &&
-                        (m_types.isStructPointer(baseType) ||
-                         (m_types.resolveType(baseType) &&
-                          m_types.resolveType(baseType)->kind == StabsTypeKind::Pointer));
-                    if (isPtr) {
-                        std::string base = emitExpr(addr->kids[0].get());
+                    addr->kids[1]->isConst() && addr->kids[1]->value > 0 &&
+                    addr->kids[0]->op == IROp::Add && addr->kids[0]->kids.size() == 2) {
+                    auto *inner = addr->kids[0].get();
+                    // Check for (base + index*4) + const
+                    bool isArray = false;
+                    IRExpr *base = nullptr, *index = nullptr;
+                    int elemSize = 0;
+                    if (inner->kids[1]->op == IROp::Mul && inner->kids[1]->kids.size() == 2 &&
+                        inner->kids[1]->kids[1]->isConst()) {
+                        base = inner->kids[0].get();
+                        index = inner->kids[1]->kids[0].get();
+                        elemSize = (int)inner->kids[1]->kids[1]->value;
+                        isArray = (elemSize > 0 && elemSize <= 256);
+                    }
+                    if (isArray && base && index &&
+                        (base->op == IROp::Var || base->op == IROp::Temp)) {
+                        std::string baseStr = emitExpr(base);
+                        std::string idxStr = emitExpr(index);
                         int off = (int)addr->kids[1]->value;
-                        char fname[32]; snprintf(fname, sizeof(fname), "field_%X", (unsigned)off);
-                        result = base + "->" + fname;
-                    } else {
-                        result = emitDeref(emitExpr(addr), e->typeRef);
+                        char fname[64];
+                        if (elemSize == 4)
+                            snprintf(fname, sizeof(fname), "arr_%X[%s]", (unsigned)off, idxStr.c_str());
+                        else
+                            snprintf(fname, sizeof(fname), "arr_%X_%d[%s]", (unsigned)off, elemSize, idxStr.c_str());
+                        result = baseStr + "->" + fname;
+                        break;
                     }
                 }
-                // bare pointer dereference — only use -> if we know it's a struct pointer
+                // (base + const) → base->field_XX for pointer-like expressions
+                if (addr && addr->op == IROp::Add && addr->kids.size() == 2 &&
+                    addr->kids[1]->isConst() && addr->kids[1]->value > 0 &&
+                    addr->kids[1]->value < 0x10000 && // reasonable struct offset
+                    (addr->kids[0]->op == IROp::Var || addr->kids[0]->op == IROp::Temp)) {
+                    // Use -> notation: cleaner than *((int*)((base + off)))
+                    std::string base = emitExpr(addr->kids[0].get());
+                    int off = (int)addr->kids[1]->value;
+                    char fname[32]; snprintf(fname, sizeof(fname), "field_%X", (unsigned)off);
+                    result = base + "->" + fname;
+                }
+                // bare pointer dereference of a simple var/temp → use clean *(var) syntax
                 else if (addr && (addr->op == IROp::Var || addr->op == IROp::Temp)) {
                     TypeRef addrType = exprType(addr);
                     if (addrType != NullType && m_types.isStructPointer(addrType)) {
-                        // Resolve first field name
                         TypeRef structRef = m_types.getPointedStruct(addrType);
                         std::string access = structRef != NullType ?
                             m_types.formatFieldAccess(structRef, 0) : "";
                         if (!access.empty())
                             result = emitExpr(addr) + "->" + access;
                         else
-                            result = emitDeref(emitExpr(addr), e->typeRef, addrType);
+                            result = "*(" + emitExpr(addr) + ")";
                     } else {
-                        result = emitDeref(emitExpr(addr), e->typeRef, addrType);
+                        // Simple var/temp being dereferenced — no need for cast
+                        result = "*(" + emitExpr(addr) + ")";
                     }
                 } else {
                     result = emitDeref(emitExpr(addr), e->typeRef, exprType(addr));
@@ -1011,19 +1152,9 @@ private:
                         fieldValid = false;
                     }
                 }
-                if (fieldValid) {
-                    result = base + "->" + e->name;
-                } else {
-                    // Emit as cast-based offset access for empty/opaque structs
-                    int off = (int)e->value;
-                    std::string targetType = "int";
-                    if (e->typeRef != NullType)
-                        targetType = m_types.formatType(e->typeRef);
-                    char buf[128];
-                    snprintf(buf, sizeof(buf), "((%s *)((char *)%s + 0x%X))",
-                             targetType.c_str(), base.c_str(), (unsigned)off);
-                    result = "*" + std::string(buf);
-                }
+                // Always use arrow notation for field access — more readable
+                // (struct definitions will include synthetic fields as needed)
+                result = base + "->" + e->name;
                 break;
             }
 
@@ -1325,6 +1456,13 @@ private:
             if (e->typeRef != NullType) return e->typeRef;
             if (e->op == IROp::Temp) return m_func.tempType(e->tempId());
             if (e->op == IROp::Field) return e->typeRef;
+            // For Var: look up type from function params/locals
+            if (e->op == IROp::Var && !e->name.empty()) {
+                for (auto &p : m_func.params)
+                    if (p.name == e->name && p.typeRef != NullType) return p.typeRef;
+                for (auto &l : m_func.locals)
+                    if (l.name == e->name && l.typeRef != NullType) return l.typeRef;
+            }
             return NullType;
         }
 

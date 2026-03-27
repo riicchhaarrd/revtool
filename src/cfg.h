@@ -18,6 +18,7 @@ enum class StructKind {
     Block,      // sequential list of children
     If,         // if (cond) { then } [else { els }]
     While,      // while (cond) { body }
+    For,        // for (init; cond; incr) { body }
     DoWhile,    // do { body } while (cond)
     Switch,     // switch (expr) { cases }
     Goto,       // irreducible: goto label
@@ -45,6 +46,12 @@ struct StructNode {
 
     // For Goto
     int gotoTarget = -1;
+
+    // For For: init and increment statement indices (in the header block)
+    int forInitBB = -1;     // block containing the init statement
+    int forInitStmt = -1;   // index of the init statement
+    int forIncrBB = -1;     // block containing the increment
+    int forIncrStmt = -1;   // index of the increment statement
 
     static std::unique_ptr<StructNode> mkSeq(int bb, int start, int end) {
         auto n = std::make_unique<StructNode>();
@@ -279,16 +286,117 @@ private:
                     if (stmtEnd > 0)
                         block->children.push_back(StructNode::mkSeq(cur, 0, stmtEnd));
 
-                    auto whileNode = StructNode::mkWhile(br.expr.get());
-                    whileNode->negated = negCond;
-
-                    // Structure the loop body
+                    // Structure the loop body first
                     std::vector<bool> bodyVisited = visited;
                     auto body = structureRegion(bodyTarget, cur, bodyVisited);
-                    whileNode->children.push_back(std::move(body));
                     for (int vi = 0; vi < n; ++vi) if (bodyVisited[vi]) visited[vi] = true;
 
-                    block->children.push_back(std::move(whileNode));
+                    // Try to detect for-loop pattern:
+                    // Previous stmt: var = const (init)
+                    // Loop body last stmt: var = var + 1 (increment)
+                    // Condition uses var
+                    bool isForLoop = false;
+                    int initBB = -1, initStmt = -1, incrBB = -1, incrStmt = -1;
+                    if (bodyTarget >= 0 && bodyTarget < n) {
+                        // Look for init: first check this block's pre-branch stmts,
+                        // then the previous Seq node (preceding block's statements)
+                        int initCandBB = cur, initCandIdx = -1;
+                        // Check pre-branch statements in current (header) block
+                        for (int ci = stmtEnd - 1; ci >= std::max(0, stmtEnd - 3); --ci) {
+                            auto &cs = bb.stmts[ci];
+                            if ((cs.kind == IRStmtKind::VarSet || cs.kind == IRStmtKind::Assign) &&
+                                cs.expr && cs.expr->isConst()) {
+                                initCandIdx = ci; break;
+                            }
+                        }
+                        // If not found, check the last emitted Seq node (previous block)
+                        if (initCandIdx < 0 && !block->children.empty()) {
+                            auto &prevNode = block->children.back();
+                            if (prevNode->kind == StructKind::Seq && prevNode->bbId >= 0 &&
+                                prevNode->bbId < n) {
+                                auto &prevBB = m_func->blocks[prevNode->bbId];
+                                for (int ci = prevNode->stmtEnd - 1;
+                                     ci >= std::max(prevNode->stmtStart, prevNode->stmtEnd - 3); --ci) {
+                                    auto &cs = prevBB.stmts[ci];
+                                    if ((cs.kind == IRStmtKind::VarSet || cs.kind == IRStmtKind::Assign) &&
+                                        cs.expr && cs.expr->isConst()) {
+                                        initCandBB = prevNode->bbId;
+                                        initCandIdx = ci; break;
+                                    }
+                                }
+                            }
+                        }
+                        IRStmt *initSPtr = (initCandIdx >= 0 && initCandBB >= 0 && initCandBB < n) ?
+                            &m_func->blocks[initCandBB].stmts[initCandIdx] : nullptr;
+                        // Check body's last block for increment
+                        // Find the back-edge source block (the one that jumps back to header)
+                        int backSrc = -1;
+                        for (auto &[from, hdr] : m_backEdges)
+                            if (hdr == cur) { backSrc = from; break; }
+                        if (backSrc >= 0 && backSrc < n) {
+                            auto &backBB = m_func->blocks[backSrc];
+                            // Find last non-branch/jump statement in back-edge block
+                            int lastIdx = -1;
+                            for (int si = (int)backBB.stmts.size() - 1; si >= 0; --si) {
+                                auto k = backBB.stmts[si].kind;
+                                if (k != IRStmtKind::Branch && k != IRStmtKind::Jump) {
+                                    lastIdx = si; break;
+                                }
+                            }
+                            if (lastIdx >= 0) {
+                                auto &incrS = backBB.stmts[lastIdx];
+                                // Pattern 1: VarSet init + VarSet increment
+                                if (initSPtr &&
+                                    initSPtr->kind == IRStmtKind::VarSet && incrS.kind == IRStmtKind::VarSet &&
+                                    initSPtr->destVar == incrS.destVar && !initSPtr->destVar.empty() &&
+                                    initSPtr->expr && initSPtr->expr->isConst() &&
+                                    incrS.expr && (incrS.expr->op == IROp::Add || incrS.expr->op == IROp::Sub) &&
+                                    incrS.expr->kids.size() == 2 &&
+                                    incrS.expr->kids[0]->op == IROp::Var &&
+                                    incrS.expr->kids[0]->name == incrS.destVar &&
+                                    incrS.expr->kids[1]->isConst()) {
+                                    isForLoop = true;
+                                    initBB = initCandBB; initStmt = initCandIdx;
+                                    incrBB = backSrc; incrStmt = lastIdx;
+                                }
+                                // Pattern 2: Assign(temp, const) init + Assign(temp, Add(Temp(temp), const)) increment
+                                if (!isForLoop && initSPtr &&
+                                    initSPtr->kind == IRStmtKind::Assign && incrS.kind == IRStmtKind::Assign &&
+                                    initSPtr->destTemp >= 0 && initSPtr->destTemp == incrS.destTemp &&
+                                    initSPtr->expr && initSPtr->expr->isConst() &&
+                                    incrS.expr && (incrS.expr->op == IROp::Add || incrS.expr->op == IROp::Sub) &&
+                                    incrS.expr->kids.size() == 2 &&
+                                    incrS.expr->kids[0]->op == IROp::Temp &&
+                                    incrS.expr->kids[0]->tempId() == incrS.destTemp &&
+                                    incrS.expr->kids[1]->isConst()) {
+                                    isForLoop = true;
+                                    initBB = initCandBB; initStmt = initCandIdx;
+                                    incrBB = backSrc; incrStmt = lastIdx;
+                                }
+                            }
+                        }
+                    }
+
+                    if (isForLoop) {
+                        // The init stmt will be suppressed via m_suppressedStmts in the emitter
+                        if (!block->children.empty()) {
+                            auto &lastChild = block->children.back();
+                            (void)lastChild; // init is handled by suppression, not seq trimming
+                        }
+                        auto forNode = std::make_unique<StructNode>();
+                        forNode->kind = StructKind::For;
+                        forNode->cond = br.expr.get();
+                        forNode->negated = negCond;
+                        forNode->forInitBB = initBB; forNode->forInitStmt = initStmt;
+                        forNode->forIncrBB = incrBB; forNode->forIncrStmt = incrStmt;
+                        forNode->children.push_back(std::move(body));
+                        block->children.push_back(std::move(forNode));
+                    } else {
+                        auto whileNode = StructNode::mkWhile(br.expr.get());
+                        whileNode->negated = negCond;
+                        whileNode->children.push_back(std::move(body));
+                        block->children.push_back(std::move(whileNode));
+                    }
                     cur = loopExit;
                     continue;
                 }

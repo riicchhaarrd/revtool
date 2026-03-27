@@ -550,8 +550,8 @@ private:
             }
             // If we have a displacement but no struct type, use pointer arithmetic
             if (m.disp != 0) {
-                // Only use ->field notation if base is known to be a pointer type
-                if (baseType != NullType) {
+                // Only use ->field notation for positive offsets on pointer types
+                if ((int)m.disp > 0 && baseType != NullType) {
                     auto *resolved = m_types.resolveType(baseType);
                     if (resolved && resolved->kind == StabsTypeKind::Pointer) {
                         char fname[32]; snprintf(fname, sizeof(fname), "field_%X", (unsigned)(int)m.disp);
@@ -568,6 +568,10 @@ private:
             uint32_t addr = (uint32_t)m.disp;
             auto *g = m_types.globalAtAddress(addr);
             if (g) return IRExpr::mkVar(g->name, g->typeRef);
+            // Check function map for import pointers
+            auto fit = m_mf.functionMap().find(addr);
+            if (fit != m_mf.functionMap().end())
+                return IRExpr::mkVar(fit->second);
             std::string s = tryString(addr);
             if (!s.empty()) return IRExpr::mkString(s);
             return IRExpr::mkLoad(IRExpr::mkConst(addr));
