@@ -1188,10 +1188,7 @@ private:
         if (mn == "movsb" || mn == "movsd" || mn == "movsw") {
             auto dst = readReg(X86_REG_EDI);
             auto src = readReg(X86_REG_ESI);
-            int sz = (mn == "movsd") ? 4 : (mn == "movsw") ? 2 : 1;
-            std::string cText = "*((" + std::string(sz > 1 ? "int" : "char") + " *)" +
-                                varText(std::move(dst)) + ") = *((" +
-                                std::string(sz > 1 ? "int" : "char") + " *)" +
+            std::string cText = "*(" + varText(std::move(dst)) + ") = *(" +
                                 varText(std::move(src)) + ")";
             bb.stmts.push_back(IRStmt::mkIntrinsic("movs", cText));
             return;
@@ -1199,9 +1196,7 @@ private:
         if (mn == "stosb" || mn == "stosd" || mn == "stosw") {
             auto dst = readReg(X86_REG_EDI);
             auto val = readReg(X86_REG_EAX);
-            int sz = (mn == "stosd") ? 4 : (mn == "stosw") ? 2 : 1;
-            std::string cText = "*((" + std::string(sz > 1 ? "int" : "char") + " *)" +
-                                varText(std::move(dst)) + ") = " + varText(std::move(val));
+            std::string cText = "*(" + varText(std::move(dst)) + ") = " + varText(std::move(val));
             bb.stmts.push_back(IRStmt::mkIntrinsic("stos", cText));
             return;
         }

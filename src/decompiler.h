@@ -429,6 +429,35 @@ private:
             collectGotoTargets(root, m_gotoTargets);
             collectEmittedBlocks(root, emittedBlocks);
 
+            // Find temps used as pointers (dereferenced in Load/Store)
+            for (auto &bb : m_func.blocks)
+                for (auto &stmt : bb.stmts) {
+                    // Store: addr is the pointer being dereferenced
+                    if (stmt.kind == IRStmtKind::Store && stmt.addr) {
+                        if (stmt.addr->op == IROp::Temp)
+                            m_pointerTemps.insert(stmt.addr->tempId());
+                        // Also check children of addr for temps used as base pointers
+                        for (auto &k : stmt.addr->kids)
+                            if (k && k->op == IROp::Temp) m_pointerTemps.insert(k->tempId());
+                    }
+                    // Load expressions with Temp address
+                    auto checkLoadPtrs = [&](const IRExpr *e) {
+                        if (!e) return;
+                        std::vector<const IRExpr *> stack = {e};
+                        while (!stack.empty()) {
+                            auto *n = stack.back(); stack.pop_back();
+                            if (n->op == IROp::Load && !n->kids.empty() && n->kids[0]) {
+                                auto *addr = n->kids[0].get();
+                                if (addr->op == IROp::Temp)
+                                    m_pointerTemps.insert(addr->tempId());
+                            }
+                            for (auto &k : n->kids) if (k) stack.push_back(k.get());
+                        }
+                    };
+                    checkLoadPtrs(stmt.expr.get());
+                    checkLoadPtrs(stmt.addr.get());
+                }
+
             // Force-declare temps used in fallback (goto target) blocks
             for (int bbId : m_gotoTargets) {
                 if (emittedBlocks.count(bbId)) continue;
@@ -442,6 +471,8 @@ private:
                 if (m_tempUseCount[id] > 1) {
                     std::string tname = "t" + std::to_string(id);
                     std::string ttype = (type != NullType) ? m_types.formatType(type) : inferTempType(id);
+                    // Override to pointer if temp is used as a dereference target
+                    if (m_pointerTemps.count(id) && ttype == "int") ttype = "int *";
                     out += "    " + QString::fromStdString(ttype + " " + tname) + ";\n";
                     declared.insert(tname);
                 }
@@ -504,6 +535,7 @@ private:
         std::set<int>         m_gotoTargets;    // block IDs that are goto targets
         std::set<int>         m_emittedLabels;  // labels already emitted (avoid duplicates)
         std::set<std::pair<int,int>> m_suppressedStmts; // (blockId, stmtIdx) to skip in emission
+        std::set<int>         m_pointerTemps;   // temps used as pointers (dereference targets)
 
         // Force temps with cross-block def/use to be declared (not inlined)
         void forceDeclCrossBlockTemps() {
@@ -915,12 +947,18 @@ private:
                     out += pad(indent) + QString::fromStdString(
                         base + "->" + fname + " = " + val) + ";\n";
                 }
+                // General Add/Sub expression → *(expr) = val without ugly cast
+                else if ((a->op == IROp::Add || a->op == IROp::Sub) && a->kids.size() == 2) {
+                    out += pad(indent) + QString::fromStdString(
+                        "*(" + emitExpr(a) + ") = " + val) + ";\n";
+                }
                 else if (a->op == IROp::Var || a->op == IROp::Temp) {
                     out += pad(indent) + QString::fromStdString(
                         "*(" + emitExpr(a) + ") = " + val) + ";\n";
                 } else {
+                    // Final fallback: *(expr) = val — no cast needed
                     out += pad(indent) + QString::fromStdString(
-                        emitStoreDeref(emitExpr(a), stmt.destType, exprType(a)) + " = " + val) + ";\n";
+                        "*(" + emitExpr(a) + ") = " + val) + ";\n";
                 }
                 break;
             }
@@ -1189,6 +1227,11 @@ private:
                     char fname[32]; snprintf(fname, sizeof(fname), "field_%X", (unsigned)off);
                     result = base + "->" + fname;
                 }
+                // General Add/Sub expression → *(expr) without ugly cast
+                else if (addr && (addr->op == IROp::Add || addr->op == IROp::Sub) &&
+                         addr->kids.size() == 2) {
+                    result = "*(" + emitExpr(addr) + ")";
+                }
                 // bare pointer dereference of a simple var/temp → use clean *(var) syntax
                 else if (addr && (addr->op == IROp::Var || addr->op == IROp::Temp)) {
                     TypeRef addrType = exprType(addr);
@@ -1205,7 +1248,8 @@ private:
                         result = "*(" + emitExpr(addr) + ")";
                     }
                 } else {
-                    result = emitDeref(emitExpr(addr), e->typeRef, exprType(addr));
+                    // Final fallback: *(expr) — no cast needed
+                    result = "*(" + emitExpr(addr) + ")";
                 }
                 break;
             }
@@ -1420,6 +1464,8 @@ private:
                 return "float";
             // Comparison results → int (boolean)
             if (e->op >= IROp::Eq && e->op <= IROp::Uge) return "int";
+            // If this temp is used as a pointer (dereferenced), declare as int*
+            if (m_pointerTemps.count(id)) return "int *";
             return "int";
         }
 
@@ -1446,32 +1492,12 @@ private:
         // This prevents "invalid type argument of unary '*' (have 'int')" errors.
         std::string emitDeref(const std::string &addrStr, TypeRef loadType = NullType,
                               TypeRef addrType = NullType) {
-            // If the address is already a pointer type, just dereference without cast
-            if (addrType != NullType) {
-                auto *at = m_types.resolveType(addrType);
-                if (at && at->kind == StabsTypeKind::Pointer)
-                    return "*(" + addrStr + ")";
-            }
-            if (loadType != NullType) {
-                std::string t = m_types.formatType(loadType);
-                return "*((" + t + " *)(" + addrStr + "))";
-            }
-            return "*((int *)(" + addrStr + "))";
+            return "*(" + addrStr + ")";
         }
 
-        // Emit a store through a pointer, adding a cast if needed.
         std::string emitStoreDeref(const std::string &addrStr, TypeRef storeType = NullType,
                                    TypeRef addrType = NullType) {
-            if (addrType != NullType) {
-                auto *at = m_types.resolveType(addrType);
-                if (at && at->kind == StabsTypeKind::Pointer)
-                    return "*(" + addrStr + ")";
-            }
-            if (storeType != NullType) {
-                std::string t = m_types.formatType(storeType);
-                return "*((" + t + " *)(" + addrStr + "))";
-            }
-            return "*((int *)(" + addrStr + "))";
+            return "*(" + addrStr + ")";
         }
 
         std::string emitCast(IRExpr *e) {
