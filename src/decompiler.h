@@ -1084,6 +1084,18 @@ private:
                         "*(" + emitExpr(a) + ") = " + val) + ";\n";
                 }
                 else if (a->op == IROp::Var || a->op == IROp::Temp) {
+                    // For scalar pointers (float*, int*), use base[0] = val
+                    TypeRef at = exprType(a);
+                    auto *atInfo = (at != NullType) ? m_types.resolveType(at) : nullptr;
+                    if (atInfo && atInfo->kind == StabsTypeKind::Pointer) {
+                        auto *tgt = m_types.resolveType(atInfo->targetType);
+                        if (tgt && tgt->sizeBytes > 0 && tgt->sizeBytes <= 8 &&
+                            tgt->kind != StabsTypeKind::Struct && tgt->kind != StabsTypeKind::Union) {
+                            out += pad(indent) + QString::fromStdString(
+                                emitExpr(a) + "[0] = " + val) + ";\n";
+                            break;
+                        }
+                    }
                     out += pad(indent) + QString::fromStdString(
                         "*(" + emitExpr(a) + ") = " + val) + ";\n";
                 } else {
@@ -1290,9 +1302,13 @@ private:
                     }
                 }
                 if (result.empty()) {
-                    if (e->value >= -256 && e->value <= 4096)
+                    // Detect sign-extended negatives: 0xFFFFFF80 → -128
+                    int32_t sv = (int32_t)(uint32_t)e->value;
+                    if (sv < 0 && sv >= -65536 && (uint32_t)e->value > 0x7FFFFFFF) {
+                        result = std::to_string(sv);
+                    } else if (e->value >= -65536 && e->value <= 65536) {
                         result = std::to_string(e->value);
-                    else {
+                    } else {
                         char buf[32]; snprintf(buf, sizeof(buf), "0x%X", (unsigned)(uint32_t)e->value);
                         result = buf;
                     }
@@ -1398,8 +1414,19 @@ private:
                             result = emitExpr(addr) + "->" + access;
                         else
                             result = "*(" + emitExpr(addr) + ")";
+                    } else if (addrType != NullType) {
+                        auto *at = m_types.resolveType(addrType);
+                        if (at && at->kind == StabsTypeKind::Pointer) {
+                            auto *tgt = m_types.resolveType(at->targetType);
+                            if (tgt && tgt->sizeBytes > 0 && tgt->sizeBytes <= 8 &&
+                                tgt->kind != StabsTypeKind::Struct && tgt->kind != StabsTypeKind::Union)
+                                result = emitExpr(addr) + "[0]";
+                            else
+                                result = "*(" + emitExpr(addr) + ")";
+                        } else {
+                            result = "*(" + emitExpr(addr) + ")";
+                        }
                     } else {
-                        // Simple var/temp being dereferenced — no need for cast
                         result = "*(" + emitExpr(addr) + ")";
                     }
                 } else {
@@ -1415,6 +1442,27 @@ private:
 
             case IROp::Field: {
                 std::string base = emitExpr(e->kids[0].get());
+                // For scalar pointer types (float*, int*), use array notation
+                // field_4 on float* → base[1], field_8 → base[2], etc.
+                if (e->name.find("field_") == 0 && e->kids[0]) {
+                    TypeRef baseType = exprType(e->kids[0].get());
+                    if (baseType != NullType) {
+                        auto *bt = m_types.resolveType(baseType);
+                        if (bt && bt->kind == StabsTypeKind::Pointer) {
+                            auto *target = m_types.resolveType(bt->targetType);
+                            if (target && target->sizeBytes > 0 && target->sizeBytes <= 8 &&
+                                target->kind != StabsTypeKind::Struct &&
+                                target->kind != StabsTypeKind::Union) {
+                                int off = (int)e->value;
+                                int idx = off / target->sizeBytes;
+                                if (idx * target->sizeBytes == off && idx >= 0) {
+                                    result = base + "[" + std::to_string(idx) + "]";
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
                 // Check if this is a synthetic field (field_XX) from an opaque/empty struct
                 bool isSynthField = (e->name.find("field_") == 0);
                 bool fieldValid = true;
