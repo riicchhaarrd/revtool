@@ -276,6 +276,7 @@ public:
         m_espArgs.clear();
         m_pushArgs.clear();
         m_fpuStack.clear();
+        m_lastFpuTop = -1;
         m_flags = {-1, IROp::Eq, nullptr, nullptr};
 
         int curBlock = 0;
@@ -304,7 +305,45 @@ public:
             }
             if (mn == "nop" || mn == "fnop") continue;
 
+            {
+                bool isRet = false;
+                if (in.detail) {
+                    for (uint8_t g = 0; g < in.detail->groups_count; ++g)
+                        if (in.detail->groups[g] == CS_GRP_RET) isRet = true;
+                }
+                if (isRet) fprintf(stderr, "RET_INSN: mn='%s' addr=0x%llx\n",
+                                   in.mnemonic, (unsigned long long)in.address);
+            }
             liftInsn(in, func.blocks[curBlock], func, addrToBlock);
+        }
+
+        // ── Pass 5b: ensure float functions have proper return ───────
+        // The ret instruction may fall outside STABS-reported function size.
+        // If the last block has no Return and the function returns float/double,
+        // synthesize one from the last FPU stack value.
+        if (sfn && sfn->returnType != NullType && !func.blocks.empty()) {
+            auto *rt = m_types.resolveType(sfn->returnType);
+            fprintf(stderr, "PASS5B: rt=%p kind=%d fpuStack=%d lastFpuTop=%d\n",
+                    (void*)rt, rt ? (int)rt->kind : -1, (int)m_fpuStack.size(), m_lastFpuTop);
+            if (rt && (rt->kind == StabsTypeKind::Float ||
+                       rt->kind == StabsTypeKind::Double ||
+                       rt->kind == StabsTypeKind::LongDouble)) {
+                // Check if any block has a Return statement
+                bool hasReturn = false;
+                for (auto &bb : func.blocks)
+                    for (auto &s : bb.stmts)
+                        if (s.kind == IRStmtKind::Return) { hasReturn = true; break; }
+                fprintf(stderr, "PASS5B_FLOAT: hasReturn=%d\n", hasReturn);
+                if (!hasReturn) {
+                    auto &lastBB = func.blocks.back();
+                    if (!m_fpuStack.empty()) {
+                        lastBB.stmts.push_back(IRStmt::mkReturn(fpuRead(0)));
+                    } else if (m_lastFpuTop >= 0) {
+                        lastBB.stmts.push_back(IRStmt::mkReturn(
+                            IRExpr::mkTemp(m_lastFpuTop, m_func->tempType(m_lastFpuTop))));
+                    }
+                }
+            }
         }
 
         // ── Pass 6: merge duplicate branches ─────────────────────────
@@ -416,6 +455,7 @@ private:
 
     // FPU stack: tracks temp IDs for ST0..STn (index 0 = top of stack)
     std::vector<int> m_fpuStack;
+    int m_lastFpuTop = -1;  // Last temp that was at ST0 before a pop (for float return heuristic)
 
     // Switch table info collected in Pass 1
     struct SwitchInfo {
@@ -436,6 +476,14 @@ private:
     }
 
     std::unique_ptr<IRExpr> readReg(x86_reg reg) {
+        // Route ST registers through FPU stack
+        if (reg >= X86_REG_ST0 && reg <= X86_REG_ST7) {
+            int idx = (int)(reg - X86_REG_ST0);
+            if (idx < (int)m_fpuStack.size()) {
+                int t = m_fpuStack[idx];
+                return IRExpr::mkTemp(t, m_func->tempType(t));
+            }
+        }
         int t = regTemp(reg);
         if (t >= 0) return IRExpr::mkTemp(t, m_func->tempType(t));
         // No temp for this register — create one initialized to 0
@@ -456,32 +504,43 @@ private:
     }
 
     // ── FPU stack helpers ──────────────────────────────────────────────
-    // Push a new temp onto the FPU stack and sync ST0 register mapping
+    // Sync m_regTemps for ST0..ST7 from the FPU stack state
+    void fpuSyncRegs() {
+        for (int i = 0; i < 8; ++i) {
+            x86_reg sr = (x86_reg)(X86_REG_ST0 + i);
+            if (i < (int)m_fpuStack.size())
+                m_regTemps[sr] = m_fpuStack[i];
+            else
+                m_regTemps.erase(sr);
+        }
+    }
+
+    // Push a new temp onto the FPU stack
     void fpuPush(std::unique_ptr<IRExpr> val, BasicBlock &bb) {
         int temp = m_func->newTemp();
         bb.stmts.push_back(IRStmt::mkAssign(temp, std::move(val)));
         m_fpuStack.insert(m_fpuStack.begin(), temp);
-        if (m_fpuStack.size() > 4) m_fpuStack.resize(4); // cap depth
-        m_regTemps[X86_REG_ST0] = m_fpuStack[0];
+        if (m_fpuStack.size() > 8) m_fpuStack.resize(8);
+        fpuSyncRegs();
     }
 
     // Pop the FPU stack top, return temp ID (-1 if empty)
     int fpuPop() {
         if (m_fpuStack.empty()) return regTemp(X86_REG_ST0);
         int t = m_fpuStack[0];
+        m_lastFpuTop = t;  // Remember last ST0 for float return heuristic
         m_fpuStack.erase(m_fpuStack.begin());
-        if (!m_fpuStack.empty())
-            m_regTemps[X86_REG_ST0] = m_fpuStack[0];
+        fpuSyncRegs();
         return t;
     }
 
     // Read FPU stack at position (0 = ST0, 1 = ST1, ...)
     std::unique_ptr<IRExpr> fpuRead(int pos) {
-        if (pos < (int)m_fpuStack.size()) {
+        if (pos >= 0 && pos < (int)m_fpuStack.size()) {
             int t = m_fpuStack[pos];
             return IRExpr::mkTemp(t, m_func->tempType(t));
         }
-        // Fall back to register-based read
+        // Fall back to register-based read for empty stack positions
         x86_reg sr = (x86_reg)(X86_REG_ST0 + pos);
         return readReg(sr);
     }
@@ -498,7 +557,7 @@ private:
                 m_fpuStack.push_back(m_func->newTemp());
             m_fpuStack[pos] = temp;
         }
-        if (pos == 0) m_regTemps[X86_REG_ST0] = temp;
+        fpuSyncRegs();
     }
 
     // Map capstone ST register to stack index
@@ -1101,9 +1160,12 @@ private:
 
         // ── Return ──────────────────────────────────────────────────
         if (mn == "ret") {
+            fprintf(stderr, "RET_LIFTER: retType=%d fpuStack=%d lastFpuTop=%d\n",
+                    m_func->returnType, (int)m_fpuStack.size(), m_lastFpuTop);
             // Check if return type is void (including through typedef chains)
             if (m_func->returnType != NullType) {
                 auto *rt = m_types.resolveType(m_func->returnType);
+                fprintf(stderr, "RET_LIFTER2: rt=%p kind=%d\n", (void*)rt, rt ? (int)rt->kind : -1);
                 if (rt && rt->kind == StabsTypeKind::Void) {
                     bb.stmts.push_back(IRStmt::mkReturn());
                     return;
@@ -1114,12 +1176,23 @@ private:
                     bb.stmts.push_back(IRStmt::mkReturn());
                     return;
                 }
-                // Float/double return → use ST0 or last float local
+                // Float/double return → use ST0 from FPU stack, or last popped value
                 if (rt && (rt->kind == StabsTypeKind::Float ||
                            rt->kind == StabsTypeKind::Double ||
                            rt->kind == StabsTypeKind::LongDouble)) {
-                    // Find last VarSet to a float local across all blocks
-                    // (preferred over ST0 because fstp pops the stack and our model doesn't track pops)
+                    // If FPU stack has a value, use ST0 directly
+                    if (!m_fpuStack.empty()) {
+                        bb.stmts.push_back(IRStmt::mkReturn(fpuRead(0)));
+                        return;
+                    }
+                    // Use the last value that was on the FPU stack top before pop
+                    // (common pattern: fstp stores result then ret returns it)
+                    if (m_lastFpuTop >= 0) {
+                        bb.stmts.push_back(IRStmt::mkReturn(
+                            IRExpr::mkTemp(m_lastFpuTop, m_func->tempType(m_lastFpuTop))));
+                        return;
+                    }
+                    // Fallback: find last VarSet to a float local across all blocks
                     for (int bi = (int)m_func->blocks.size() - 1; bi >= 0; --bi)
                     for (int si = (int)m_func->blocks[bi].stmts.size() - 1; si >= 0; --si) {
                         auto &s = m_func->blocks[bi].stmts[si];
@@ -1201,8 +1274,8 @@ private:
                 if (isFloatRet) {
                     // Float returns come back in ST0 — push onto FPU stack
                     m_fpuStack.insert(m_fpuStack.begin(), t);
-                    if (m_fpuStack.size() > 4) m_fpuStack.resize(4);
-                    m_regTemps[X86_REG_ST0] = t;
+                    if (m_fpuStack.size() > 8) m_fpuStack.resize(8);
+                    fpuSyncRegs();
                 } else {
                     writeReg(X86_REG_EAX, t, bb);
                 }
@@ -1447,8 +1520,9 @@ private:
                     auto val = fpuRead(idx);
                     fpuPush(std::move(val), bb);
                 } else {
+                    // fld loads a float from memory — no int-to-float cast needed
                     auto src = readOp(o[0]);
-                    fpuPush(IRExpr::mkCast(CastKind::IntToFloat, std::move(src)), bb);
+                    fpuPush(std::move(src), bb);
                 }
             }
             return;
@@ -1491,13 +1565,18 @@ private:
         // ── Arithmetic (binary) ──────────────────────────────────────
         auto fpuBinOp = [&](IROp irop, bool reverse = false) {
             if (n == 0) {
-                // No operands: fadd = ST0 + ST1, result in ST0
+                // No operands: fadd = ST1 + ST0, faddp = ST1 + ST0 then pop
                 auto a = fpuRead(0);
                 auto b = fpuRead(1);
                 if (reverse) std::swap(a, b);
-                fpuWrite(0, IRExpr::mkBinary(irop, std::move(a), std::move(b)), bb);
+                if (isPop) {
+                    // faddp: result goes to ST1, then pop ST0 (result ends in new ST0)
+                    fpuWrite(1, IRExpr::mkBinary(irop, std::move(a), std::move(b)), bb);
+                } else {
+                    fpuWrite(0, IRExpr::mkBinary(irop, std::move(a), std::move(b)), bb);
+                }
             } else if (n >= 2 && o[0].type == X86_OP_REG && o[1].type == X86_OP_REG) {
-                // fadd st(i), st(j)
+                // fadd st(i), st(j) — result in st(i)
                 int di = stRegIndex(o[0].reg);
                 int si = stRegIndex(o[1].reg);
                 auto a = fpuRead(di);
@@ -1533,22 +1612,30 @@ private:
         }
         if (mn == "fabs") {
             auto st0 = fpuRead(0);
-            bb.stmts.push_back(IRStmt::mkIntrinsic("fabs", "fabs(" + varText(std::move(st0)) + ")"));
+            std::vector<std::unique_ptr<IRExpr>> args;
+            args.push_back(std::move(st0));
+            fpuWrite(0, IRExpr::mkCall("fabs", std::move(args)), bb);
             return;
         }
         if (mn == "fsqrt") {
             auto st0 = fpuRead(0);
-            bb.stmts.push_back(IRStmt::mkIntrinsic("sqrt", "sqrt(" + varText(std::move(st0)) + ")"));
+            std::vector<std::unique_ptr<IRExpr>> args;
+            args.push_back(std::move(st0));
+            fpuWrite(0, IRExpr::mkCall("sqrt", std::move(args)), bb);
             return;
         }
         if (mn == "fsin") {
             auto st0 = fpuRead(0);
-            bb.stmts.push_back(IRStmt::mkIntrinsic("sin", "sin(" + varText(std::move(st0)) + ")"));
+            std::vector<std::unique_ptr<IRExpr>> args;
+            args.push_back(std::move(st0));
+            fpuWrite(0, IRExpr::mkCall("sinf", std::move(args)), bb);
             return;
         }
         if (mn == "fcos") {
             auto st0 = fpuRead(0);
-            bb.stmts.push_back(IRStmt::mkIntrinsic("cos", "cos(" + varText(std::move(st0)) + ")"));
+            std::vector<std::unique_ptr<IRExpr>> args;
+            args.push_back(std::move(st0));
+            fpuWrite(0, IRExpr::mkCall("cosf", std::move(args)), bb);
             return;
         }
         // ── Constants: push onto stack ────────────────────────────────
@@ -1581,15 +1668,89 @@ private:
             int idx = (n >= 1 && o[0].type == X86_OP_REG) ? stRegIndex(o[0].reg) : 1;
             if (idx > 0 && idx < (int)m_fpuStack.size()) {
                 std::swap(m_fpuStack[0], m_fpuStack[idx]);
-                m_regTemps[X86_REG_ST0] = m_fpuStack[0];
+                fpuSyncRegs();
             }
             return;
         }
-        // ── Control/transcendental — suppress ────────────────────────
-        if (mn == "fnstcw" || mn == "fldcw" || mn == "frndint" || mn == "fscale" ||
-            mn == "fdecstp" || mn == "fincstp" || mn == "ffree" ||
-            mn == "finit" || mn == "fninit" || mn == "fwait" || mn == "wait" ||
-            mn == "fpatan" || mn == "fyl2x" || mn == "f2xm1" || mn == "fldl2e" || mn == "fldln2") {
+        // ── Transcendental functions that modify the stack ──────────
+        if (mn == "fpatan") {
+            // fpatan: ST1 = atan2(ST1, ST0), then pop (result in new ST0)
+            auto st0 = fpuRead(0);
+            auto st1 = fpuRead(1);
+            std::vector<std::unique_ptr<IRExpr>> args;
+            args.push_back(std::move(st1));
+            args.push_back(std::move(st0));
+            fpuWrite(1, IRExpr::mkCall("atan2f", std::move(args)), bb);
+            fpuPop();
+            return;
+        }
+        if (mn == "fyl2x") {
+            // fyl2x: ST1 = ST1 * log2(ST0), then pop
+            auto st0 = fpuRead(0);
+            auto st1 = fpuRead(1);
+            std::vector<std::unique_ptr<IRExpr>> args;
+            args.push_back(std::move(st0));
+            auto logExpr = IRExpr::mkCall("log2f", std::move(args));
+            fpuWrite(1, IRExpr::mkBinary(IROp::Mul, std::move(st1), std::move(logExpr)), bb);
+            fpuPop();
+            return;
+        }
+        if (mn == "f2xm1") {
+            // f2xm1: ST0 = 2^ST0 - 1
+            auto st0 = fpuRead(0);
+            std::vector<std::unique_ptr<IRExpr>> args;
+            args.push_back(IRExpr::mkConst(2));
+            args.push_back(std::move(st0));
+            auto powExpr = IRExpr::mkCall("powf", std::move(args));
+            fpuWrite(0, IRExpr::mkBinary(IROp::Sub, std::move(powExpr), IRExpr::mkConst(1)), bb);
+            return;
+        }
+        if (mn == "fscale") {
+            // fscale: ST0 = ST0 * 2^(trunc(ST1))  (ST1 unchanged)
+            auto st0 = fpuRead(0);
+            auto st1 = fpuRead(1);
+            std::vector<std::unique_ptr<IRExpr>> args;
+            args.push_back(IRExpr::mkConst(2));
+            args.push_back(std::move(st1));
+            auto powExpr = IRExpr::mkCall("powf", std::move(args));
+            fpuWrite(0, IRExpr::mkBinary(IROp::Mul, std::move(st0), std::move(powExpr)), bb);
+            return;
+        }
+        if (mn == "frndint") {
+            // frndint: ST0 = round(ST0)
+            auto st0 = fpuRead(0);
+            std::vector<std::unique_ptr<IRExpr>> args;
+            args.push_back(std::move(st0));
+            fpuWrite(0, IRExpr::mkCall("roundf", std::move(args)), bb);
+            return;
+        }
+        if (mn == "fldl2e") {
+            // Push log2(e)
+            fpuPush(IRExpr::mkVar("M_LOG2E"), bb);
+            return;
+        }
+        if (mn == "fldln2") {
+            // Push ln(2)
+            fpuPush(IRExpr::mkVar("M_LN2"), bb);
+            return;
+        }
+        if (mn == "fdecstp") {
+            // Rotate stack pointer down — approximate as no-op
+            return;
+        }
+        if (mn == "fincstp") {
+            // Rotate stack pointer up — approximate as no-op
+            return;
+        }
+        if (mn == "ffree") {
+            // Free a stack register
+            if (n >= 1 && o[0].type == X86_OP_REG && o[0].reg == X86_REG_ST0 && !m_fpuStack.empty())
+                fpuPop();
+            return;
+        }
+        // ── Control — suppress ──────────────────────────────────────────
+        if (mn == "fnstcw" || mn == "fldcw" ||
+            mn == "finit" || mn == "fninit" || mn == "fwait" || mn == "wait") {
             return;
         }
     }

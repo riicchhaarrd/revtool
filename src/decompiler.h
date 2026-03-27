@@ -302,25 +302,34 @@ public:
             pass1.append(lines[i]);
         }
         // Pass 2: Remove unused variable declarations
-        // Collect the body (everything after declarations) to check references
+        // Scan forward through the entire remaining function body for references
         QStringList pass2;
         for (int i = 0; i < pass1.size(); ++i) {
             QString trimmed = pass1[i].trimmed();
-            // Check if this is a variable declaration: "    type varname;"
+            // Match more variable declaration patterns
             if (trimmed.startsWith("int v") || trimmed.startsWith("float v") ||
-                trimmed.startsWith("int *v")) {
-                // Extract the variable name
+                trimmed.startsWith("int *v") ||
+                trimmed.startsWith("int var_") || trimmed.startsWith("float var_")) {
+                // Extract the variable name (find first 'v' for the var name)
                 QString varName;
                 int nameStart = trimmed.indexOf('v');
                 int nameEnd = trimmed.indexOf(';', nameStart);
                 if (nameStart >= 0 && nameEnd > nameStart)
                     varName = trimmed.mid(nameStart, nameEnd - nameStart);
-                // Check if this var is used anywhere in the rest of the function
+                // Check if this var is used anywhere in the rest of the enclosing scope
+                // Track brace depth to find the matching closing brace
                 if (!varName.isEmpty()) {
                     bool used = false;
+                    int depth = 0;
                     for (int j = i + 1; j < pass1.size(); ++j) {
-                        if (pass1[j].contains(varName)) { used = true; break; }
-                        if (pass1[j].trimmed() == "}") break; // end of function
+                        QString line = pass1[j];
+                        // Track brace depth
+                        for (int c = 0; c < line.size(); ++c) {
+                            if (line[c] == '{') depth++;
+                            else if (line[c] == '}') depth--;
+                        }
+                        if (line.contains(varName)) { used = true; break; }
+                        if (depth < 0) break; // reached the matching closing brace
                     }
                     if (!used) continue; // skip unused declaration
                 }
@@ -1665,7 +1674,17 @@ private:
                 evalMul = [&](IRExpr *expr) -> std::pair<IRExpr*, int64_t> {
                     // Returns (baseVar, multiplier) if expr is baseVar * N
                     if (!expr) return {nullptr, 0};
-                    if (expr->op == IROp::Var || expr->op == IROp::Temp)
+                    // For Temp nodes: if the temp has a known definition, recurse into it
+                    // so that multi-use temps don't block chain folding
+                    if (expr->op == IROp::Temp) {
+                        auto dit = m_tempDef.find(expr->tempId());
+                        if (dit != m_tempDef.end() && dit->second) {
+                            auto [b, m] = evalMul(dit->second);
+                            if (b && m != 0) return {b, m};
+                        }
+                        return {expr, 1};
+                    }
+                    if (expr->op == IROp::Var)
                         return {expr, 1};
                     if (expr->op == IROp::Mul && expr->kids.size() == 2) {
                         if (expr->kids[1]->isConst()) {
