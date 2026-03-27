@@ -215,6 +215,48 @@ public:
             if (anyExterns) out += "\n";
         }
 
+        // Also scan for named variables used but not declared anywhere
+        // (globals resolved from nlist but not in STABS globals table)
+        {
+            std::string body = funcBodies.toStdString();
+            // Collect all param/local names across all functions in this file
+            std::set<std::string> knownNames = emittedGlobals;
+            for (size_t fi : sorted) {
+                auto &fn = mf.stabsFunctions()[fi];
+                knownNames.insert(fn.name);
+                for (auto &p : fn.params) knownNames.insert(p.name);
+                for (auto &l : fn.locals) knownNames.insert(l.name);
+            }
+            // Find assignment targets that look like globals (name = expr;)
+            // Pattern: starts at indent, name followed by =, ; at end
+            bool anyUndeclared = false;
+            std::set<std::string> checked;
+            size_t pos = 0;
+            while ((pos = body.find(" = ", pos)) != std::string::npos) {
+                // Walk backwards to find the variable name
+                size_t nameEnd = pos;
+                size_t nameStart = nameEnd;
+                while (nameStart > 0 && (isalnum(body[nameStart-1]) || body[nameStart-1] == '_'))
+                    --nameStart;
+                std::string name = body.substr(nameStart, nameEnd - nameStart);
+                pos += 3;
+                if (name.empty() || name[0] == 'v' || name[0] == 't' || name.find("var_") == 0 ||
+                    name.find("arg_") == 0 || name.find("bb_") == 0 || name.find("g_") == 0)
+                    continue;
+                if (knownNames.count(name) || checked.count(name)) continue;
+                checked.insert(name);
+                // Verify it appears as a standalone identifier (not inside a string/comment)
+                // Simple heuristic: if it also appears as "name =" or "name)" it's a real var
+                if (body.find(name + " =") != std::string::npos ||
+                    body.find("= " + name) != std::string::npos) {
+                    knownNames.insert(name);
+                    out += QString::fromStdString("int " + name + ";\n");
+                    anyUndeclared = true;
+                }
+            }
+            if (anyUndeclared) out += "\n";
+        }
+
         out += funcBodies;
         return clangFormat(cleanupOutput(out)); // cleanup + format
     }
@@ -328,6 +370,9 @@ public:
             "typedef void *HMENU;\n"
             "typedef unsigned int ATOM;\n"
             "typedef unsigned int UINT_PTR;\n"
+            "typedef short DCTELEM;\n"
+            "typedef short SHORT;\n"
+            "typedef int LONG_PTR;\n"
             "\n"
         );
     }
@@ -1843,7 +1888,7 @@ private:
                 case IROp::And:  op = " & "; break;
                 case IROp::Or:   op = " | "; break;
                 case IROp::Xor:  op = " ^ "; break;
-                default: op = " ? "; break;
+                default: op = " /* ?? */ "; break;
                 }
                 result = "(" + lhs + op + rhs + ")";
                 break;
