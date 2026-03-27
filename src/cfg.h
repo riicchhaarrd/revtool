@@ -246,6 +246,7 @@ private:
     // ── Structure a region of blocks ────────────────────────────────
     int m_depth = 0;
     int m_totalCalls = 0;
+    std::vector<int> m_loopExitStack; // innermost-first stack of active loop exit blocks
 
     std::unique_ptr<StructNode> structureRegion(int start, int end, std::vector<bool> &visited) {
         auto block = StructNode::mkBlock();
@@ -288,7 +289,9 @@ private:
 
                     // Structure the loop body first
                     std::vector<bool> bodyVisited = visited;
+                    m_loopExitStack.push_back(loopExit);
                     auto body = structureRegion(bodyTarget, cur, bodyVisited);
+                    m_loopExitStack.pop_back();
                     for (int vi = 0; vi < n; ++vi) if (bodyVisited[vi]) visited[vi] = true;
 
                     // Try to detect for-loop pattern:
@@ -440,6 +443,24 @@ private:
                     }
                 }
 
+                // Check for loop break (branch to active loop exit)
+                for (int exitBB : m_loopExitStack) {
+                    if (trueB == exitBB) {
+                        auto ifNode = StructNode::mkIf(last.expr.get(), false);
+                        ifNode->children.push_back(StructNode::mkBreak());
+                        block->children.push_back(std::move(ifNode));
+                        cur = falseB;
+                        goto next_block;
+                    }
+                    if (falseB == exitBB) {
+                        auto ifNode = StructNode::mkIf(last.expr.get(), true);
+                        ifNode->children.push_back(StructNode::mkBreak());
+                        block->children.push_back(std::move(ifNode));
+                        cur = trueB;
+                        goto next_block;
+                    }
+                }
+
                 // Determine if/else vs if-then
                 // If both targets converge at the same point, it's if/else
                 {
@@ -504,6 +525,18 @@ private:
                     block->children.push_back(StructNode::mkSeq(cur, 0, numStmts - 1));
 
                 int target = last.jumpTarget;
+                // Check for loop break (unconditional jump to active loop exit)
+                {
+                    bool isBreak = false;
+                    for (int exitBB : m_loopExitStack) {
+                        if (target == exitBB) { isBreak = true; break; }
+                    }
+                    if (isBreak) {
+                        block->children.push_back(StructNode::mkBreak());
+                        cur = -1;
+                        continue;
+                    }
+                }
                 // Check for loop back-edge
                 if (target >= 0 && target < n && visited[target]) {
                     // This might be a continue or end of loop body
