@@ -651,6 +651,22 @@ private:
                 }
             }
         }
+        // Direct address store: [disp] with no base/index
+        if (m.base == X86_REG_INVALID && m.index == X86_REG_INVALID && m.disp) {
+            uint32_t addr = (uint32_t)m.disp;
+            auto *g = m_types.globalAtAddress(addr);
+            if (g) {
+                bb.stmts.push_back(IRStmt::mkVarSet(g->name, std::move(val), g->typeRef));
+                return;
+            }
+            // Synthetic global name for data section addresses
+            const Section *dSec = m_mf.sectionForAddress(addr);
+            if (dSec && (dSec->segname == "__DATA" || dSec->segname == "__IMPORT")) {
+                char gn[32]; snprintf(gn, sizeof(gn), "g_%X", addr);
+                bb.stmts.push_back(IRStmt::mkVarSet(gn, std::move(val)));
+                return;
+            }
+        }
         // General store
         auto addr = readMem_addr(m);
         if (addr)
