@@ -600,28 +600,39 @@ private:
             }
             if (!declared.empty()) out += "\n";
 
-            // Emit structured body
-            emitNode(out, root, 1);
+            // Emit structured body into a temporary buffer, then check for leaked temps
+            QString bodyOut;
+            emitNode(bodyOut, root, 1);
 
-            // Emit fallback blocks for goto targets not in structured tree
+            // Also emit fallback blocks into the body buffer
+            // so leaked temps from gotos are captured too
             for (int bbId : m_gotoTargets) {
                 if (emittedBlocks.count(bbId)) continue;
                 if (bbId < 0 || bbId >= (int)m_func.blocks.size()) continue;
                 auto &bb = m_func.blocks[bbId];
                 if (!m_emittedLabels.count(bbId)) {
                     m_emittedLabels.insert(bbId);
-                    out += QString("bb_%1:\n").arg(bbId);
+                    bodyOut += QString("bb_%1:\n").arg(bbId);
                 }
                 for (int i = 0; i < (int)bb.stmts.size(); ++i) {
                     auto &s = bb.stmts[i];
-                    // Skip terminal branch/jump (structurer handles control flow)
                     if (i == (int)bb.stmts.size() - 1 &&
                         (s.kind == IRStmtKind::Branch || s.kind == IRStmtKind::Jump))
                         continue;
-                    emitStmt(out, s, 1);
+                    emitStmt(bodyOut, s, 1);
                 }
             }
 
+            // Declare any temps that leaked as raw tN names during emission
+            for (int id : m_forceDeclareTemps) {
+                std::string tname = "t" + std::to_string(id);
+                if (declared.count(tname)) continue;
+                declared.insert(tname);
+                out += "    " + QString::fromStdString(inferTempType(id) + " " + tname) + ";\n";
+            }
+            if (!m_forceDeclareTemps.empty()) out += "\n";
+
+            out += bodyOut;
             out += "}\n";
             return out;
         }
@@ -641,6 +652,7 @@ private:
         std::set<int>         m_emittedLabels;  // labels already emitted (avoid duplicates)
         std::set<std::pair<int,int>> m_suppressedStmts; // (blockId, stmtIdx) to skip in emission
         std::set<int>         m_pointerTemps;   // temps used as pointers (dereference targets)
+        std::set<int>         m_forceDeclareTemps; // temps that leak as raw tN and need declaration
 
         // Force temps with cross-block def/use to be declared (not inlined)
         void forceDeclCrossBlockTemps() {
@@ -1448,12 +1460,15 @@ private:
                         std::string inlined = emitExpr(it->second, negate);
                         if (!inlined.empty()) return inlined;
                     }
-                    // Def not found (defined in unstructured block) — emit safe fallback
-                    if (m_tempDef.find(id) == m_tempDef.end())
-                        return "0";
+                    // Inlining failed — emit 0 rather than raw temp name
+                    return "0";
                 }
                 // Use coalesced variable name if available
                 result = tempName(id);
+                // If we'd emit a raw "tN" name, force-declare it
+                if (result.size() >= 2 && result[0] == 't' && result[1] >= '0' && result[1] <= '9') {
+                    m_forceDeclareTemps.insert(id);
+                }
                 break;
             }
             case IROp::Var:    result = e->name; break;

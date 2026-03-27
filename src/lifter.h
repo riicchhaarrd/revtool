@@ -1318,11 +1318,12 @@ private:
             auto dst = readReg(X86_REG_EDI);
             auto src = readReg(X86_REG_ESI);
             auto cnt = readReg(X86_REG_ECX);
-            std::string cText = "memcpy(" + varText(std::move(dst)) + ", " +
-                                varText(std::move(src)) + ", " + varText(std::move(cnt));
-            if (sz > 1) cText += " * " + std::to_string(sz);
-            cText += ")";
-            bb.stmts.push_back(IRStmt::mkIntrinsic("memcpy", cText));
+            std::vector<std::unique_ptr<IRExpr>> args;
+            args.push_back(std::move(dst));
+            args.push_back(std::move(src));
+            if (sz > 1) args.push_back(IRExpr::mkBinary(IROp::Mul, std::move(cnt), IRExpr::mkConst(sz)));
+            else args.push_back(std::move(cnt));
+            bb.stmts.push_back(IRStmt::mkCall(IRExpr::mkCall("memcpy", std::move(args))));
             return;
         }
         if (mn == "rep stosb" || mn == "rep stosd") {
@@ -1330,11 +1331,12 @@ private:
             auto dst = readReg(X86_REG_EDI);
             auto val = readReg(X86_REG_EAX);
             auto cnt = readReg(X86_REG_ECX);
-            std::string cText = "memset(" + varText(std::move(dst)) + ", " +
-                                varText(std::move(val)) + ", " + varText(std::move(cnt));
-            if (sz > 1) cText += " * " + std::to_string(sz);
-            cText += ")";
-            bb.stmts.push_back(IRStmt::mkIntrinsic("memset", cText));
+            std::vector<std::unique_ptr<IRExpr>> args;
+            args.push_back(std::move(dst));
+            args.push_back(std::move(val));
+            if (sz > 1) args.push_back(IRExpr::mkBinary(IROp::Mul, std::move(cnt), IRExpr::mkConst(sz)));
+            else args.push_back(std::move(cnt));
+            bb.stmts.push_back(IRStmt::mkCall(IRExpr::mkCall("memset", std::move(args))));
             return;
         }
         if (mn == "repe cmpsb" || mn == "repe cmpsd" || mn == "repne cmpsb" || mn == "repne cmpsd") {
@@ -1343,19 +1345,18 @@ private:
             auto dst = readReg(X86_REG_EDI);
             auto src = readReg(X86_REG_ESI);
             auto cnt = readReg(X86_REG_ECX);
-            std::string cText;
-            if (equal && sz == 1) {
-                cText = "memcmp(" + varText(std::move(src)) + ", " +
-                        varText(std::move(dst)) + ", " + varText(std::move(cnt)) + ")";
+            // Build proper Call expression for memcmp
+            std::vector<std::unique_ptr<IRExpr>> args;
+            args.push_back(std::move(src));
+            args.push_back(std::move(dst));
+            if (sz > 1) {
+                args.push_back(IRExpr::mkBinary(IROp::Mul, std::move(cnt), IRExpr::mkConst(sz)));
             } else {
-                cText = "memcmp(" + varText(std::move(src)) + ", " +
-                        varText(std::move(dst)) + ", " + varText(std::move(cnt));
-                if (sz > 1) cText += " * " + std::to_string(sz);
-                cText += ")";
+                args.push_back(std::move(cnt));
             }
-            // Result goes into flags for subsequent branch
+            auto callExpr = IRExpr::mkCall("memcmp", std::move(args));
             int t = func.newTemp();
-            bb.stmts.push_back(IRStmt::mkAssign(t, IRExpr::mkVar(cText)));
+            bb.stmts.push_back(IRStmt::mkAssign(t, std::move(callExpr)));
             m_flags.lhs = IRExpr::mkTemp(t);
             m_flags.rhs = IRExpr::mkConst(0);
             m_flags.op = IROp::Sub;
@@ -1366,15 +1367,19 @@ private:
             auto cnt = readReg(X86_REG_ECX);
             auto val = readReg(X86_REG_EAX);
             bool repne = (mn.find("repne") != std::string::npos);
-            std::string cText;
+            std::vector<std::unique_ptr<IRExpr>> args;
+            std::string fname;
             if (repne && mn.find("scasb") != std::string::npos) {
-                cText = "strlen(" + varText(std::move(dst)) + ")";
+                fname = "strlen";
+                args.push_back(std::move(dst));
             } else {
-                cText = "memchr(" + varText(std::move(dst)) + ", " +
-                        varText(std::move(val)) + ", " + varText(std::move(cnt)) + ")";
+                fname = "memchr";
+                args.push_back(std::move(dst));
+                args.push_back(std::move(val));
+                args.push_back(std::move(cnt));
             }
             int t = func.newTemp();
-            bb.stmts.push_back(IRStmt::mkAssign(t, IRExpr::mkVar(cText)));
+            bb.stmts.push_back(IRStmt::mkAssign(t, IRExpr::mkCall(fname, std::move(args))));
             assignReg(X86_REG_ECX, IRExpr::mkTemp(t), bb);
             return;
         }
