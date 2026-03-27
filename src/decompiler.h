@@ -14,6 +14,7 @@
 #include <vector>
 #include <cstdio>
 #include <cstring>
+#include <functional>
 
 // ── Decompiler: x86 → IR → CFG → Structured C ──────────────────────
 // Full pipeline: lift, build CFG, recover structure, fold expressions,
@@ -1549,6 +1550,46 @@ private:
                 }
                 if (e->kids.size() < 2 || !e->kids[0] || !e->kids[1]) {
                     result = "0"; break;
+                }
+                // Try to evaluate to a simpler form: detect compiler multiply expansion
+                // e.g. (x + (x + x*4) * 8) * 4 = x * 164
+                {
+                    std::function<std::pair<IRExpr*, int64_t>(IRExpr*)> evalMul;
+                    evalMul = [&](IRExpr *expr) -> std::pair<IRExpr*, int64_t> {
+                        // Returns (baseVar, multiplier) if expr is baseVar * N
+                        if (!expr) return {nullptr, 0};
+                        if (expr->op == IROp::Var || expr->op == IROp::Temp)
+                            return {expr, 1};
+                        if (expr->op == IROp::Mul && expr->kids.size() == 2) {
+                            if (expr->kids[1]->isConst()) {
+                                auto [b, m] = evalMul(expr->kids[0].get());
+                                return {b, m * expr->kids[1]->value};
+                            }
+                            if (expr->kids[0]->isConst()) {
+                                auto [b, m] = evalMul(expr->kids[1].get());
+                                return {b, m * expr->kids[0]->value};
+                            }
+                        }
+                        if (expr->op == IROp::Shl && expr->kids.size() == 2 && expr->kids[1]->isConst()) {
+                            auto [b, m] = evalMul(expr->kids[0].get());
+                            return {b, m << expr->kids[1]->value};
+                        }
+                        if (expr->op == IROp::Add && expr->kids.size() == 2) {
+                            auto [b1, m1] = evalMul(expr->kids[0].get());
+                            auto [b2, m2] = evalMul(expr->kids[1].get());
+                            if (b1 && b2 && b1->op == b2->op &&
+                                ((b1->op == IROp::Var && b1->name == b2->name) ||
+                                 (b1->op == IROp::Temp && b1->value == b2->value)))
+                                return {b1, m1 + m2};
+                        }
+                        return {nullptr, 0};
+                    };
+                    auto [mulBase, mulFactor] = evalMul(e);
+                    if (mulBase && mulFactor > 1) {
+                        std::string baseStr = emitExpr(mulBase);
+                        result = "(" + baseStr + " * " + std::to_string(mulFactor) + ")";
+                        break;
+                    }
                 }
                 std::string lhs = emitExpr(e->kids[0].get());
                 // (base + const) in expression context → &base->field_XX
