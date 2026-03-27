@@ -721,7 +721,30 @@ private:
         }
         return best;
     }
+    // Look up a data symbol name by address from the nlist symbol table
+    std::string symbolNameAtAddress(uint32_t addr) const {
+        if (m_dataSymMap.empty()) buildDataSymMap();
+        auto it = m_dataSymMap.find(addr);
+        return it != m_dataSymMap.end() ? it->second : "";
+    }
+
     private:
+
+    void buildDataSymMap() const {
+        for (auto &sym : m_symbols) {
+            if (sym.n_value == 0 || sym.name.empty()) continue;
+            // Skip STABS entries (type has N_STAB bits set)
+            if (sym.n_type & 0xE0) continue;
+            // Only N_SECT symbols (defined in a section)
+            if ((sym.n_type & 0x0E) != 0x0E) continue;
+            std::string name = sym.name;
+            // Strip leading underscore (Mach-O convention)
+            if (!name.empty() && name[0] == '_') name = name.substr(1);
+            // Skip names that look like STABS type strings
+            if (name.find(':') != std::string::npos) continue;
+            m_dataSymMap[sym.n_value] = name;
+        }
+    }
 
     std::string         m_path;
     std::vector<uint8_t> m_data;
@@ -730,6 +753,7 @@ private:
     std::vector<LoadCommand> m_loadCmds;
     std::vector<Segment>     m_segments;
     std::vector<NList>       m_symbols;
+    mutable std::unordered_map<uint32_t, std::string> m_dataSymMap;
     std::vector<Dylib>       m_dylibs;
     uint32_t m_symoff = 0, m_nsyms = 0, m_stroff = 0, m_strsize = 0;
     uint32_t m_entryPoint = 0;

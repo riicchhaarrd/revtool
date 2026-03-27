@@ -522,7 +522,8 @@ private:
             auto fit = m_mf.functionMap().find(addr);
             if (fit != m_mf.functionMap().end())
                 return IRExpr::mkAddrOf(IRExpr::mkFunc(fit->second));
-            // Synthetic global name for data section addresses
+            { std::string sn = m_mf.symbolNameAtAddress(addr);
+              if (!sn.empty()) return IRExpr::mkVar(sn); }
             const Section *dSec = m_mf.sectionForAddress(addr);
             if (dSec && (dSec->segname == "__DATA" || dSec->segname == "__IMPORT")) {
                 char gn[32]; snprintf(gn, sizeof(gn), "g_%X", addr);
@@ -580,6 +581,9 @@ private:
                 return IRExpr::mkVar(fit->second);
             std::string s = tryString(addr);
             if (!s.empty()) return IRExpr::mkString(s);
+            // Try nlist symbol table for named globals
+            std::string symName = m_mf.symbolNameAtAddress(addr);
+            if (!symName.empty()) return IRExpr::mkVar(symName);
             // For addresses in data sections, use a synthetic global name
             const Section *dataSec = m_mf.sectionForAddress(addr);
             if (dataSec && (dataSec->segname == "__DATA" || dataSec->segname == "__IMPORT")) {
@@ -657,6 +661,12 @@ private:
             auto *g = m_types.globalAtAddress(addr);
             if (g) {
                 bb.stmts.push_back(IRStmt::mkVarSet(g->name, std::move(val), g->typeRef));
+                return;
+            }
+            // Try nlist symbol table
+            std::string symName = m_mf.symbolNameAtAddress(addr);
+            if (!symName.empty()) {
+                bb.stmts.push_back(IRStmt::mkVarSet(symName, std::move(val)));
                 return;
             }
             // Synthetic global name for data section addresses
