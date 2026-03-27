@@ -29,7 +29,7 @@ public:
 
         Emitter em(mf, func);
         QString code = em.generate(tree.get());
-        return format ? clangFormat(code) : code;
+        return format ? clangFormat(cleanupEmptyIfs(code)) : cleanupEmptyIfs(code);
     }
 
     // Decompile a whole source file
@@ -169,7 +169,7 @@ public:
             out += "\n";
         }
 
-        return clangFormat(out); // format the whole file once
+        return clangFormat(cleanupEmptyIfs(out)); // cleanup + format
     }
 
     // Platform type definitions for compilable output
@@ -270,6 +270,24 @@ public:
             "typedef struct { unsigned int signature; int id; } ControlID;\n"
             "\n"
         );
+    }
+
+    // Remove empty if blocks from output text
+    static QString cleanupEmptyIfs(const QString &code) {
+        QString result;
+        QStringList lines = code.split('\n');
+        for (int i = 0; i < lines.size(); ++i) {
+            // Pattern: "if (...) {" followed by "}" (with only whitespace)
+            if (i + 1 < lines.size() &&
+                lines[i].trimmed().startsWith("if (") &&
+                lines[i].trimmed().endsWith("{") &&
+                lines[i+1].trimmed() == "}") {
+                ++i; // skip both lines
+                continue;
+            }
+            result += lines[i] + '\n';
+        }
+        return result;
     }
 
     // Run clang-format on the output for clean formatting
