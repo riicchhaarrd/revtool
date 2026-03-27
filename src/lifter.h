@@ -978,8 +978,9 @@ private:
         }
         if (mn == "bswap" && n == 1) {
             auto v = readOp(o[0]);
-            bb.stmts.push_back(IRStmt::mkIntrinsic("bswap",
-                "__builtin_bswap32(" + varText(std::move(v)) + ")"));
+            std::vector<std::unique_ptr<IRExpr>> args;
+            args.push_back(v->clone());
+            writeOp(o[0], IRExpr::mkCall("__builtin_bswap32", std::move(args)), bb);
             return;
         }
         if (mn == "cdq") {
@@ -1386,16 +1387,16 @@ private:
         if (mn == "movsb" || mn == "movsd" || mn == "movsw") {
             auto dst = readReg(X86_REG_EDI);
             auto src = readReg(X86_REG_ESI);
-            std::string cText = "*(" + varText(std::move(dst)) + ") = *(" +
-                                varText(std::move(src)) + ")";
-            bb.stmts.push_back(IRStmt::mkIntrinsic("movs", cText));
+            // *(dst) = *(src) — single element copy
+            bb.stmts.push_back(IRStmt::mkStore(std::move(dst),
+                IRExpr::mkLoad(std::move(src))));
             return;
         }
         if (mn == "stosb" || mn == "stosd" || mn == "stosw") {
             auto dst = readReg(X86_REG_EDI);
             auto val = readReg(X86_REG_EAX);
-            std::string cText = "*(" + varText(std::move(dst)) + ") = " + varText(std::move(val));
-            bb.stmts.push_back(IRStmt::mkIntrinsic("stos", cText));
+            // *(dst) = val — single element store
+            bb.stmts.push_back(IRStmt::mkStore(std::move(dst), std::move(val)));
             return;
         }
         if (mn == "cmpsb" || mn == "cmpsd" || mn == "cmpsw") {
@@ -1440,7 +1441,11 @@ private:
         if (mn == "bsf" || mn == "bsr") {
             auto src = readOp(o[1]);
             std::string fn = (mn == "bsf") ? "__builtin_ctz" : "__builtin_clz";
-            bb.stmts.push_back(IRStmt::mkIntrinsic(mn, fn + "(" + varText(std::move(src)) + ")"));
+            std::vector<std::unique_ptr<IRExpr>> args;
+            args.push_back(std::move(src));
+            auto callExpr = IRExpr::mkCall(fn, std::move(args));
+            if (o[0].type == X86_OP_REG)
+                assignReg(canonReg(o[0].reg), std::move(callExpr), bb);
             return;
         }
 
@@ -1449,8 +1454,10 @@ private:
             auto v = readOp(o[0]);
             auto amt = readOp(o[1]);
             std::string fn = (mn == "rol") ? "__builtin_rotl" : "__builtin_rotr";
-            auto result = IRExpr::mkVar(fn + "(" + varText(v->clone()) + ", " + varText(std::move(amt)) + ")");
-            writeOp(o[0], std::move(result), bb);
+            std::vector<std::unique_ptr<IRExpr>> args;
+            args.push_back(v->clone());
+            args.push_back(std::move(amt));
+            writeOp(o[0], IRExpr::mkCall(fn, std::move(args)), bb);
             return;
         }
 

@@ -466,22 +466,23 @@ private:
                 int trueB = last.trueTarget;
                 int falseB = last.falseTarget;
 
-                // Check for loop break/continue
-                for (auto &[from, header] : m_backEdges) {
-                    if (trueB == header && header >= 0 && header < n && visited[header]) {
-                        // True branch is continue
-                        auto ifNode = StructNode::mkIf(last.expr.get(), false);
-                        ifNode->children.push_back(StructNode::mkContinue());
-                        block->children.push_back(std::move(ifNode));
-                        cur = falseB;
-                        goto next_block;
-                    }
-                    if (falseB == header && header >= 0 && header < n && visited[header]) {
-                        auto ifNode = StructNode::mkIf(last.expr.get(), true);
-                        ifNode->children.push_back(StructNode::mkContinue());
-                        block->children.push_back(std::move(ifNode));
-                        cur = trueB;
-                        goto next_block;
+                // Check for loop break/continue (only valid inside a loop body)
+                if (!m_loopExitStack.empty()) {
+                    for (auto &[from, header] : m_backEdges) {
+                        if (trueB == header && header >= 0 && header < n && visited[header]) {
+                            auto ifNode = StructNode::mkIf(last.expr.get(), false);
+                            ifNode->children.push_back(StructNode::mkContinue());
+                            block->children.push_back(std::move(ifNode));
+                            cur = falseB;
+                            goto next_block;
+                        }
+                        if (falseB == header && header >= 0 && header < n && visited[header]) {
+                            auto ifNode = StructNode::mkIf(last.expr.get(), true);
+                            ifNode->children.push_back(StructNode::mkContinue());
+                            block->children.push_back(std::move(ifNode));
+                            cur = trueB;
+                            goto next_block;
+                        }
                     }
                 }
 
