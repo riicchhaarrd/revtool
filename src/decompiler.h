@@ -889,8 +889,33 @@ private:
                     int off = (int)a->kids[1]->value;
                     char fname[32]; snprintf(fname, sizeof(fname), "field_%X", (unsigned)off);
                     out += pad(indent) + QString::fromStdString(base + "->" + fname + " = " + val) + ";\n";
-                } else if (a->op == IROp::Var || a->op == IROp::Temp) {
-                    // Simple pointer dereference — use clean *(var) syntax
+                }
+                // Add(base, Mul(idx, scale)) → base->arr_0[idx] = val
+                else if (a->op == IROp::Add && a->kids.size() == 2 &&
+                         a->kids[1]->op == IROp::Mul && a->kids[1]->kids.size() == 2 &&
+                         a->kids[1]->kids[1]->isConst() &&
+                         (a->kids[0]->op == IROp::Var || a->kids[0]->op == IROp::Temp)) {
+                    std::string base = emitExpr(a->kids[0].get());
+                    std::string idx = emitExpr(a->kids[1]->kids[0].get());
+                    out += pad(indent) + QString::fromStdString(
+                        base + "->arr_0[" + idx + "] = " + val) + ";\n";
+                }
+                // Add(Add(base, Mul(idx, scale)), const) → base->arr_NN[idx] = val
+                else if (a->op == IROp::Add && a->kids.size() == 2 &&
+                         a->kids[1]->isConst() && a->kids[1]->value > 0 &&
+                         a->kids[0]->op == IROp::Add && a->kids[0]->kids.size() == 2 &&
+                         a->kids[0]->kids[1]->op == IROp::Mul &&
+                         a->kids[0]->kids[1]->kids.size() == 2 &&
+                         a->kids[0]->kids[1]->kids[1]->isConst() &&
+                         (a->kids[0]->kids[0]->op == IROp::Var || a->kids[0]->kids[0]->op == IROp::Temp)) {
+                    std::string base = emitExpr(a->kids[0]->kids[0].get());
+                    std::string idx = emitExpr(a->kids[0]->kids[1]->kids[0].get());
+                    int off = (int)a->kids[1]->value;
+                    char fname[64]; snprintf(fname, sizeof(fname), "arr_%X[%s]", (unsigned)off, idx.c_str());
+                    out += pad(indent) + QString::fromStdString(
+                        base + "->" + fname + " = " + val) + ";\n";
+                }
+                else if (a->op == IROp::Var || a->op == IROp::Temp) {
                     out += pad(indent) + QString::fromStdString(
                         "*(" + emitExpr(a) + ") = " + val) + ";\n";
                 } else {
@@ -1063,7 +1088,14 @@ private:
                 // Try to resolve large constants as global variable addresses
                 if (result.empty() && e->value > 0x10000) {
                     std::string sym = m_mf.symbolNameAtAddress((uint32_t)e->value);
-                    if (!sym.empty()) result = sym;
+                    if (!sym.empty()) {
+                        result = sym;
+                    } else {
+                        // Check if address is base+offset into a known global (array element field)
+                        // Search for the nearest symbol below this address
+                        std::string nearest = m_mf.nearestSymbolName((uint32_t)e->value);
+                        if (!nearest.empty()) result = nearest;
+                    }
                 }
                 if (result.empty()) {
                     if (e->value >= -256 && e->value <= 4096)
@@ -1122,10 +1154,32 @@ private:
                         break;
                     }
                 }
+                // (base + idx*4) or (idx*4 + base) → base[idx] (only for Var/Temp base)
+                if (addr && addr->op == IROp::Add && addr->kids.size() == 2) {
+                    IRExpr *arrBase = nullptr, *arrIdx = nullptr;
+                    for (int side = 0; side < 2; ++side) {
+                        auto *maybeIdx = addr->kids[side].get();
+                        auto *maybeBase = addr->kids[1-side].get();
+                        if (maybeIdx->op == IROp::Mul && maybeIdx->kids.size() == 2 &&
+                            maybeIdx->kids[1]->isConst() && maybeIdx->kids[1]->value == 4 &&
+                            (maybeBase->op == IROp::Var || maybeBase->op == IROp::Temp)) {
+                            arrBase = maybeBase; arrIdx = maybeIdx->kids[0].get();
+                            break;
+                        }
+                    }
+                    if (arrBase && arrIdx) {
+                        std::string bs = emitExpr(arrBase);
+                        std::string is = emitExpr(arrIdx);
+                        if (!bs.empty() && !is.empty()) {
+                            result = bs + "[" + is + "]";
+                            break;
+                        }
+                    }
+                }
                 // (base + const) → base->field_XX for pointer-like expressions
-                if (addr && addr->op == IROp::Add && addr->kids.size() == 2 &&
+                else if (addr && addr->op == IROp::Add && addr->kids.size() == 2 &&
                     addr->kids[1]->isConst() && addr->kids[1]->value > 0 &&
-                    addr->kids[1]->value < 0x10000 && // reasonable struct offset
+                    addr->kids[1]->value < 0x10000 &&
                     (addr->kids[0]->op == IROp::Var || addr->kids[0]->op == IROp::Temp)) {
                     // Use -> notation: cleaner than *((int*)((base + off)))
                     std::string base = emitExpr(addr->kids[0].get());
@@ -1243,6 +1297,9 @@ private:
                         result = emitExpr(e->kids[1].get()); break;
                     }
                     if (e->op == IROp::Mul && a == 0) { result = "0"; break; }
+                }
+                if (e->kids.size() < 2 || !e->kids[0] || !e->kids[1]) {
+                    result = "0"; break;
                 }
                 std::string lhs = emitExpr(e->kids[0].get());
                 // Simplify: (x + -N) → (x - N)
@@ -1410,7 +1467,9 @@ private:
         }
 
         std::string emitCast(IRExpr *e) {
+            if (e->kids.empty() || !e->kids[0]) return "0";
             std::string inner = emitExpr(e->kids[0].get());
+            if (inner.empty()) return "0";
             switch (e->castKind) {
             case CastKind::ZeroExt8:   return "(unsigned char)(" + inner + ")";
             case CastKind::ZeroExt16:  return "(unsigned short)(" + inner + ")";

@@ -728,6 +728,23 @@ private:
         return it != m_dataSymMap.end() ? it->second : "";
     }
 
+    // Find nearest symbol below addr and return "symbol + 0xNN" for small offsets
+    std::string nearestSymbolName(uint32_t addr) const {
+        if (m_dataSymMap.empty()) buildDataSymMap();
+        // Find the greatest key <= addr
+        auto it = m_dataSymMap.upper_bound(addr);
+        if (it == m_dataSymMap.begin()) return "";
+        --it;
+        uint32_t diff = addr - it->first;
+        // Only for small offsets (within a reasonable struct/array)
+        if (diff > 0 && diff < 0x20000) {
+            char buf[64];
+            snprintf(buf, sizeof(buf), "(%s + 0x%X)", it->second.c_str(), diff);
+            return buf;
+        }
+        return "";
+    }
+
     private:
 
     void buildDataSymMap() const {
@@ -771,7 +788,7 @@ private:
     std::vector<LoadCommand> m_loadCmds;
     std::vector<Segment>     m_segments;
     std::vector<NList>       m_symbols;
-    mutable std::unordered_map<uint32_t, std::string> m_dataSymMap;
+    mutable std::map<uint32_t, std::string> m_dataSymMap;
     std::vector<Dylib>       m_dylibs;
     uint32_t m_symoff = 0, m_nsyms = 0, m_stroff = 0, m_strsize = 0;
     uint32_t m_entryPoint = 0;
