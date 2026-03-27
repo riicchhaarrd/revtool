@@ -1482,13 +1482,18 @@ private:
                 }
                 // (base + const) → base->field_XX for pointer-like expressions
                 else if (addr && addr->op == IROp::Add && addr->kids.size() == 2 &&
-                    addr->kids[1]->isConst() && addr->kids[1]->value > 0 &&
-                    addr->kids[1]->value < 0x10000 &&
+                    addr->kids[1]->isConst() &&
+                    (int64_t)addr->kids[1]->value != 0 &&
+                    std::abs((int64_t)addr->kids[1]->value) < 0x10000 &&
                     (addr->kids[0]->op == IROp::Var || addr->kids[0]->op == IROp::Temp)) {
                     // Use -> notation: cleaner than *((int*)((base + off)))
                     std::string base = emitExpr(addr->kids[0].get());
-                    int off = (int)addr->kids[1]->value;
-                    char fname[32]; snprintf(fname, sizeof(fname), "field_%X", (unsigned)off);
+                    int64_t off = (int64_t)addr->kids[1]->value;
+                    char fname[32];
+                    if (off >= 0)
+                        snprintf(fname, sizeof(fname), "field_%llX", (unsigned long long)off);
+                    else
+                        snprintf(fname, sizeof(fname), "field_neg%llX", (unsigned long long)(-off));
                     result = base + "->" + fname;
                 }
                 // General Add/Sub expression → *(expr) without ugly cast
@@ -1757,6 +1762,13 @@ private:
                                     e->op == IROp::Or || e->op == IROp::Xor)) { result = lhs; break; }
                 if (lhs == "0" && (e->op == IROp::Add || e->op == IROp::Or ||
                                     e->op == IROp::Xor)) { result = rhs; break; }
+                if (rhs == "1" && (e->op == IROp::Mul || e->op == IROp::SDiv || e->op == IROp::UDiv))
+                    { result = lhs; break; }
+                if (lhs == "1" && e->op == IROp::Mul) { result = rhs; break; }
+                if (lhs == "0" && e->op == IROp::Mul) { result = "0"; break; }
+                if (rhs == "0" && e->op == IROp::Mul) { result = "0"; break; }
+                if (lhs == rhs && e->op == IROp::Sub) { result = "0"; break; }
+                if (lhs == rhs && e->op == IROp::Xor) { result = "0"; break; }
                 std::string op;
                 switch (e->op) {
                 case IROp::Add:  op = " + "; break;
@@ -1919,10 +1931,27 @@ private:
 
         std::string emitCast(IRExpr *e) {
             if (e->kids.empty() || !e->kids[0]) return "0";
-            std::string inner = emitExpr(e->kids[0].get());
+            IRExpr *inner_e = e->kids[0].get();
+            std::string inner = emitExpr(inner_e);
             if (inner.empty()) return "0";
             // Casting 0 to any type is still 0
             if (inner == "0") return "0";
+            // Elide identity casts: Cast(A, Cast(A, x)) → Cast(A, x)
+            // and Cast(A, Cast(B, x)) where both narrow to same target
+            if (inner_e->op == IROp::Cast) {
+                CastKind outer = e->castKind, inner_k = inner_e->castKind;
+                // Same cast twice is idempotent
+                if (outer == inner_k) return inner;
+                // SignExt/ZeroExt then same Trunc is identity for same width
+                if ((outer == CastKind::Trunc8  && inner_k == CastKind::ZeroExt8)  ||
+                    (outer == CastKind::Trunc8  && inner_k == CastKind::SignExt8)  ||
+                    (outer == CastKind::Trunc16 && inner_k == CastKind::ZeroExt16) ||
+                    (outer == CastKind::Trunc16 && inner_k == CastKind::SignExt16))
+                    return emitCast(inner_e); // reduce to single cast
+                // FloatToInt(IntToFloat(x)) → x (round-trip through same-width is lossy but common pattern)
+                if (outer == CastKind::FloatToInt && inner_k == CastKind::IntToFloat)
+                    return emitExpr(inner_e->kids[0].get());
+            }
             switch (e->castKind) {
             case CastKind::ZeroExt8:   return "(unsigned char)(" + inner + ")";
             case CastKind::ZeroExt16:  return "(unsigned short)(" + inner + ")";
