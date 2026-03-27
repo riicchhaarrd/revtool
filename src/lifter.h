@@ -522,6 +522,12 @@ private:
             auto fit = m_mf.functionMap().find(addr);
             if (fit != m_mf.functionMap().end())
                 return IRExpr::mkAddrOf(IRExpr::mkFunc(fit->second));
+            // Synthetic global name for data section addresses
+            const Section *dSec = m_mf.sectionForAddress(addr);
+            if (dSec && (dSec->segname == "__DATA" || dSec->segname == "__IMPORT")) {
+                char gn[32]; snprintf(gn, sizeof(gn), "g_%X", addr);
+                return IRExpr::mkVar(gn);
+            }
             return IRExpr::mkLoad(IRExpr::mkConst(addr));
         }
 
@@ -574,6 +580,12 @@ private:
                 return IRExpr::mkVar(fit->second);
             std::string s = tryString(addr);
             if (!s.empty()) return IRExpr::mkString(s);
+            // For addresses in data sections, use a synthetic global name
+            const Section *dataSec = m_mf.sectionForAddress(addr);
+            if (dataSec && (dataSec->segname == "__DATA" || dataSec->segname == "__IMPORT")) {
+                char gname[32]; snprintf(gname, sizeof(gname), "g_%X", addr);
+                return IRExpr::mkVar(gname);
+            }
             return IRExpr::mkLoad(IRExpr::mkConst(addr));
         }
 

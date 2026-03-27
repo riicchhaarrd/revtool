@@ -1191,7 +1191,8 @@ private:
             case IROp::Shl: case IROp::Shr: case IROp::Sar:
             case IROp::And: case IROp::Or: case IROp::Xor: {
                 // Constant folding: evaluate at compile time if both operands are constant
-                if (e->kids[0]->isConst() && e->kids[1]->isConst()) {
+                if (e->kids.size() >= 2 && e->kids[0] && e->kids[1] &&
+                    e->kids[0]->isConst() && e->kids[1]->isConst()) {
                     int64_t a = e->kids[0]->value, b = e->kids[1]->value;
                     int64_t r = 0;
                     bool folded = true;
@@ -1215,7 +1216,7 @@ private:
                     }
                 }
                 // Identity folding: x + 0, x * 1, x - 0, x | 0, x & -1, x ^ 0
-                if (e->kids[1]->isConst()) {
+                if (e->kids.size() >= 2 && e->kids[1] && e->kids[1]->isConst()) {
                     int64_t b = e->kids[1]->value;
                     if ((e->op == IROp::Add || e->op == IROp::Sub || e->op == IROp::Or ||
                          e->op == IROp::Xor) && b == 0) {
@@ -1226,7 +1227,7 @@ private:
                     }
                     if (e->op == IROp::Mul && b == 0) { result = "0"; break; }
                 }
-                if (e->kids[0]->isConst()) {
+                if (e->kids.size() >= 2 && e->kids[0] && e->kids[0]->isConst()) {
                     int64_t a = e->kids[0]->value;
                     if ((e->op == IROp::Add || e->op == IROp::Or || e->op == IROp::Xor) && a == 0) {
                         result = emitExpr(e->kids[1].get()); break;
