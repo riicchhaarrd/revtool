@@ -1112,8 +1112,10 @@ private:
                 // Inline temps used only once
                 if (m_tempUseCount[id] <= 1) {
                     auto it = m_tempDef.find(id);
-                    if (it != m_tempDef.end() && it->second)
-                        return emitExpr(it->second, negate);
+                    if (it != m_tempDef.end() && it->second) {
+                        std::string inlined = emitExpr(it->second, negate);
+                        if (!inlined.empty()) return inlined;
+                    }
                 }
                 result = "t" + std::to_string(id);
                 break;
@@ -1379,8 +1381,14 @@ private:
                 break;
             }
 
+            // Safety: never return empty — fallback to temp/var name or 0
+            if (result.empty()) {
+                if (e->op == IROp::Temp) result = "t" + std::to_string(e->tempId());
+                else if (e->op == IROp::Var) result = e->name.empty() ? "0" : e->name;
+                else result = "0";
+            }
+
             if (negate && !result.empty()) {
-                // Negate the result
                 if (result[0] == '!') return result.substr(1);
                 return "!(" + result + ")";
             }
