@@ -189,6 +189,24 @@ public:
             if (!emittedProtos.empty()) out += "\n";
         }
 
+        // Emit forward declarations only for static functions
+        // (needed when a static func is referenced before its definition)
+        {
+            for (size_t fi : sorted) {
+                auto &fn = mf.stabsFunctions()[fi];
+                if (fn.address == 0 || fn.isGlobal) continue; // only static functions
+                std::string cname = fn.name;
+                { size_t p = 0; while ((p = cname.find("::", p)) != std::string::npos)
+                    cname.replace(p, 2, "_"); }
+                { size_t p = 0; while ((p = cname.find("~", p)) != std::string::npos)
+                    cname.replace(p, 1, "dtor_"); }
+                std::string retStr = fn.returnType != NullType ?
+                    types.formatType(fn.returnType) : "int";
+                out += QString::fromStdString("static " + retStr + " " + cname + "();\n");
+            }
+            out += "\n";
+        }
+
         QString funcBodies;
         for (size_t fi : sorted) {
             auto &fn = mf.stabsFunctions()[fi];
@@ -430,6 +448,23 @@ public:
             "typedef struct clipHandle_s { int _; } clipHandle_t;\n"
             "typedef struct leafList_s leafList_t;\n"
             "typedef int scr_entref_t;\n"
+            "typedef struct animation_s animation_t;\n"
+            "typedef struct rectDef_s rectDef_t;\n"
+            "/* Audio codec types */\n"
+            "typedef struct { float real; float imag; } complex_t;\n"
+            "typedef float spx_sig_t;\n"
+            "typedef short spx_word16_t;\n"
+            "typedef int spx_int32_t;\n"
+            "typedef struct VBRState_s VBRState;\n"
+            "typedef int HSAMPLE;\n"
+            "typedef short sample_t;\n"
+            "/* JPEG types */\n"
+            "typedef int *JSAMPARRAY;\n"
+            "typedef int *JBLOCKROW;\n"
+            "typedef int JCOEFPTR;\n"
+            "/* C library */\n"
+            "int Gestalt(unsigned int, int *);\n"
+            "int sysctl(void *, unsigned int, void *, void *, void *, unsigned int);\n"
             "\n"
         );
     }
