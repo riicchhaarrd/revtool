@@ -532,6 +532,8 @@ private:
         std::set<int>         m_copyPropagated; // temps eliminated by copy prop
         // Copy prop: temp → replacement name
         std::map<int, std::string> m_copyMap;
+        // Const prop: temp → constant value
+        std::map<int, int64_t> m_constMap;
         std::set<int>         m_gotoTargets;    // block IDs that are goto targets
         std::set<int>         m_emittedLabels;  // labels already emitted (avoid duplicates)
         std::set<std::pair<int,int>> m_suppressedStmts; // (blockId, stmtIdx) to skip in emission
@@ -589,10 +591,15 @@ private:
                         m_copyMap[stmt.destTemp] = stmt.expr->name;
                         m_copyPropagated.insert(stmt.destTemp);
                     }
+                    // t = const → propagate constant
+                    if (stmt.expr->op == IROp::Const) {
+                        m_constMap[stmt.destTemp] = stmt.expr->value;
+                        m_copyPropagated.insert(stmt.destTemp);
+                    }
                 }
             }
             // Pass 2: rewrite all Temp refs in all expressions
-            if (!m_copyMap.empty()) {
+            if (!m_copyMap.empty() || !m_constMap.empty()) {
                 for (auto &bb : m_func.blocks)
                     for (auto &stmt : bb.stmts) {
                         propagateInExpr(stmt.expr);
@@ -605,6 +612,14 @@ private:
         void propagateInExpr(std::unique_ptr<IRExpr> &e) {
             if (!e) return;
             if (e->op == IROp::Temp) {
+                // Constant propagation: t = const → replace with const
+                auto cit = m_constMap.find(e->tempId());
+                if (cit != m_constMap.end()) {
+                    TypeRef t = e->typeRef;
+                    if (t == NullType) t = m_func.tempType(e->tempId());
+                    e = IRExpr::mkConst(cit->second, t);
+                    return;
+                }
                 auto it = m_copyMap.find(e->tempId());
                 if (it != m_copyMap.end()) {
                     // Preserve the best available type: prefer expr annotation, then tempTypes

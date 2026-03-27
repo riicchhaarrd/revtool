@@ -729,14 +729,16 @@ private:
     }
 
     // Find nearest symbol below addr and return "symbol + 0xNN" for small offsets
+    // Only works for addresses in data sections (not code)
     std::string nearestSymbolName(uint32_t addr) const {
         if (m_dataSymMap.empty()) buildDataSymMap();
-        // Find the greatest key <= addr
+        // Only resolve addresses that are actually in data sections
+        const Section *sec = sectionForAddress(addr);
+        if (!sec || (sec->segname != "__DATA" && sec->segname != "__IMPORT")) return "";
         auto it = m_dataSymMap.upper_bound(addr);
         if (it == m_dataSymMap.begin()) return "";
         --it;
         uint32_t diff = addr - it->first;
-        // Only for small offsets (within a reasonable struct/array)
         if (diff > 0 && diff < 0x20000) {
             char buf[64];
             snprintf(buf, sizeof(buf), "(%s + 0x%X)", it->second.c_str(), diff);

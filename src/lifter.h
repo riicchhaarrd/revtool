@@ -482,12 +482,11 @@ private:
         // String literal?
         std::string s = tryString(v);
         if (!s.empty()) return IRExpr::mkString(s);
-        // Known function?
-        auto fit = m_mf.functionMap().find(v);
-        if (fit != m_mf.functionMap().end()) return IRExpr::mkFunc(fit->second);
-        // Global variable?
+        // Global variable (from STABS)?
         auto *g = m_types.globalAtAddress(v);
         if (g) return IRExpr::mkVar(g->name, g->typeRef);
+        // Don't resolve function addresses here — they'd be misidentified as data.
+        // Function refs are handled in the 'call' and 'lea' instruction handlers.
         return IRExpr::mkConst(imm);
     }
 
