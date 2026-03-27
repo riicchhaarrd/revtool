@@ -42,7 +42,7 @@ public:
 
         Emitter em(mf, func);
         QString code = em.generate(tree.get());
-        return format ? clangFormat(cleanupEmptyIfs(code)) : cleanupEmptyIfs(code);
+        return format ? clangFormat(cleanupOutput(code)) : cleanupOutput(code);
     }
 
     // Decompile a whole source file
@@ -184,7 +184,7 @@ public:
             out += "\n";
         }
 
-        return clangFormat(cleanupEmptyIfs(out)); // cleanup + format
+        return clangFormat(cleanupOutput(out)); // cleanup + format
     }
 
     // Platform type definitions for compilable output
@@ -288,20 +288,47 @@ public:
     }
 
     // Remove empty if blocks from output text
-    static QString cleanupEmptyIfs(const QString &code) {
-        QString result;
+    static QString cleanupOutput(const QString &code) {
         QStringList lines = code.split('\n');
+        // Pass 1: Remove empty if blocks
+        QStringList pass1;
         for (int i = 0; i < lines.size(); ++i) {
-            // Pattern: "if (...) {" followed by "}" (with only whitespace)
             if (i + 1 < lines.size() &&
                 lines[i].trimmed().startsWith("if (") &&
                 lines[i].trimmed().endsWith("{") &&
                 lines[i+1].trimmed() == "}") {
-                ++i; // skip both lines
-                continue;
+                ++i; continue;
             }
-            result += lines[i] + '\n';
+            pass1.append(lines[i]);
         }
+        // Pass 2: Remove unused variable declarations
+        // Collect the body (everything after declarations) to check references
+        QStringList pass2;
+        for (int i = 0; i < pass1.size(); ++i) {
+            QString trimmed = pass1[i].trimmed();
+            // Check if this is a variable declaration: "    type varname;"
+            if (trimmed.startsWith("int v") || trimmed.startsWith("float v") ||
+                trimmed.startsWith("int *v")) {
+                // Extract the variable name
+                QString varName;
+                int nameStart = trimmed.indexOf('v');
+                int nameEnd = trimmed.indexOf(';', nameStart);
+                if (nameStart >= 0 && nameEnd > nameStart)
+                    varName = trimmed.mid(nameStart, nameEnd - nameStart);
+                // Check if this var is used anywhere in the rest of the function
+                if (!varName.isEmpty()) {
+                    bool used = false;
+                    for (int j = i + 1; j < pass1.size(); ++j) {
+                        if (pass1[j].contains(varName)) { used = true; break; }
+                        if (pass1[j].trimmed() == "}") break; // end of function
+                    }
+                    if (!used) continue; // skip unused declaration
+                }
+            }
+            pass2.append(pass1[i]);
+        }
+        QString result;
+        for (auto &l : pass2) result += l + '\n';
         return result;
     }
 
@@ -1024,6 +1051,7 @@ private:
         }
 
         void emitStmt(QString &out, IRStmt &stmt, int indent) {
+            fprintf(stderr, "STMT_DEBUG: kind=%d\n", (int)stmt.kind);
             switch (stmt.kind) {
             case IRStmtKind::Assign: {
                 std::string rhs = stmt.expr ? emitExpr(stmt.expr.get()) : "0";
@@ -1040,19 +1068,74 @@ private:
                 std::string val = stmt.expr ? emitExpr(stmt.expr.get()) : "0";
                 if (!stmt.addr) break;
                 auto *a = stmt.addr.get();
+                fprintf(stderr, "STORE_DEBUG: addr_op=%d", (int)a->op);
+                if (a->op == IROp::Field) fprintf(stderr, " field=%s", a->name.c_str());
+                if (a->op == IROp::Add && a->kids.size() >= 2) {
+                    fprintf(stderr, " kids[0]_op=%d kids[1]_op=%d", (int)a->kids[0]->op, (int)a->kids[1]->op);
+                    if (a->kids[0]->op == IROp::Var) fprintf(stderr, " base=%s", a->kids[0]->name.c_str());
+                    if (a->kids[1]->isConst()) fprintf(stderr, " off=%lld", (long long)a->kids[1]->value);
+                }
+                fprintf(stderr, "\n");
                 // Field expression → base->field = val
                 if (a->op == IROp::Field) {
                     out += pad(indent) + QString::fromStdString(emitExpr(a) + " = " + val) + ";\n";
                 }
-                // Add(base, const) → base->field_XX = val
+                // Add(base, const) → base->field_XX = val or base[N] = val for scalar ptrs
                 else if (a->op == IROp::Add && a->kids.size() == 2 &&
                          a->kids[1]->isConst() && a->kids[1]->value > 0 &&
                          a->kids[1]->value < 0x10000 &&
                          (a->kids[0]->op == IROp::Var || a->kids[0]->op == IROp::Temp)) {
                     std::string base = emitExpr(a->kids[0].get());
                     int off = (int)a->kids[1]->value;
-                    char fname[32]; snprintf(fname, sizeof(fname), "field_%X", (unsigned)off);
-                    out += pad(indent) + QString::fromStdString(base + "->" + fname + " = " + val) + ";\n";
+                    // Check for scalar pointer types → use array notation
+                    bool usedArrayNotation = false;
+                    {
+                        TypeRef baseType = exprType(a->kids[0].get());
+                        // Try resolving from var/temp names back to params/locals
+                        if (baseType == NullType) {
+                            std::string baseName;
+                            if (a->kids[0]->op == IROp::Var) baseName = a->kids[0]->name;
+                            else if (a->kids[0]->op == IROp::Temp) {
+                                auto vit = m_func.tempToVar.find(a->kids[0]->tempId());
+                                if (vit != m_func.tempToVar.end()) {
+                                    auto nit = m_func.varNames.find(vit->second);
+                                    if (nit != m_func.varNames.end()) baseName = nit->second;
+                                }
+                            }
+                            if (!baseName.empty()) {
+                                for (auto &p : m_func.params)
+                                    if (p.name == baseName && p.typeRef != NullType)
+                                        { baseType = p.typeRef; break; }
+                                if (baseType == NullType)
+                                    for (auto &l : m_func.locals)
+                                        if (l.name == baseName && l.typeRef != NullType)
+                                            { baseType = l.typeRef; break; }
+                            }
+                        }
+                        if (baseType != NullType) {
+                            auto *bt = m_types.resolveType(baseType);
+                            if (bt && bt->kind == StabsTypeKind::Pointer) {
+                                auto *target = m_types.resolveType(bt->targetType);
+                                if (target && target->sizeBytes > 0 && target->sizeBytes <= 8 &&
+                                    target->kind != StabsTypeKind::Struct &&
+                                    target->kind != StabsTypeKind::Union &&
+                                    target->kind != StabsTypeKind::Array &&
+                                    target->kind != StabsTypeKind::ForwardRef) {
+                                    int elemSize = target->sizeBytes;
+                                    int idx = off / elemSize;
+                                    if (idx * elemSize == off && idx >= 0) {
+                                        out += pad(indent) + QString::fromStdString(
+                                            base + "[" + std::to_string(idx) + "] = " + val) + ";\n";
+                                        usedArrayNotation = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if (!usedArrayNotation) {
+                        char fname[32]; snprintf(fname, sizeof(fname), "field_%X", (unsigned)off);
+                        out += pad(indent) + QString::fromStdString(base + "->" + fname + " = " + val) + ";\n";
+                    }
                 }
                 // Add(base, Mul(idx, scale)) → base->arr_0[idx] = val
                 else if (a->op == IROp::Add && a->kids.size() == 2 &&
@@ -1578,37 +1661,38 @@ private:
                 }
                 // Try to evaluate to a simpler form: detect compiler multiply expansion
                 // e.g. (x + (x + x*4) * 8) * 4 = x * 164
-                {
-                    std::function<std::pair<IRExpr*, int64_t>(IRExpr*)> evalMul;
-                    evalMul = [&](IRExpr *expr) -> std::pair<IRExpr*, int64_t> {
-                        // Returns (baseVar, multiplier) if expr is baseVar * N
-                        if (!expr) return {nullptr, 0};
-                        if (expr->op == IROp::Var || expr->op == IROp::Temp)
-                            return {expr, 1};
-                        if (expr->op == IROp::Mul && expr->kids.size() == 2) {
-                            if (expr->kids[1]->isConst()) {
-                                auto [b, m] = evalMul(expr->kids[0].get());
-                                return {b, m * expr->kids[1]->value};
-                            }
-                            if (expr->kids[0]->isConst()) {
-                                auto [b, m] = evalMul(expr->kids[1].get());
-                                return {b, m * expr->kids[0]->value};
-                            }
-                        }
-                        if (expr->op == IROp::Shl && expr->kids.size() == 2 && expr->kids[1]->isConst()) {
+                std::function<std::pair<IRExpr*, int64_t>(IRExpr*)> evalMul;
+                evalMul = [&](IRExpr *expr) -> std::pair<IRExpr*, int64_t> {
+                    // Returns (baseVar, multiplier) if expr is baseVar * N
+                    if (!expr) return {nullptr, 0};
+                    if (expr->op == IROp::Var || expr->op == IROp::Temp)
+                        return {expr, 1};
+                    if (expr->op == IROp::Mul && expr->kids.size() == 2) {
+                        if (expr->kids[1]->isConst()) {
                             auto [b, m] = evalMul(expr->kids[0].get());
-                            return {b, m << expr->kids[1]->value};
+                            return {b, m * expr->kids[1]->value};
                         }
-                        if (expr->op == IROp::Add && expr->kids.size() == 2) {
-                            auto [b1, m1] = evalMul(expr->kids[0].get());
-                            auto [b2, m2] = evalMul(expr->kids[1].get());
-                            if (b1 && b2 && b1->op == b2->op &&
-                                ((b1->op == IROp::Var && b1->name == b2->name) ||
-                                 (b1->op == IROp::Temp && b1->value == b2->value)))
-                                return {b1, m1 + m2};
+                        if (expr->kids[0]->isConst()) {
+                            auto [b, m] = evalMul(expr->kids[1].get());
+                            return {b, m * expr->kids[0]->value};
                         }
-                        return {nullptr, 0};
-                    };
+                    }
+                    if (expr->op == IROp::Shl && expr->kids.size() == 2 && expr->kids[1]->isConst()) {
+                        auto [b, m] = evalMul(expr->kids[0].get());
+                        return {b, m << expr->kids[1]->value};
+                    }
+                    if (expr->op == IROp::Add && expr->kids.size() == 2) {
+                        auto [b1, m1] = evalMul(expr->kids[0].get());
+                        auto [b2, m2] = evalMul(expr->kids[1].get());
+                        if (b1 && b2 && b1->op == b2->op &&
+                            ((b1->op == IROp::Var && b1->name == b2->name) ||
+                             (b1->op == IROp::Temp && b1->value == b2->value)))
+                            return {b1, m1 + m2};
+                    }
+                    return {nullptr, 0};
+                };
+                {
+                    // Try folding the whole expression
                     auto [mulBase, mulFactor] = evalMul(e);
                     if (mulBase && mulFactor > 1) {
                         std::string baseStr = emitExpr(mulBase);
@@ -1616,7 +1700,13 @@ private:
                         break;
                     }
                 }
-                std::string lhs = emitExpr(e->kids[0].get());
+                // Try folding each child individually for partial simplification
+                auto emitChild = [&](IRExpr *child) -> std::string {
+                    auto [mb, mf] = evalMul(child);
+                    if (mb && mf > 1) return "(" + emitExpr(mb) + " * " + std::to_string(mf) + ")";
+                    return emitExpr(child);
+                };
+                std::string lhs = emitChild(e->kids[0].get());
                 // (base + const) in expression context → &base->field_XX
                 // This handles the common "sub-object pointer" pattern: t = (this + 1520)
                 if (e->op == IROp::Add && e->kids[1] && e->kids[1]->isConst() &&
@@ -1633,7 +1723,21 @@ private:
                     result = "(" + lhs + " - " + std::to_string(-e->kids[1]->value) + ")";
                     break;
                 }
-                std::string rhs = emitExpr(e->kids[1].get());
+                std::string rhs = emitChild(e->kids[1].get());
+                {
+                    auto [lb, lf] = evalMul(e->kids[0].get());
+                    if (lb && lf > 1)
+                        lhs = "(" + emitExpr(lb) + " * " + std::to_string(lf) + ")";
+                    auto [rb, rf] = evalMul(e->kids[1].get());
+                    if (rb && rf > 1)
+                        rhs = "(" + emitExpr(rb) + " * " + std::to_string(rf) + ")";
+                }
+                // String-level dead-code simplifications
+                if (lhs == "0" && rhs == "0" && e->op == IROp::Sub) { result = "0"; break; }
+                if (rhs == "0" && (e->op == IROp::Add || e->op == IROp::Sub ||
+                                    e->op == IROp::Or || e->op == IROp::Xor)) { result = lhs; break; }
+                if (lhs == "0" && (e->op == IROp::Add || e->op == IROp::Or ||
+                                    e->op == IROp::Xor)) { result = rhs; break; }
                 std::string op;
                 switch (e->op) {
                 case IROp::Add:  op = " + "; break;
@@ -1798,6 +1902,8 @@ private:
             if (e->kids.empty() || !e->kids[0]) return "0";
             std::string inner = emitExpr(e->kids[0].get());
             if (inner.empty()) return "0";
+            // Casting 0 to any type is still 0
+            if (inner == "0") return "0";
             switch (e->castKind) {
             case CastKind::ZeroExt8:   return "(unsigned char)(" + inner + ")";
             case CastKind::ZeroExt16:  return "(unsigned short)(" + inner + ")";
