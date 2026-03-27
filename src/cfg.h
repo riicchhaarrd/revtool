@@ -402,6 +402,48 @@ private:
                     }
                     cur = loopExit;
                     continue;
+                } else {
+                    // Do-while: header has no branch — condition is at back-edge source
+                    int backSrc = -1;
+                    for (auto &[from, hdr] : m_backEdges)
+                        if (hdr == cur) { backSrc = from; break; }
+
+                    if (backSrc >= 0 && backSrc < n &&
+                        !m_func->blocks[backSrc].stmts.empty() &&
+                        m_func->blocks[backSrc].stmts.back().kind == IRStmtKind::Branch) {
+
+                        auto &backBB = m_func->blocks[backSrc];
+                        auto &backBR = backBB.stmts.back();
+                        bool negCond = (backBR.trueTarget == loopExit);
+
+                        // Build body: header stmts + inner body + backSrc pre-branch stmts
+                        auto body = StructNode::mkBlock();
+                        int hdrStmts = (int)bb.stmts.size();
+                        if (hdrStmts > 0)
+                            body->children.push_back(StructNode::mkSeq(cur, 0, hdrStmts));
+
+                        int bodyStart = !bb.succs.empty() ? bb.succs[0] : -1;
+                        if (bodyStart >= 0 && bodyStart != cur && bodyStart < n && bodyStart != backSrc) {
+                            std::vector<bool> bodyVisited = visited;
+                            m_loopExitStack.push_back(loopExit);
+                            auto inner = structureRegion(bodyStart, backSrc, bodyVisited);
+                            m_loopExitStack.pop_back();
+                            for (int vi = 0; vi < n; ++vi) if (bodyVisited[vi]) visited[vi] = true;
+                            body->children.push_back(std::move(inner));
+                        }
+
+                        int backPreBranch = (int)backBB.stmts.size() - 1;
+                        if (backPreBranch > 0)
+                            body->children.push_back(StructNode::mkSeq(backSrc, 0, backPreBranch));
+                        visited[backSrc] = true;
+
+                        auto doNode = StructNode::mkDoWhile(backBR.expr.get());
+                        doNode->negated = negCond;
+                        doNode->children.push_back(std::move(body));
+                        block->children.push_back(std::move(doNode));
+                        cur = loopExit;
+                        continue;
+                    }
                 }
             }
 

@@ -997,7 +997,7 @@ private:
                 out += pad(indent) + "do {\n";
                 for (auto &child : node->children)
                     emitNode(out, child.get(), indent + 1);
-                std::string cond = node->cond ? emitExpr(node->cond, false) : "1";
+                std::string cond = node->cond ? emitExpr(node->cond, node->negated) : "1";
                 out += pad(indent) + "} while (" + QString::fromStdString(cond) + ");\n";
                 break;
             }

@@ -1116,6 +1116,32 @@ private:
             return;
         }
 
+        // ── SBB / ADC idioms ─────────────────────────────────────────
+        // sbb reg, reg → reg = -(CF) → reg = (prev_cmp < 0 unsigned) ? -1 : 0
+        if (mn == "sbb" && n == 2 && o[0].type == X86_OP_REG && o[1].type == X86_OP_REG &&
+            canonReg(o[0].reg) == canonReg(o[1].reg)) {
+            if (m_flags.lhs) {
+                // CF=1 when lhs < rhs (unsigned) → sbb reg,reg = -(lhs < rhs) = (lhs < rhs) ? -1 : 0
+                auto cond = IRExpr::mkBinary(IROp::Ult, m_flags.lhs->clone(),
+                    m_flags.rhs ? m_flags.rhs->clone() : IRExpr::mkConst(0));
+                writeOp(o[0], IRExpr::mkUnary(IROp::Neg, std::move(cond)), bb);
+            } else {
+                writeOp(o[0], IRExpr::mkConst(0), bb);
+            }
+            return;
+        }
+        // adc reg, 0 → reg = reg + CF → reg = reg + (prev_cmp < 0 unsigned)
+        if (mn == "adc" && n == 2 && o[1].type == X86_OP_IMM && o[1].imm == 0) {
+            if (m_flags.lhs) {
+                auto carry = IRExpr::mkBinary(IROp::Ult, m_flags.lhs->clone(),
+                    m_flags.rhs ? m_flags.rhs->clone() : IRExpr::mkConst(0));
+                auto reg = readOp(o[0]);
+                if (reg)
+                    writeOp(o[0], IRExpr::mkBinary(IROp::Add, std::move(reg), std::move(carry)), bb);
+            }
+            return;
+        }
+
         // ── Comparison / test (set flags) ───────────────────────────
         if (mn == "cmp" && n == 2) {
             m_flags.lhs = readOp(o[0]);
