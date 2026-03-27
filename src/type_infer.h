@@ -6,6 +6,10 @@
 #include <set>
 #include <algorithm>
 
+// Forward declaration — full definition in macho.h (included before us by decompiler.h)
+class MachOFile;
+struct StabsFunction;
+
 // ── Type Inference ──────────────────────────────────────────────────
 // Constraint-based type inference for IR temps.
 //
@@ -15,15 +19,17 @@
 //   - Call(name, args) with known prototype -> arg/ret types
 //   - Phi(t1, t2) or Assign(t, t2) -> same type
 //   - STABS annotations -> known type
+//   - Binary ops: float + float -> float, ptr + int -> ptr
 //
 // Solves using union-find for SameAs constraints, then propagates
 // known types through groups.
 
 class TypeInferer {
 public:
-    void infer(IRFunc &func, const StabsTypeTable &types) {
+    void infer(IRFunc &func, const StabsTypeTable &types, const MachOFile *mf = nullptr) {
         m_func = &func;
         m_types = &types;
+        m_mf = mf;
         m_parent.clear();
         m_rank.clear();
         m_knownType.clear();
@@ -45,17 +51,15 @@ public:
                 m_knownType[find(tid)] = tref;
         }
 
-        // Collect constraints
-        for (auto &bb : func.blocks) {
-            for (auto &stmt : bb.stmts) {
-                collectStmtConstraints(stmt);
+        // Collect constraints (two passes for convergence)
+        for (int pass = 0; pass < 2; ++pass) {
+            for (auto &bb : func.blocks) {
+                for (auto &stmt : bb.stmts) {
+                    collectStmtConstraints(stmt);
+                }
             }
         }
 
-        // Propagate: each temp gets the type of its union-find root
-        for (auto &[tid, tref] : func.tempTypes) {
-            (void)tid; (void)tref; // just to iterate
-        }
         // Write back inferred types to func.tempTypes
         for (auto &[tid, _] : m_parent) {
             int root = find(tid);
@@ -75,6 +79,7 @@ public:
 private:
     IRFunc *m_func = nullptr;
     const StabsTypeTable *m_types = nullptr;
+    const MachOFile *m_mf = nullptr;
 
     // Union-find
     std::map<int, int> m_parent;
@@ -121,10 +126,39 @@ private:
         }
     }
 
+    void setType(int tid, TypeRef tref) {
+        if (tref == NullType) return;
+        int root = find(tid);
+        auto kit = m_knownType.find(root);
+        if (kit == m_knownType.end()) {
+            m_knownType[root] = tref;
+        } else {
+            // Prefer more specific type
+            auto *existing = m_types->resolveType(kit->second);
+            auto *candidate = m_types->resolveType(tref);
+            if (existing && candidate) {
+                if (existing->kind == StabsTypeKind::Int && candidate->kind != StabsTypeKind::Int)
+                    m_knownType[root] = tref;
+            }
+        }
+    }
+
     void initExprTemps(const IRExpr *e) {
         if (!e) return;
         if (e->op == IROp::Temp) initTemp(e->tempId());
         for (auto &k : e->kids) initExprTemps(k.get());
+    }
+
+    bool isFloatType(TypeRef ref) const {
+        auto *t = m_types->resolveType(ref);
+        return t && (t->kind == StabsTypeKind::Float ||
+                     t->kind == StabsTypeKind::Double ||
+                     t->kind == StabsTypeKind::LongDouble);
+    }
+
+    bool isPointerType(TypeRef ref) const {
+        auto *t = m_types->resolveType(ref);
+        return t && t->kind == StabsTypeKind::Pointer;
     }
 
     void collectStmtConstraints(IRStmt &stmt) {
@@ -134,15 +168,17 @@ private:
 
             // t = expr -> t has type of expr
             TypeRef exprT = inferExprType(stmt.expr.get());
-            if (exprT != NullType) {
-                int root = find(stmt.destTemp);
-                if (m_knownType.find(root) == m_knownType.end())
-                    m_knownType[root] = exprT;
-            }
+            if (exprT != NullType)
+                setType(stmt.destTemp, exprT);
 
             // t = otherTemp -> same type (union)
             if (stmt.expr->op == IROp::Temp) {
                 unite(stmt.destTemp, stmt.expr->tempId());
+            }
+
+            // Assign from Call: propagate return type and match arg types
+            if (stmt.expr->op == IROp::Call) {
+                collectCallConstraints(stmt.expr.get());
             }
             break;
         }
@@ -160,8 +196,32 @@ private:
             if (stmt.addr && stmt.addr->op == IROp::Temp) {
                 markAsPointer(stmt.addr->tempId());
             }
-            // Also check addr children for pointer temps
+            // Propagate: if we know the addr's pointee type, the stored value has that type
+            if (stmt.addr && stmt.expr) {
+                TypeRef addrType = inferExprType(stmt.addr.get());
+                if (addrType != NullType) {
+                    TypeRef pointeeType = m_types->derefPointer(addrType);
+                    if (pointeeType != NullType && stmt.expr->op == IROp::Temp) {
+                        setType(stmt.expr->tempId(), pointeeType);
+                    }
+                }
+            }
             collectPointerConstraints(stmt.addr.get());
+            break;
+        }
+        case IRStmtKind::VarSet: {
+            // var = expr: if var has a known type, propagate to expr temp
+            if (!stmt.destVar.empty() && stmt.expr && stmt.expr->op == IROp::Temp) {
+                TypeRef varType = NullType;
+                for (auto &p : m_func->params)
+                    if (p.name == stmt.destVar && p.typeRef != NullType) { varType = p.typeRef; break; }
+                if (varType == NullType) {
+                    for (auto &l : m_func->locals)
+                        if (l.name == stmt.destVar && l.typeRef != NullType) { varType = l.typeRef; break; }
+                }
+                if (varType != NullType)
+                    setType(stmt.expr->tempId(), varType);
+            }
             break;
         }
         case IRStmtKind::Call: {
@@ -215,16 +275,23 @@ private:
     }
 
     void collectCallConstraints(const IRExpr *call) {
-        if (!call || call->op != IROp::Call) return;
-        // Try to resolve the function prototype from STABS
-        const StabsFunction *sfn = nullptr;
-        if (!call->name.empty()) {
-            // Look up by name in STABS
-            // We don't have direct access to MachOFile here, but we have the type table
-            // Use the call's return type annotation if present
+        if (!call || call->op != IROp::Call || !m_mf) return;
+        if (call->name.empty()) return;
+
+        // Look up the callee prototype from STABS
+        const StabsFunction *sfn = m_mf->stabsFunctionByName(call->name);
+        if (!sfn) return;
+
+        // Match call arguments to parameter types
+        int nArgs = std::min((int)call->kids.size(), (int)sfn->params.size());
+        for (int i = 0; i < nArgs; ++i) {
+            TypeRef paramType = sfn->params[i].typeRef;
+            if (paramType == NullType) continue;
+            auto *arg = call->kids[i].get();
+            if (arg && arg->op == IROp::Temp) {
+                setType(arg->tempId(), paramType);
+            }
         }
-        // If the call itself has a return type annotation, propagate it
-        // (handled by parent Assign statement)
     }
 
     void markAsPointer(int tid) {
@@ -243,6 +310,7 @@ private:
     TypeRef inferExprType(const IRExpr *e) {
         if (!e) return NullType;
         if (e->typeRef != NullType) return e->typeRef;
+
         if (e->op == IROp::Temp) {
             int root = find(e->tempId());
             auto kit = m_knownType.find(root);
@@ -258,6 +326,57 @@ private:
         }
         if (e->op == IROp::Field) return e->typeRef;
         if (e->op == IROp::Call) return e->typeRef;
+
+        // Load(addr) -> type is the pointee type of addr
+        if (e->op == IROp::Load && !e->kids.empty()) {
+            TypeRef addrType = inferExprType(e->kids[0].get());
+            if (addrType != NullType) {
+                TypeRef pointee = m_types->derefPointer(addrType);
+                if (pointee != NullType) return pointee;
+            }
+        }
+
+        // Binary ops: propagate float and pointer types
+        if (e->kids.size() == 2) {
+            TypeRef lhsT = inferExprType(e->kids[0].get());
+            TypeRef rhsT = inferExprType(e->kids[1].get());
+
+            // Comparisons always produce int
+            if (e->op >= IROp::Eq && e->op <= IROp::Uge)
+                return NullType;
+
+            // If either operand is float, result is float
+            if (isFloatType(lhsT)) return lhsT;
+            if (isFloatType(rhsT)) return rhsT;
+
+            // Pointer arithmetic: ptr + int → ptr, ptr - int → ptr
+            if (e->op == IROp::Add || e->op == IROp::Sub) {
+                if (isPointerType(lhsT)) return lhsT;
+                if (e->op == IROp::Add && isPointerType(rhsT)) return rhsT;
+            }
+
+            // Otherwise propagate non-null types
+            if (lhsT != NullType) return lhsT;
+            if (rhsT != NullType) return rhsT;
+        }
+
+        // Unary ops: propagate operand type
+        if (e->kids.size() == 1 && !e->kids.empty()) {
+            return inferExprType(e->kids[0].get());
+        }
+
+        // Cast: return target type
+        if (e->op == IROp::Cast) {
+            if (e->castKind == CastKind::IntToFloat) {
+                // Find the STABS float type
+                // Search for a common float type in the type table
+                for (auto &p : m_func->params)
+                    if (isFloatType(p.typeRef)) return p.typeRef;
+                for (auto &l : m_func->locals)
+                    if (isFloatType(l.typeRef)) return l.typeRef;
+            }
+        }
+
         return NullType;
     }
 

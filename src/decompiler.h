@@ -34,7 +34,7 @@ public:
         // SSA phi insertion is skipped to avoid IR mutation that could break
         // the emitter's copy-propagation/inlining assumptions.
         SSABuilder().computeIdomOnly(func);
-        TypeInferer().infer(func, mf.typeTable());
+        TypeInferer().infer(func, mf.typeTable(), &mf);
         VarCoalescer().coalesce(func, mf.typeTable());
 
         CfgStructurer structurer;
