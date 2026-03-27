@@ -102,6 +102,18 @@ public:
                 (g.isStatic ? "static " : "") + types.formatDecl(g.typeRef, g.name)) + ";\n";
             anyGlobals = true;
         }
+
+        // Also emit extern declarations for globals from other source files
+        // that might be referenced by functions in this file
+        // (Build a lookup map by name for quick cross-file global resolution)
+        std::map<std::string, const StabsGlobalVar*> globalByName;
+        for (auto &g : types.globals()) {
+            if (g.address == 0 || g.name.empty()) continue;
+            if (g.sourceFileIdx == srcIdx) continue; // already emitted
+            if (!globalByName.count(g.name))
+                globalByName[g.name] = &g;
+        }
+
         if (anyGlobals) out += "\n";
 
         // Decompile each function
@@ -177,13 +189,33 @@ public:
             if (!emittedProtos.empty()) out += "\n";
         }
 
+        QString funcBodies;
         for (size_t fi : sorted) {
             auto &fn = mf.stabsFunctions()[fi];
             if (fn.address == 0) continue;
-            out += decompile(mf, fn.address, false); // skip per-function formatting
-            out += "\n";
+            funcBodies += decompile(mf, fn.address, false); // skip per-function formatting
+            funcBodies += "\n";
         }
 
+        // Scan function bodies for references to cross-file globals
+        // and emit extern declarations for them
+        if (!globalByName.empty()) {
+            std::string body = funcBodies.toStdString();
+            bool anyExterns = false;
+            for (auto &[name, gvar] : globalByName) {
+                if (emittedGlobals.count(name)) continue;
+                // Check if this global name appears in the function bodies
+                if (body.find(name) != std::string::npos) {
+                    emittedGlobals.insert(name);
+                    out += QString::fromStdString(
+                        "extern " + types.formatDecl(gvar->typeRef, name)) + ";\n";
+                    anyExterns = true;
+                }
+            }
+            if (anyExterns) out += "\n";
+        }
+
+        out += funcBodies;
         return clangFormat(cleanupOutput(out)); // cleanup + format
     }
 
@@ -1060,7 +1092,6 @@ private:
         }
 
         void emitStmt(QString &out, IRStmt &stmt, int indent) {
-            fprintf(stderr, "STMT_DEBUG: kind=%d\n", (int)stmt.kind);
             switch (stmt.kind) {
             case IRStmtKind::Assign: {
                 std::string rhs = stmt.expr ? emitExpr(stmt.expr.get()) : "0";
@@ -1417,6 +1448,9 @@ private:
                         std::string inlined = emitExpr(it->second, negate);
                         if (!inlined.empty()) return inlined;
                     }
+                    // Def not found (defined in unstructured block) — emit safe fallback
+                    if (m_tempDef.find(id) == m_tempDef.end())
+                        return "0";
                 }
                 // Use coalesced variable name if available
                 result = tempName(id);
