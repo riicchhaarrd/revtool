@@ -2,6 +2,9 @@
 #include "ir.h"
 #include "lifter.h"
 #include "cfg.h"
+#include "ssa.h"
+#include "type_infer.h"
+#include "coalesce.h"
 #include "macho.h"
 #include <QString>
 #include <QProcess>
@@ -23,6 +26,15 @@ public:
         Lifter lifter(mf);
         IRFunc func = lifter.liftFunction(funcAddr);
         if (func.blocks.empty()) return "/* could not decompile */\n";
+
+        // Type Inference + Variable Coalescing
+        // We compute idom for dominance info (used by coalescer for liveness),
+        // run type inference on the raw IR, and coalesce variables.
+        // SSA phi insertion is skipped to avoid IR mutation that could break
+        // the emitter's copy-propagation/inlining assumptions.
+        SSABuilder().computeIdomOnly(func);
+        TypeInferer().infer(func, mf.typeTable());
+        VarCoalescer().coalesce(func, mf.typeTable());
 
         CfgStructurer structurer;
         auto tree = structurer.structure(func);
@@ -467,10 +479,27 @@ private:
             }
 
             // Declare temps that are used more than once (or used in fallback blocks)
+            // Use coalesced variable names and inferred types where available
+            std::set<int> declaredVarIds; // track which coalesced var IDs we've declared
             for (auto &[id, type] : m_func.tempTypes) {
                 if (m_tempUseCount[id] > 1 && !m_copyPropagated.count(id)) {
-                    std::string tname = "t" + std::to_string(id);
-                    std::string ttype = (type != NullType) ? m_types.formatType(type) : inferTempType(id);
+                    std::string tname = tempName(id);
+                    // Skip if this coalesced variable was already declared
+                    auto vit = m_func.tempToVar.find(id);
+                    if (vit != m_func.tempToVar.end()) {
+                        if (declaredVarIds.count(vit->second)) continue;
+                        declaredVarIds.insert(vit->second);
+                    }
+                    if (declared.count(tname) || paramNames.count(tname)) continue;
+                    // Use coalesced var type, then tempTypes, then inferred
+                    std::string ttype;
+                    if (vit != m_func.tempToVar.end()) {
+                        auto vtit = m_func.varTypes.find(vit->second);
+                        if (vtit != m_func.varTypes.end() && vtit->second != NullType)
+                            ttype = m_types.formatType(vtit->second);
+                    }
+                    if (ttype.empty())
+                        ttype = (type != NullType) ? m_types.formatType(type) : inferTempType(id);
                     // Override to pointer if temp is used as a dereference target
                     if (m_pointerTemps.count(id) && ttype == "int") ttype = "int *";
                     out += "    " + QString::fromStdString(ttype + " " + tname) + ";\n";
@@ -480,8 +509,13 @@ private:
             // Also scan for any temp references not in tempTypes
             for (auto &[id, count] : m_tempUseCount) {
                 if (count <= 1 || m_copyPropagated.count(id)) continue;
-                std::string tname = "t" + std::to_string(id);
-                if (declared.count(tname)) continue;
+                std::string tname = tempName(id);
+                if (declared.count(tname) || paramNames.count(tname)) continue;
+                auto vit = m_func.tempToVar.find(id);
+                if (vit != m_func.tempToVar.end()) {
+                    if (declaredVarIds.count(vit->second)) continue;
+                    declaredVarIds.insert(vit->second);
+                }
                 out += "    " + QString::fromStdString(inferTempType(id) + " " + tname) + ";\n";
                 declared.insert(tname);
             }
@@ -705,8 +739,9 @@ private:
                 for (int i = node->stmtStart; i < node->stmtEnd && i < (int)bb.stmts.size(); ++i) {
                     if (m_suppressedStmts.count({node->bbId, i})) continue;
                     auto k = bb.stmts[i].kind;
-                    // Skip terminal branch/jump and suppressed assigns
-                    if (k == IRStmtKind::Branch || k == IRStmtKind::Jump || k == IRStmtKind::Label)
+                    // Skip terminal branch/jump, phi nodes, and suppressed assigns
+                    if (k == IRStmtKind::Branch || k == IRStmtKind::Jump ||
+                        k == IRStmtKind::Label || k == IRStmtKind::Phi)
                         continue;
                     if (k == IRStmtKind::Assign && m_tempUseCount[bb.stmts[i].destTemp] <= 1)
                         continue; // would be inlined, not emitted
@@ -883,7 +918,7 @@ private:
                     if (s.kind == IRStmtKind::VarSet)
                         init = s.destVar + " = " + (s.expr ? emitExpr(s.expr.get()) : "0");
                     else if (s.kind == IRStmtKind::Assign)
-                        init = "t" + std::to_string(s.destTemp) + " = " + (s.expr ? emitExpr(s.expr.get()) : "0");
+                        init = tempName(s.destTemp) + " = " + (s.expr ? emitExpr(s.expr.get()) : "0");
                 }
                 // Emit increment expression
                 std::string incr;
@@ -892,7 +927,7 @@ private:
                     auto &s = m_func.blocks[node->forIncrBB].stmts[node->forIncrStmt];
                     std::string varName;
                     if (s.kind == IRStmtKind::VarSet) varName = s.destVar;
-                    else if (s.kind == IRStmtKind::Assign) varName = "t" + std::to_string(s.destTemp);
+                    else if (s.kind == IRStmtKind::Assign) varName = tempName(s.destTemp);
                     if (!varName.empty()) {
                         // Simplify "i = i + 1" → "i++"
                         if (s.expr && s.expr->op == IROp::Add && s.expr->kids.size() == 2 &&
@@ -994,7 +1029,7 @@ private:
                 // Skip assignment for inlined or propagated temps
                 if (m_tempUseCount[stmt.destTemp] <= 1) return;
                 if (m_copyPropagated.count(stmt.destTemp)) return;
-                std::string lhs = "t" + std::to_string(stmt.destTemp);
+                std::string lhs = tempName(stmt.destTemp);
                 out += pad(indent) + QString::fromStdString(lhs + " = " + rhs) + ";\n";
                 break;
             }
@@ -1195,7 +1230,8 @@ private:
             case IRStmtKind::Branch:
             case IRStmtKind::Jump:
             case IRStmtKind::Label:
-                // These are handled by the structured emitter, not here
+            case IRStmtKind::Phi:
+                // These are handled by the structured emitter / SSA, not here
                 break;
             }
         }
@@ -1249,7 +1285,8 @@ private:
                         if (!inlined.empty()) return inlined;
                     }
                 }
-                result = "t" + std::to_string(id);
+                // Use coalesced variable name if available
+                result = tempName(id);
                 break;
             }
             case IROp::Var:    result = e->name; break;
@@ -1521,7 +1558,7 @@ private:
 
             // Safety: never return empty — fallback to temp/var name or 0
             if (result.empty()) {
-                if (e->op == IROp::Temp) result = "t" + std::to_string(e->tempId());
+                if (e->op == IROp::Temp) result = tempName(e->tempId());
                 else if (e->op == IROp::Var) result = e->name.empty() ? "0" : e->name;
                 else result = "0";
             }
@@ -1532,6 +1569,21 @@ private:
             }
 
             return result;
+        }
+
+        // Get display name for a temp (coalesced name or tN fallback)
+        // Only use the coalesced name for temps that are actually declared
+        // (use count > 1); single-use temps get inlined and don't need names.
+        std::string tempName(int id) {
+            if (m_tempUseCount[id] > 1 && !m_copyPropagated.count(id)) {
+                auto vit = m_func.tempToVar.find(id);
+                if (vit != m_func.tempToVar.end()) {
+                    auto nit = m_func.varNames.find(vit->second);
+                    if (nit != m_func.varNames.end() && !nit->second.empty())
+                        return nit->second;
+                }
+            }
+            return "t" + std::to_string(id);
         }
 
         // Infer temp type from its defining expression

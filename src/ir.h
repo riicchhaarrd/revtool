@@ -186,6 +186,7 @@ enum class IRStmtKind {
     Label,      // block label (not a real statement, just a marker)
     Intrinsic,  // rep movsb / cpuid / etc — things with no C equivalent, emitted as inline comment or helper call
     Switch,     // switch(expr) { case val: goto block; ... }
+    Phi,        // SSA phi node: t = phi(t_from_pred1, t_from_pred2, ...)
 };
 
 struct IRStmt {
@@ -217,6 +218,9 @@ struct IRStmt {
     std::vector<std::pair<int, int>> switchCases;  // (case_value, target_block_id)
     int switchDefault = -1;
     int switchBase = 0;  // value subtracted before indexing (e.g. sub eax, 7 → base=7)
+
+    // For Phi: (predecessorBlockId, sourceTempId) pairs
+    std::vector<std::pair<int,int>> phiSources;
 
     // ── Factories ───────────────────────────────────────────────────
     static IRStmt mkAssign(int temp, std::unique_ptr<IRExpr> rhs, TypeRef t = NullType) {
@@ -267,6 +271,12 @@ struct IRStmt {
         s.switchBase = base;
         return s;
     }
+    static IRStmt mkPhi(int destTemp, std::vector<std::pair<int,int>> sources) {
+        IRStmt s; s.kind = IRStmtKind::Phi;
+        s.destTemp = destTemp;
+        s.phiSources = std::move(sources);
+        return s;
+    }
 };
 
 // ── Basic block ──────────────────────────────────────────────────────
@@ -305,6 +315,13 @@ struct IRFunc {
 
     // Temp type tracking
     std::map<int, TypeRef>   tempTypes;
+
+    // SSA / analysis fields
+    std::vector<int>              idom;        // immediate dominators (indexed by block id)
+    std::map<int, int>            tempToReg;   // tempId -> canonical register id (for SSA)
+    std::map<int, int>            tempToVar;   // tempId -> coalesced variable id
+    std::map<int, std::string>    varNames;    // varId -> display name
+    std::map<int, TypeRef>        varTypes;    // varId -> inferred type
 
     int newTemp(TypeRef t = NullType) {
         int id = nextTemp++;
