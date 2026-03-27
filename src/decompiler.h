@@ -1447,16 +1447,41 @@ private:
                 // field_4 on float* → base[1], field_8 → base[2], etc.
                 if (e->name.find("field_") == 0 && e->kids[0]) {
                     TypeRef baseType = exprType(e->kids[0].get());
+                    // Try resolving from var/temp names back to params/locals
+                    if (baseType == NullType) {
+                        std::string baseName;
+                        if (e->kids[0]->op == IROp::Var) baseName = e->kids[0]->name;
+                        else if (e->kids[0]->op == IROp::Temp) {
+                            auto vit = m_func.tempToVar.find(e->kids[0]->tempId());
+                            if (vit != m_func.tempToVar.end()) {
+                                auto nit = m_func.varNames.find(vit->second);
+                                if (nit != m_func.varNames.end()) baseName = nit->second;
+                            }
+                        }
+                        if (!baseName.empty()) {
+                            for (auto &p : m_func.params)
+                                if (p.name == baseName && p.typeRef != NullType)
+                                    { baseType = p.typeRef; break; }
+                            if (baseType == NullType)
+                                for (auto &l : m_func.locals)
+                                    if (l.name == baseName && l.typeRef != NullType)
+                                        { baseType = l.typeRef; break; }
+                        }
+                    }
                     if (baseType != NullType) {
                         auto *bt = m_types.resolveType(baseType);
                         if (bt && bt->kind == StabsTypeKind::Pointer) {
                             auto *target = m_types.resolveType(bt->targetType);
-                            if (target && target->sizeBytes > 0 && target->sizeBytes <= 8 &&
+                            // Scalar types: float, int, char, etc. (not struct/union/array)
+                            if (target &&
                                 target->kind != StabsTypeKind::Struct &&
-                                target->kind != StabsTypeKind::Union) {
+                                target->kind != StabsTypeKind::Union &&
+                                target->kind != StabsTypeKind::Array &&
+                                target->kind != StabsTypeKind::ForwardRef) {
+                                int elemSize = target->sizeBytes > 0 ? target->sizeBytes : 4;
                                 int off = (int)e->value;
-                                int idx = off / target->sizeBytes;
-                                if (idx * target->sizeBytes == off && idx >= 0) {
+                                int idx = off / elemSize;
+                                if (idx * elemSize == off && idx >= 0) {
                                     result = base + "[" + std::to_string(idx) + "]";
                                     break;
                                 }
