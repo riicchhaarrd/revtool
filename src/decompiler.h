@@ -728,6 +728,33 @@ private:
             return false;
         }
 
+        // Evaluate a condition expression to a known constant (0=false, 1=true, -1=unknown)
+        int evalConstCond(IRExpr *cond, bool negated) {
+            if (!cond) return -1;
+            // Constant value
+            if (cond->isConst()) {
+                bool val = (cond->value != 0);
+                return (val != negated) ? 1 : 0;
+            }
+            // Comparison of two constants
+            if (cond->kids.size() == 2 && cond->kids[0] && cond->kids[1] &&
+                cond->kids[0]->isConst() && cond->kids[1]->isConst()) {
+                int64_t a = cond->kids[0]->value, b = cond->kids[1]->value;
+                bool val = false;
+                switch (cond->op) {
+                case IROp::Eq:  val = (a == b); break;
+                case IROp::Ne:  val = (a != b); break;
+                case IROp::Slt: case IROp::Ult: val = (a < b); break;
+                case IROp::Sle: case IROp::Ule: val = (a <= b); break;
+                case IROp::Sgt: case IROp::Ugt: val = (a > b); break;
+                case IROp::Sge: case IROp::Uge: val = (a >= b); break;
+                default: return -1;
+                }
+                return (val != negated) ? 1 : 0;
+            }
+            return -1; // unknown
+        }
+
         void collectGotoTargets(StructNode *node, std::set<int> &targets) {
             if (!node) return;
             if (node->kind == StructKind::Goto) targets.insert(node->gotoTarget);
@@ -760,6 +787,26 @@ private:
                 bool hasBody = nodeHasContent(node->children);
                 bool hasElse = node->elseNode && nodeHasContent(node->elseNode.get());
                 if (!hasBody && !hasElse) break;
+                // Evaluate constant conditions
+                if (node->cond) {
+                    int constResult = evalConstCond(node->cond, node->negated);
+                    if (constResult == 0) {
+                        // Always false — emit else body only (if any)
+                        if (hasElse) {
+                            for (auto &child : node->elseNode->children)
+                                emitNode(out, child.get(), indent);
+                        }
+                        break;
+                    }
+                    if (constResult == 1) {
+                        // Always true — emit body without if wrapper
+                        if (hasBody) {
+                            for (auto &child : node->children)
+                                emitNode(out, child.get(), indent);
+                        }
+                        break;
+                    }
+                }
                 // If body is empty but else exists, invert the condition
                 if (!hasBody && hasElse) {
                     std::string cond = node->cond ? emitExpr(node->cond, !node->negated) : "1";
@@ -768,13 +815,33 @@ private:
                     out += pad(indent) + "}\n";
                     break;
                 }
-                // Constant true condition — emit body without the if wrapper
-                if (node->cond && node->cond->isConst() && node->cond->value != 0 && !node->negated && !hasElse) {
-                    for (auto &child : node->children)
-                        emitNode(out, child.get(), indent);
+                std::string cond = node->cond ? emitExpr(node->cond, node->negated) : "1";
+                // String-level constant folding for emitted conditions
+                bool condTrue = (cond == "1" || cond == "0 == 0" || cond == "0 != 1");
+                bool condFalse = (cond == "0" || cond == "0 != 0" || cond == "0 == 1" || cond == "1 == 0");
+                // Also check "N == M" patterns where N != M
+                if (!condTrue && !condFalse && cond.find(" == ") != std::string::npos) {
+                    // Simple: if both sides are numeric and different, it's false
+                    auto eqPos = cond.find(" == ");
+                    std::string lhs = cond.substr(0, eqPos), rhs = cond.substr(eqPos + 4);
+                    char *endL, *endR;
+                    long lv = strtol(lhs.c_str(), &endL, 0);
+                    long rv = strtol(rhs.c_str(), &endR, 0);
+                    if (*endL == '\0' && *endR == '\0') condFalse = (lv != rv);
+                    if (*endL == '\0' && *endR == '\0') condTrue = (lv == rv);
+                }
+                if (condFalse && !hasElse) break; // if(false) with no else — skip
+                if (condFalse && hasElse) {
+                    emitNode(out, node->elseNode.get(), indent); break;
+                }
+                if (condTrue && !hasElse) {
+                    for (auto &child : node->children) emitNode(out, child.get(), indent);
                     break;
                 }
-                std::string cond = node->cond ? emitExpr(node->cond, node->negated) : "1";
+                if (condTrue && hasElse) {
+                    for (auto &child : node->children) emitNode(out, child.get(), indent);
+                    break;
+                }
                 out += pad(indent) + "if (" + QString::fromStdString(cond) + ") {\n";
                 for (auto &child : node->children)
                     emitNode(out, child.get(), indent + 1);
@@ -787,7 +854,18 @@ private:
             }
 
             case StructKind::While: {
+                // Evaluate constant while conditions
+                if (node->cond) {
+                    int cv = evalConstCond(node->cond, node->negated);
+                    if (cv == 0) break; // while(false) — dead loop, skip entirely
+                }
                 std::string cond = node->cond ? emitExpr(node->cond, node->negated) : "1";
+                // Simplify constant while conditions
+                if (cond == "0 == 0" || cond == "1 == 1" || cond == "0 != 1" ||
+                    cond == "1" || cond == "(1)") cond = "1";
+                // Dead while loops: while(false)
+                if (cond == "0 != 0" || cond == "0 == 1" || cond == "1 == 0" ||
+                    cond == "0" || cond == "(0)") break;
                 out += pad(indent) + "while (" + QString::fromStdString(cond) + ") {\n";
                 for (auto &child : node->children)
                     emitNode(out, child.get(), indent + 1);
