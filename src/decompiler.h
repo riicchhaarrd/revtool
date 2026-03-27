@@ -113,10 +113,12 @@ public:
                 auto &fn = mf.stabsFunctions()[fi];
                 if (fn.address == 0 || fn.size == 0) continue;
                 const Section *sec = mf.sectionForAddress(fn.address);
-                if (!sec) continue;
+                if (!sec || fn.address < sec->addr) continue;
                 uint32_t foff = fn.address - sec->addr;
+                if (foff >= sec->size) continue;
+                uint32_t avail = sec->size - foff;
                 const uint8_t *code = mf.bytesAt(sec->offset + foff,
-                    std::min(fn.size, sec->size - foff));
+                    std::min(fn.size, avail));
                 if (!code) continue;
                 // Scan for E8 xx xx xx xx (near call) instructions
                 for (uint32_t j = 0; j + 4 < fn.size; ++j) {
@@ -527,7 +529,7 @@ private:
                                 if (it != defBlock.end() && it->second != bb.id)
                                     crossBlock.insert(tid);
                             }
-                            for (auto &k : n->kids) stack.push_back(k.get());
+                            for (auto &k : n->kids) if (k) stack.push_back(k.get());
                         }
                     };
                     checkExpr(stmt.expr.get());
