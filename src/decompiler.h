@@ -1674,7 +1674,7 @@ private:
 
         // ── Emit an IR expression as a C string ─────────────────────
         std::string emitExpr(IRExpr *e, bool negate = false) {
-            if (!e) return "0";
+            if (!e) return "0"; // null expression fallback
 
             std::string result;
 
