@@ -1165,8 +1165,24 @@ private:
         if (mn == "jmp" && n == 1 && o[0].type == X86_OP_IMM) {
             uint32_t tgt = (uint32_t)o[0].imm;
             auto bit = addrToBlock.find(tgt);
-            if (bit != addrToBlock.end())
+            if (bit != addrToBlock.end()) {
                 bb.stmts.push_back(IRStmt::mkJump(bit->second));
+            } else {
+                // Tail call: jmp to a function outside this one
+                auto fit = m_mf.functionMap().find(tgt);
+                std::string target = fit != m_mf.functionMap().end() ? fit->second :
+                    ([&]{ char b[16]; snprintf(b,16,"sub_%X",tgt); return std::string(b); })();
+                TypeRef retType = NullType;
+                auto *callee = m_mf.stabsFunctionAt(tgt);
+                if (!callee) callee = m_mf.stabsFunctionByName(target);
+                if (callee) retType = callee->returnType;
+                // Build tail call: return target(args) — reuse current function's params
+                std::vector<std::unique_ptr<IRExpr>> args;
+                for (auto &p : func.params)
+                    args.push_back(IRExpr::mkVar(p.name, p.typeRef));
+                auto callExpr = IRExpr::mkCall(target, std::move(args), retType);
+                bb.stmts.push_back(IRStmt::mkReturn(std::move(callExpr)));
+            }
             return;
         }
         // Conditional jumps
