@@ -1251,6 +1251,21 @@ private:
                     return;
                 }
             }
+            // Heuristic: if the last emitted statement is a Store (memory write),
+            // the function is likely void — EAX just holds a leftover value
+            if (!bb.stmts.empty()) {
+                auto &lastStmt = bb.stmts.back();
+                if (lastStmt.kind == IRStmtKind::Store ||
+                    lastStmt.kind == IRStmtKind::VarSet) {
+                    // Check if STABS says int (the default for untyped functions)
+                    // Resolve through typedefs to get the actual type
+                    std::string retStr = m_types.formatType(m_func->returnType);
+                    if (retStr == "int" || retStr == "Bool" || retStr == "BOOL") {
+                        bb.stmts.push_back(IRStmt::mkReturn());
+                        return;
+                    }
+                }
+            }
             auto eax = readReg(X86_REG_EAX);
             bb.stmts.push_back(IRStmt::mkReturn(std::move(eax)));
             return;
