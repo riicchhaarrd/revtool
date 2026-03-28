@@ -2,152 +2,837 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>dis — Mach-O Decompiler</title>
 <style>
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { background: #1e1e1e; color: #d4d4d4; font-family: monospace; font-size: 14px; }
-  header { padding: 12px 20px; background: #252526; border-bottom: 1px solid #3e3e42;
-           display: flex; align-items: center; gap: 16px; }
-  header h1 { font-size: 18px; color: #9cdcfe; }
-  #status  { color: #4ec9b0; font-size: 12px; }
-  #drop-zone { margin: 20px; padding: 30px; border: 2px dashed #555; border-radius: 6px;
-               text-align: center; cursor: pointer; color: #888; transition: border-color .2s; }
-  #drop-zone.over { border-color: #9cdcfe; color: #9cdcfe; }
-  #drop-zone input { display: none; }
-  #controls { display: none; margin: 0 20px 10px; gap: 8px; flex-wrap: wrap; }
-  #controls.visible { display: flex; }
-  button { background: #0e639c; color: #fff; border: none; padding: 6px 14px;
-           border-radius: 4px; cursor: pointer; font-family: monospace; font-size: 13px; }
-  button:hover { background: #1177bb; }
-  #func-select { background: #3c3c3c; color: #d4d4d4; border: 1px solid #555;
-                 padding: 5px 8px; border-radius: 4px; font-family: monospace;
-                 font-size: 13px; max-width: 500px; }
-  #src-select  { background: #3c3c3c; color: #d4d4d4; border: 1px solid #555;
-                 padding: 5px 8px; border-radius: 4px; font-family: monospace;
-                 font-size: 13px; max-width: 500px; }
-  #output { margin: 0 20px 20px; padding: 16px; background: #1a1a1a;
-            border: 1px solid #3e3e42; border-radius: 4px; white-space: pre;
-            overflow: auto; max-height: 70vh; line-height: 1.5; color: #ce9178; }
-  #output.info { color: #9cdcfe; }
+/* ── Reset / Base ─────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; overflow: hidden; }
+body {
+  display: flex; flex-direction: column;
+  background: #1e1e1e; color: #cccccc;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-size: 13px;
+}
+
+/* ── Header ───────────────────────────────────────────────────────── */
+#header {
+  height: 40px; flex-shrink: 0; z-index: 20;
+  background: #323233; border-bottom: 1px solid #111;
+  display: flex; align-items: center; padding: 0 14px; gap: 10px;
+}
+#logo {
+  display: flex; align-items: center; gap: 7px;
+  font-size: 15px; font-weight: 700; color: #e8e8e8; letter-spacing: 0.3px;
+  text-decoration: none;
+}
+#logo svg { flex-shrink: 0; }
+#header-tagline { font-size: 12px; color: #666; padding-left: 4px; border-left: 1px solid #555; }
+#header-gap { flex: 1; }
+#hdr-status { font-size: 12px; color: #888; display: flex; align-items: center; gap: 6px; max-width: 320px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.spinner {
+  width: 13px; height: 13px; flex-shrink: 0;
+  border: 2px solid #444; border-top-color: #007acc;
+  border-radius: 50%; animation: spin .6s linear infinite; display: none;
+}
+.spinner.on { display: inline-block; }
+@keyframes spin { to { transform: rotate(360deg); } }
+#open-btn {
+  display: flex; align-items: center; gap: 5px;
+  background: #0e639c; color: #fff; border: none;
+  padding: 5px 13px; border-radius: 3px; cursor: pointer;
+  font: 500 12px/1 inherit; transition: background .1s;
+}
+#open-btn:hover { background: #1177bb; }
+#file-input { display: none; }
+
+/* ── Layout ───────────────────────────────────────────────────────── */
+#body { display: flex; flex: 1; overflow: hidden; }
+
+/* ── Sidebar ──────────────────────────────────────────────────────── */
+#sidebar {
+  width: 260px; min-width: 150px; max-width: 520px;
+  background: #252526; border-right: 1px solid #1a1a1a;
+  display: flex; flex-direction: column; overflow: hidden; flex-shrink: 0;
+}
+#resize-gutter {
+  width: 4px; flex-shrink: 0; cursor: col-resize; background: transparent;
+  transition: background .15s; position: relative; z-index: 5;
+}
+#resize-gutter:hover, #resize-gutter.drag { background: #007acc; }
+
+/* Sidebar sections */
+.sb-section { display: flex; flex-direction: column; overflow: hidden; }
+.sb-section.grow { flex: 1; min-height: 60px; }
+.sb-head {
+  display: flex; align-items: center; gap: 4px;
+  padding: 5px 10px 5px 12px; cursor: pointer; flex-shrink: 0;
+  font-size: 11px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: .8px; color: #888; user-select: none;
+}
+.sb-head:hover { color: #bbb; }
+.sb-head .badge {
+  font-size: 10px; font-weight: 400; text-transform: none; letter-spacing: 0;
+  background: #333; color: #888; padding: 1px 5px; border-radius: 9px;
+}
+.sb-head .chev {
+  margin-left: auto; color: #666; transition: transform .15s;
+}
+.sb-section.closed .chev { transform: rotate(-90deg); }
+.sb-section.closed .sb-body { display: none; }
+.sb-body { display: flex; flex-direction: column; overflow: hidden; flex: 1; }
+
+/* Binary info */
+#bin-info {
+  padding: 8px 12px 10px; font-size: 12px; line-height: 1.9;
+  border-bottom: 1px solid #1f1f1f; color: #777;
+}
+.bi-row { display: flex; gap: 6px; }
+.bi-lbl { min-width: 68px; color: #666; }
+.bi-val { color: #9cdcfe; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#bin-placeholder { color: #555; font-style: italic; padding: 8px 12px; font-size: 12px; }
+
+/* Search box */
+.sb-search { margin: 5px 8px; position: relative; flex-shrink: 0; }
+.sb-search input {
+  width: 100%; background: #3c3c3c; border: 1px solid #555;
+  border-radius: 3px; color: #ccc; font: 12px/1.4 inherit;
+  padding: 4px 8px 4px 26px; outline: none;
+}
+.sb-search input:focus { border-color: #007acc; }
+.sb-search svg { position: absolute; left: 7px; top: 50%; transform: translateY(-50%); color: #666; pointer-events: none; }
+
+/* Item lists */
+.item-list { overflow-y: auto; flex: 1; }
+.item-list::-webkit-scrollbar { width: 6px; }
+.item-list::-webkit-scrollbar-thumb { background: #3e3e3e; border-radius: 3px; }
+.item-list::-webkit-scrollbar-thumb:hover { background: #555; }
+
+.item {
+  display: flex; align-items: center; gap: 6px;
+  padding: 3px 10px 3px 8px; cursor: pointer; user-select: none;
+  border-left: 2px solid transparent; font-size: 12px; line-height: 1.5;
+}
+.item:hover { background: #2a2d2e; }
+.item.active { background: #04395e; border-left-color: #007acc; color: #fff; }
+.item .icon { flex-shrink: 0; opacity: .75; }
+.item .lbl { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.item .cnt {
+  font-size: 10px; background: #333; color: #777; padding: 1px 5px;
+  border-radius: 9px; flex-shrink: 0;
+}
+.item.active .cnt { background: rgba(255,255,255,.12); color: #aaa; }
+.list-empty { padding: 10px 12px; color: #555; font-style: italic; font-size: 12px; text-align: center; }
+
+/* ── Editor area ──────────────────────────────────────────────────── */
+#editor { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+
+/* Tabs */
+#tab-bar {
+  height: 35px; flex-shrink: 0; background: #2d2d2d;
+  border-bottom: 1px solid #1a1a1a;
+  display: flex; overflow-x: auto; overflow-y: hidden;
+  scrollbar-width: none;
+}
+#tab-bar::-webkit-scrollbar { display: none; }
+.tab {
+  display: flex; align-items: center; gap: 6px;
+  padding: 0 12px 0 14px; height: 35px; cursor: pointer;
+  border-right: 1px solid #1a1a1a; flex-shrink: 0;
+  background: #2d2d2d; color: #888; font-size: 12px;
+  white-space: nowrap; max-width: 200px; position: relative;
+  transition: color .1s;
+}
+.tab:hover { background: #333; color: #bbb; }
+.tab.on { background: #1e1e1e; color: #fff; border-top: 1px solid #007acc; }
+.tab .tab-lbl { overflow: hidden; text-overflow: ellipsis; flex: 1; }
+.tab-x {
+  display: flex; align-items: center; justify-content: center;
+  width: 16px; height: 16px; border-radius: 3px;
+  opacity: 0; transition: opacity .1s; margin-right: -4px; flex-shrink: 0;
+}
+.tab:hover .tab-x, .tab.on .tab-x { opacity: .6; }
+.tab-x:hover { background: rgba(255,255,255,.2); opacity: 1 !important; }
+
+/* Welcome pane */
+#welcome {
+  flex: 1; display: flex; align-items: center; justify-content: center;
+  flex-direction: column; gap: 16px; color: #444;
+}
+#welcome.gone { display: none; }
+.drop-target {
+  display: flex; flex-direction: column; align-items: center; gap: 10px;
+  padding: 44px 72px; border: 2px dashed #383838; border-radius: 8px;
+  cursor: pointer; transition: border-color .2s, color .2s;
+}
+.drop-target:hover { border-color: #555; color: #666; }
+
+/* Code pane */
+#code-pane {
+  display: none; flex: 1; overflow: auto; position: relative;
+  scroll-behavior: auto;
+}
+#code-pane::-webkit-scrollbar { width: 10px; height: 10px; }
+#code-pane::-webkit-scrollbar-track { background: #1e1e1e; }
+#code-pane::-webkit-scrollbar-thumb { background: #424242; border-radius: 5px; }
+#code-pane::-webkit-scrollbar-thumb:hover { background: #555; }
+#code-pane.show { display: flex; }
+#code-inner { display: flex; min-width: max-content; }
+
+#line-nums {
+  padding: 14px 10px 40px 16px; text-align: right;
+  font: 13px/1.6 'Cascadia Code','JetBrains Mono','Fira Code',Consolas,monospace;
+  color: #495565; user-select: none; background: #1e1e1e;
+  position: sticky; left: 0; z-index: 1; min-width: 48px;
+  border-right: 1px solid #2a2a2a; flex-shrink: 0; white-space: pre;
+}
+#code-view {
+  flex: 1; padding: 14px 20px 40px 16px;
+  font: 13px/1.6 'Cascadia Code','JetBrains Mono','Fira Code',Consolas,monospace;
+  white-space: pre; tab-size: 4; min-width: 0;
+}
+
+/* Copy button */
+#copy-btn {
+  position: sticky; top: 14px; right: 14px; margin-left: -46px;
+  width: 32px; height: 32px; background: #2e2e2e; border: 1px solid #484848;
+  border-radius: 4px; cursor: pointer; color: #888; display: none;
+  align-items: center; justify-content: center; flex-shrink: 0;
+  align-self: flex-start; transition: background .1s, color .1s; z-index: 2;
+}
+#copy-btn:hover { background: #3c3c3c; color: #ccc; }
+#copy-btn.ok { color: #4ec9b0 !important; }
+#code-pane.show #copy-btn { display: flex; }
+
+/* ── Syntax colours ───────────────────────────────────────────────── */
+.k  { color: #569cd6; }           /* keywords */
+.t  { color: #4ec9b0; }           /* types */
+.f  { color: #dcdcaa; }           /* function calls */
+.s  { color: #ce9178; }           /* strings */
+.n  { color: #b5cea8; }           /* numbers */
+.c  { color: #6a9955; font-style: italic; }  /* comments */
+.p  { color: #c586c0; }           /* preprocessor */
+
+/* ── Status bar ───────────────────────────────────────────────────── */
+#statusbar {
+  height: 22px; flex-shrink: 0; background: #007acc;
+  display: flex; align-items: center; padding: 0 12px; gap: 14px;
+  font-size: 11px; color: rgba(255,255,255,.9);
+}
+#sb-msg { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#sb-right { display: flex; gap: 14px; flex-shrink: 0; }
+
+/* ── Drop overlay ─────────────────────────────────────────────────── */
+#drop-ov {
+  display: none; position: fixed; inset: 0; z-index: 200;
+  background: rgba(0,0,0,.6); align-items: center; justify-content: center;
+  pointer-events: none; border: 3px dashed #007acc;
+}
+#drop-ov.on { display: flex; }
+#drop-ov-inner {
+  color: #fff; font-size: 18px; font-weight: 500;
+  display: flex; flex-direction: column; align-items: center; gap: 12px;
+}
+
+/* ── Toasts ───────────────────────────────────────────────────────── */
+#toasts {
+  position: fixed; bottom: 36px; right: 16px; z-index: 999;
+  display: flex; flex-direction: column; gap: 6px; pointer-events: none;
+}
+.toast {
+  background: #2d2d2d; border: 1px solid #555; border-radius: 4px;
+  padding: 8px 14px; font-size: 12px; color: #ccc; max-width: 340px;
+  animation: tin .2s, tout .3s 2.7s forwards;
+}
+.toast.err { border-color: #f14c4c; color: #f88; }
+.toast.ok  { border-color: #4ec9b0; color: #4ec9b0; }
+@keyframes tin  { from { opacity:0; transform:translateY(8px) } }
+@keyframes tout { to   { opacity:0; transform:translateY(-4px) } }
 </style>
 </head>
 <body>
 
-<header>
-  <h1>dis — Mach-O Decompiler (WASM)</h1>
-  <span id="status">Loading module…</span>
+<!-- dis.js must load before the inline script calls createDisModule() -->
+<script src="dis.js"></script>
+
+<!-- ── Header ─────────────────────────────────────────────────── -->
+<header id="header">
+  <a id="logo" href="#">
+    <svg width="19" height="19" viewBox="0 0 19 19" fill="none">
+      <rect x="5" y="5" width="9" height="9" rx="1.5" stroke="#9cdcfe" stroke-width="1.5" fill="none"/>
+      <line x1="7.5" y1="1.5" x2="7.5" y2="5"  stroke="#9cdcfe" stroke-width="1.5" stroke-linecap="round"/>
+      <line x1="11.5" y1="1.5" x2="11.5" y2="5" stroke="#9cdcfe" stroke-width="1.5" stroke-linecap="round"/>
+      <line x1="7.5" y1="14" x2="7.5" y2="17.5" stroke="#9cdcfe" stroke-width="1.5" stroke-linecap="round"/>
+      <line x1="11.5" y1="14" x2="11.5" y2="17.5" stroke="#9cdcfe" stroke-width="1.5" stroke-linecap="round"/>
+      <line x1="1.5" y1="7.5" x2="5" y2="7.5"    stroke="#9cdcfe" stroke-width="1.5" stroke-linecap="round"/>
+      <line x1="1.5" y1="11.5" x2="5" y2="11.5"  stroke="#9cdcfe" stroke-width="1.5" stroke-linecap="round"/>
+      <line x1="14" y1="7.5" x2="17.5" y2="7.5"  stroke="#9cdcfe" stroke-width="1.5" stroke-linecap="round"/>
+      <line x1="14" y1="11.5" x2="17.5" y2="11.5" stroke="#9cdcfe" stroke-width="1.5" stroke-linecap="round"/>
+    </svg>
+    dis
+  </a>
+  <span id="header-tagline">Mach-O Decompiler</span>
+  <div id="header-gap"></div>
+  <div id="hdr-status">
+    <div class="spinner on" id="spinner"></div>
+    <span id="hdr-txt">Loading WASM…</span>
+  </div>
+  <button id="open-btn" onclick="document.getElementById('file-input').click()">
+    <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
+      <path d="M6.5 1v7.5M3 5 6.5 1.5 10 5" stroke="#fff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M1.5 9.5v2h10v-2" stroke="#fff" stroke-width="1.5" stroke-linecap="round"/>
+    </svg>
+    Open Binary
+  </button>
+  <input type="file" id="file-input">
 </header>
 
-<div id="drop-zone">
-  <p>Drop a Mach-O binary here, or click to browse</p>
-  <input type="file" id="file-input">
+<!-- ── Main ───────────────────────────────────────────────────── -->
+<div id="body">
+
+  <!-- Sidebar -->
+  <aside id="sidebar">
+    <!-- Binary info -->
+    <div class="sb-section" id="sec-bin">
+      <div class="sb-head" onclick="toggleSec('sec-bin')">
+        Binary
+        <span class="chev">
+          <svg width="9" height="9" viewBox="0 0 9 9" fill="none"><path d="M1.5 3 4.5 6.5 7.5 3" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </span>
+      </div>
+      <div class="sb-body">
+        <div id="bin-placeholder">No binary loaded</div>
+        <div id="bin-info" style="display:none"></div>
+      </div>
+    </div>
+
+    <!-- Source files -->
+    <div class="sb-section grow" id="sec-src">
+      <div class="sb-head" onclick="toggleSec('sec-src')">
+        Source Files
+        <span class="badge" id="src-badge" style="display:none">0</span>
+        <span class="chev">
+          <svg width="9" height="9" viewBox="0 0 9 9" fill="none"><path d="M1.5 3 4.5 6.5 7.5 3" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </span>
+      </div>
+      <div class="sb-body">
+        <div class="sb-search">
+          <svg width="11" height="11" viewBox="0 0 11 11" fill="none">
+            <circle cx="4.5" cy="4.5" r="3" stroke="currentColor" stroke-width="1.2"/>
+            <line x1="7" y1="7" x2="10" y2="10" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+          </svg>
+          <input id="src-filter" type="text" placeholder="Filter…" oninput="filterSrcs()">
+        </div>
+        <div class="item-list" id="src-list">
+          <div class="list-empty">Load a binary</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Functions -->
+    <div class="sb-section grow" id="sec-fn">
+      <div class="sb-head" onclick="toggleSec('sec-fn')">
+        Functions
+        <span class="badge" id="fn-badge" style="display:none">0</span>
+        <span class="chev">
+          <svg width="9" height="9" viewBox="0 0 9 9" fill="none"><path d="M1.5 3 4.5 6.5 7.5 3" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </span>
+      </div>
+      <div class="sb-body">
+        <div class="sb-search">
+          <svg width="11" height="11" viewBox="0 0 11 11" fill="none">
+            <circle cx="4.5" cy="4.5" r="3" stroke="currentColor" stroke-width="1.2"/>
+            <line x1="7" y1="7" x2="10" y2="10" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+          </svg>
+          <input id="fn-filter" type="text" placeholder="Search functions…" oninput="filterFns()">
+        </div>
+        <div class="item-list" id="fn-list">
+          <div class="list-empty">Load a binary</div>
+        </div>
+      </div>
+    </div>
+  </aside>
+
+  <!-- Resize gutter -->
+  <div id="resize-gutter"></div>
+
+  <!-- Editor -->
+  <div id="editor">
+    <div id="tab-bar"></div>
+
+    <!-- Welcome -->
+    <div id="welcome">
+      <div class="drop-target" onclick="document.getElementById('file-input').click()">
+        <svg width="44" height="44" viewBox="0 0 44 44" fill="none">
+          <rect x="8" y="8" width="28" height="28" rx="3" stroke="currentColor" stroke-width="1.5" fill="none"/>
+          <line x1="15" y1="17" x2="29" y2="17" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+          <line x1="15" y1="21" x2="25" y2="21" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+          <line x1="15" y1="25" x2="22" y2="25" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+        </svg>
+        <span style="font-size:15px;color:#555">Drop a Mach-O binary here</span>
+        <span style="font-size:12px;color:#444">or click to browse · x86 / x86-64 with STABS debug info</span>
+      </div>
+    </div>
+
+    <!-- Code -->
+    <div id="code-pane">
+      <div id="code-inner">
+        <div id="line-nums"></div>
+        <div id="code-view"></div>
+      </div>
+      <button id="copy-btn" title="Copy code" onclick="copyCode()">
+        <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+          <rect x="5" y="3" width="7" height="9" rx="1" stroke="currentColor" stroke-width="1.3" fill="none"/>
+          <path d="M3 10.5V2h5.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </button>
+    </div>
+  </div>
 </div>
 
-<div id="controls">
-  <button id="btn-srcs">Source Files</button>
-  <button id="btn-funcs">Functions</button>
-  <select id="src-select"><option value="">— decompile source file —</option></select>
-  <button id="btn-decsrc">Decompile File</button>
-  <select id="func-select"><option value="">— decompile function —</option></select>
-  <button id="btn-decfn">Decompile</button>
+<!-- Status bar -->
+<div id="statusbar">
+  <span id="sb-msg">Ready</span>
+  <div id="sb-right">
+    <span>C</span>
+    <span id="sb-lines"></span>
+  </div>
 </div>
 
-<pre id="output" class="info">Waiting for module…</pre>
+<!-- Drop overlay -->
+<div id="drop-ov">
+  <div id="drop-ov-inner">
+    <svg width="56" height="56" viewBox="0 0 56 56" fill="none">
+      <path d="M28 10v28M16 26l12-16 12 16" stroke="#fff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+      <line x1="14" y1="44" x2="42" y2="44" stroke="#fff" stroke-width="2.5" stroke-linecap="round"/>
+    </svg>
+    Drop Mach-O binary
+  </div>
+</div>
+
+<!-- Toasts -->
+<div id="toasts"></div>
 
 <script>
-let mod = null;
+'use strict';
 
-// Load WASM module
+// ── State ────────────────────────────────────────────────────────────
+let mod      = null;
+let tabs     = [];        // [{id, label, code, kind:'fn'|'src', addr?, srcIdx?}]
+let activeId = null;
+let curCode  = '';
+let allFns   = [];        // [{addr, sig, name}]
+let allSrcs  = [];        // [{idx, path, fnCount}]
+
+// ── WASM init ────────────────────────────────────────────────────────
 createDisModule().then(m => {
   mod = m;
-  document.getElementById('status').textContent = 'Ready';
-  document.getElementById('output').textContent = 'Module loaded. Drop a Mach-O binary above.';
+  document.getElementById('spinner').classList.remove('on');
+  document.getElementById('hdr-txt').textContent = 'Ready';
+  sbMsg('Drop a Mach-O binary to get started');
 }).catch(e => {
-  document.getElementById('status').textContent = 'Error loading module';
-  document.getElementById('output').textContent = String(e);
+  document.getElementById('hdr-txt').textContent = 'WASM error';
+  document.getElementById('spinner').classList.remove('on');
+  toast(String(e), 'err');
 });
 
-// Drag-and-drop / file picker
-const zone  = document.getElementById('drop-zone');
-const input = document.getElementById('file-input');
+// ── File loading ─────────────────────────────────────────────────────
+document.getElementById('file-input').addEventListener('change', function() {
+  if (this.files[0]) loadFile(this.files[0]);
+});
 
-zone.addEventListener('click', () => input.click());
-zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('over'); });
-zone.addEventListener('dragleave', () => zone.classList.remove('over'));
-zone.addEventListener('drop', e => { e.preventDefault(); zone.classList.remove('over'); loadFile(e.dataTransfer.files[0]); });
-input.addEventListener('change', () => input.files[0] && loadFile(input.files[0]));
+// Drag & drop
+document.addEventListener('dragenter', e => {
+  if (e.dataTransfer.types.includes('Files'))
+    document.getElementById('drop-ov').classList.add('on');
+});
+document.addEventListener('dragleave', e => {
+  if (!e.relatedTarget || e.relatedTarget === document.documentElement)
+    document.getElementById('drop-ov').classList.remove('on');
+});
+document.addEventListener('dragover', e => e.preventDefault());
+document.addEventListener('drop', e => {
+  e.preventDefault();
+  document.getElementById('drop-ov').classList.remove('on');
+  const f = e.dataTransfer.files[0];
+  if (f) loadFile(f);
+});
 
 function loadFile(file) {
+  if (!mod) { toast('WASM module not ready', 'err'); return; }
+  spin(true);
+  sbMsg('Loading ' + file.name + '…');
   const reader = new FileReader();
   reader.onload = ev => {
     const bytes = new Uint8Array(ev.target.result);
-    // Pass binary data via pointer to avoid UTF-8 corruption in Embind strings
     const ptr = mod._malloc(bytes.length);
     mod.HEAPU8.set(bytes, ptr);
-    const result = mod.loadBinaryPtr(ptr, bytes.length);
+    const res = mod.loadBinaryPtr(ptr, bytes.length);
     mod._free(ptr);
-    setOutput(result, 'info');
-    if (result.startsWith('ok:')) populateLists();
-    document.getElementById('controls').classList.add('visible');
+    spin(false);
+    if (res.startsWith('error:')) {
+      toast(res, 'err');
+      sbMsg(res, true);
+      return;
+    }
+    document.getElementById('hdr-txt').textContent = file.name;
+    sbMsg(file.name + ' · ' + res.replace('ok: ', ''));
+    toast(res.replace('ok: ', ''), 'ok');
+    populateSidebar(file.name, res);
   };
   reader.readAsArrayBuffer(file);
 }
 
-function populateLists() {
-  // Populate function selector
-  const fsel = document.getElementById('func-select');
-  fsel.innerHTML = '<option value="">— decompile function —</option>';
-  const funcs = mod.listFunctions().split('\n').filter(Boolean);
-  for (const line of funcs) {
-    const m = line.match(/^(0x[0-9A-Fa-f]+)\s+(.+)/);
-    if (!m) continue;
-    const opt = document.createElement('option');
-    opt.value = parseInt(m[1], 16);
-    opt.textContent = line.trim();
-    fsel.appendChild(opt);
-  }
+// ── Sidebar population ───────────────────────────────────────────────
+function populateSidebar(filename, res) {
+  // Binary info
+  const m   = res.match(/(\d+) bytes.*?(\d+) functions.*?(\d+) source files/);
+  const mb  = m ? (parseInt(m[1])/1048576).toFixed(1)+' MB' : '?';
+  const fns = m ? m[2] : '?';
+  const srs = m ? m[3] : '?';
+  document.getElementById('bin-placeholder').style.display = 'none';
+  const bi = document.getElementById('bin-info');
+  bi.style.display = '';
+  bi.innerHTML =
+    row('File', esc(basename(filename))) +
+    row('Size', mb) +
+    row('Functions', fns) +
+    row('Sources', srs);
 
-  // Populate source file selector
-  const ssel = document.getElementById('src-select');
-  ssel.innerHTML = '<option value="">— decompile source file —</option>';
-  const srcs = mod.listSourceFiles().split('\n').filter(Boolean);
-  for (const line of srcs) {
-    const m = line.match(/^\[(\d+)\]\s+(.+)/);
-    if (!m) continue;
-    const opt = document.createElement('option');
-    opt.value = parseInt(m[1]);
-    opt.textContent = line.trim();
-    ssel.appendChild(opt);
+  // Functions
+  allFns = [];
+  for (const line of mod.listFunctions().split('\n').filter(Boolean)) {
+    const lm = line.match(/^(0x[0-9A-Fa-f]+)\s+(.*)/);
+    if (!lm) continue;
+    allFns.push({ addr: parseInt(lm[1], 16), sig: line.trim(), name: lm[2].trim() });
   }
+  const fnBadge = document.getElementById('fn-badge');
+  fnBadge.textContent = allFns.length; fnBadge.style.display = '';
+
+  // Sources
+  allSrcs = [];
+  for (const line of mod.listSourceFiles().split('\n').filter(Boolean)) {
+    const lm = line.match(/^\[(\d+)\]\s+(.*?)\s+\((\d+) functions\)/);
+    if (!lm || parseInt(lm[3]) === 0) continue;
+    allSrcs.push({ idx: parseInt(lm[1]), path: lm[2].trim(), fnCount: parseInt(lm[3]) });
+  }
+  const srcBadge = document.getElementById('src-badge');
+  srcBadge.textContent = allSrcs.length; srcBadge.style.display = '';
+
+  renderFnList(allFns);
+  renderSrcList(allSrcs);
 }
 
-function setOutput(text, cls) {
-  const el = document.getElementById('output');
-  el.className = cls || '';
-  el.textContent = text;
+function row(lbl, val) {
+  return `<div class="bi-row"><span class="bi-lbl">${lbl}</span><span class="bi-val">${val}</span></div>`;
 }
 
-document.getElementById('btn-srcs').addEventListener('click', () =>
-  setOutput(mod.listSourceFiles(), 'info'));
+// ── List rendering ───────────────────────────────────────────────────
+function renderFnList(fns) {
+  const el = document.getElementById('fn-list');
+  if (!fns.length) { el.innerHTML = '<div class="list-empty">No matches</div>'; return; }
+  el.innerHTML = fns.map(f =>
+    `<div class="item" data-addr="${f.addr}" onclick="openFn(${f.addr},this)" title="${esc(f.sig)}">
+      <svg class="icon" width="11" height="11" viewBox="0 0 11 11" fill="none">
+        <path d="M1.5 8.5V2.5l4 3-4 3z" fill="#dcdcaa"/>
+        <line x1="7" y1="3" x2="9.5" y2="3" stroke="#dcdcaa" stroke-width="1.1" stroke-linecap="round"/>
+        <line x1="7" y1="5.5" x2="9.5" y2="5.5" stroke="#dcdcaa" stroke-width="1.1" stroke-linecap="round"/>
+        <line x1="7" y1="8" x2="9.5" y2="8" stroke="#dcdcaa" stroke-width="1.1" stroke-linecap="round"/>
+      </svg>
+      <span class="lbl">${esc(fnShort(f.name))}</span>
+     </div>`
+  ).join('');
+}
 
-document.getElementById('btn-funcs').addEventListener('click', () =>
-  setOutput(mod.listFunctions(), 'info'));
+function renderSrcList(srcs) {
+  const el = document.getElementById('src-list');
+  if (!srcs.length) { el.innerHTML = '<div class="list-empty">No matches</div>'; return; }
+  el.innerHTML = srcs.map(s =>
+    `<div class="item" data-idx="${s.idx}" onclick="openSrc(${s.idx},this)" title="${esc(s.path)}">
+      <svg class="icon" width="11" height="11" viewBox="0 0 11 11" fill="none">
+        <path d="M2 1h5l2 2v8H2V1z" stroke="#9cdcfe" stroke-width="1.1" fill="none" stroke-linejoin="round"/>
+        <line x1="3.5" y1="5" x2="7.5" y2="5" stroke="#9cdcfe" stroke-width=".9" stroke-linecap="round"/>
+        <line x1="3.5" y1="7" x2="6.5" y2="7" stroke="#9cdcfe" stroke-width=".9" stroke-linecap="round"/>
+      </svg>
+      <span class="lbl">${esc(basename(s.path))}</span>
+      <span class="cnt">${s.fnCount}</span>
+     </div>`
+  ).join('');
+}
 
-document.getElementById('btn-decfn').addEventListener('click', () => {
-  const v = document.getElementById('func-select').value;
-  if (!v) return;
-  setOutput('Decompiling…', 'info');
-  setTimeout(() => setOutput(mod.decompileFunction(parseInt(v))), 10);
+function filterFns() {
+  const q = document.getElementById('fn-filter').value.toLowerCase();
+  renderFnList(q ? allFns.filter(f =>
+    f.name.toLowerCase().includes(q) || f.addr.toString(16).includes(q)) : allFns);
+}
+function filterSrcs() {
+  const q = document.getElementById('src-filter').value.toLowerCase();
+  renderSrcList(q ? allSrcs.filter(s => s.path.toLowerCase().includes(q)) : allSrcs);
+}
+
+// ── Decompilation & tabs ─────────────────────────────────────────────
+function openFn(addr, el) {
+  markActive('fn-list', 'data-addr', addr);
+  const ex = tabs.find(t => t.kind === 'fn' && t.addr === addr);
+  if (ex) { activateTab(ex.id); return; }
+  const info  = allFns.find(f => f.addr === addr);
+  const label = info ? fnShort(info.name) : '0x' + addr.toString(16);
+  const id    = 'fn_' + addr.toString(16);
+  sbMsg('Decompiling ' + label + '…');
+  spin(true);
+  setTimeout(() => {
+    const code = mod.decompileFunction(addr);
+    spin(false);
+    addTab({ id, label, code, kind: 'fn', addr });
+    sbMsg(label + ' · ' + countLines(code) + ' lines');
+  }, 10);
+}
+
+function openSrc(idx, el) {
+  markActive('src-list', 'data-idx', idx);
+  const ex = tabs.find(t => t.kind === 'src' && t.srcIdx === idx);
+  if (ex) { activateTab(ex.id); return; }
+  const info  = allSrcs.find(s => s.idx === idx);
+  const label = info ? basename(info.path) : 'src-' + idx;
+  const id    = 'src_' + idx;
+  sbMsg('Decompiling ' + label + '…');
+  spin(true);
+  setTimeout(() => {
+    const code = mod.decompileSourceFile(idx);
+    spin(false);
+    addTab({ id, label, code, kind: 'src', srcIdx: idx });
+    sbMsg(label + ' · ' + countLines(code) + ' lines');
+  }, 10);
+}
+
+function addTab(tab) {
+  if (!tabs.find(t => t.id === tab.id)) tabs.push(tab);
+  activateTab(tab.id);
+}
+
+function activateTab(id) {
+  activeId = id;
+  const tab = tabs.find(t => t.id === id);
+  if (!tab) return;
+  renderTabBar();
+  showCode(tab.code);
+  if (tab.kind === 'fn')  markActive('fn-list',  'data-addr', tab.addr);
+  if (tab.kind === 'src') markActive('src-list', 'data-idx',  tab.srcIdx);
+}
+
+function closeTab(id, e) {
+  e && e.stopPropagation();
+  const i = tabs.findIndex(t => t.id === id);
+  if (i === -1) return;
+  tabs.splice(i, 1);
+  if (activeId === id)
+    activeId = tabs.length ? tabs[Math.max(0, i - 1)].id : null;
+  renderTabBar();
+  if (activeId) {
+    const t = tabs.find(x => x.id === activeId);
+    if (t) { showCode(t.code); return; }
+  }
+  document.getElementById('code-pane').classList.remove('show');
+  document.getElementById('welcome').classList.remove('gone');
+  curCode = ''; updateLines(0);
+}
+
+function renderTabBar() {
+  document.getElementById('tab-bar').innerHTML = tabs.map(t =>
+    `<div class="tab${t.id===activeId?' on':''}" onclick="activateTab('${t.id}')">
+       <span class="tab-lbl">${esc(t.label)}</span>
+       <span class="tab-x" onclick="closeTab('${t.id}',event)" title="Close">
+         <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
+           <line x1="2" y1="2" x2="8" y2="8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+           <line x1="8" y1="2" x2="2" y2="8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+         </svg>
+       </span>
+     </div>`
+  ).join('');
+}
+
+function showCode(code) {
+  curCode = code;
+  document.getElementById('welcome').classList.add('gone');
+  const pane = document.getElementById('code-pane');
+  pane.classList.add('show');
+  const lines = code.split('\n');
+  document.getElementById('line-nums').textContent = lines.map((_,i) => i+1).join('\n');
+  document.getElementById('code-view').innerHTML = hlC(code);
+  updateLines(lines.length);
+  pane.scrollTop = 0; pane.scrollLeft = 0;
+}
+
+function updateLines(n) {
+  document.getElementById('sb-lines').textContent = n ? n + ' lines' : '';
+}
+function countLines(s) { return s.split('\n').length; }
+
+// ── Copy ─────────────────────────────────────────────────────────────
+function copyCode() {
+  if (!curCode) return;
+  navigator.clipboard.writeText(curCode).then(() => {
+    const b = document.getElementById('copy-btn');
+    b.classList.add('ok');
+    setTimeout(() => b.classList.remove('ok'), 1400);
+  });
+}
+
+// ── Sidebar resize ───────────────────────────────────────────────────
+const gutter = document.getElementById('resize-gutter');
+let dragging = false, dragX0 = 0, dragW0 = 0;
+gutter.addEventListener('mousedown', e => {
+  dragging = true; dragX0 = e.clientX;
+  dragW0 = document.getElementById('sidebar').offsetWidth;
+  gutter.classList.add('drag');
+  document.body.style.cssText += 'cursor:col-resize;user-select:none;';
+});
+document.addEventListener('mousemove', e => {
+  if (!dragging) return;
+  const w = Math.max(150, Math.min(520, dragW0 + e.clientX - dragX0));
+  document.getElementById('sidebar').style.width = w + 'px';
+});
+document.addEventListener('mouseup', () => {
+  if (!dragging) return;
+  dragging = false; gutter.classList.remove('drag');
+  document.body.style.cursor = ''; document.body.style.userSelect = '';
 });
 
-document.getElementById('btn-decsrc').addEventListener('click', () => {
-  const v = document.getElementById('src-select').value;
-  if (v === '') return;
-  setOutput('Decompiling…', 'info');
-  setTimeout(() => setOutput(mod.decompileSourceFile(parseInt(v))), 10);
+// ── Section toggle ───────────────────────────────────────────────────
+function toggleSec(id) { document.getElementById(id).classList.toggle('closed'); }
+
+// ── Keyboard ─────────────────────────────────────────────────────────
+document.addEventListener('keydown', e => {
+  const isMod = e.ctrlKey || e.metaKey;
+  if (isMod && e.key === 'k') {
+    e.preventDefault();
+    document.getElementById('fn-filter').focus();
+    document.getElementById('fn-filter').select();
+  }
+  if (e.key === 'Escape') {
+    document.getElementById('fn-filter').blur();
+    document.getElementById('src-filter').blur();
+  }
 });
+
+// ── Helpers ──────────────────────────────────────────────────────────
+function spin(on) {
+  document.getElementById('spinner').classList.toggle('on', on);
+}
+function sbMsg(msg, err) {
+  const el = document.getElementById('sb-msg');
+  el.textContent = msg;
+  el.style.color = err ? '#f88' : '';
+}
+function toast(msg, cls) {
+  const c = document.getElementById('toasts');
+  const el = document.createElement('div');
+  el.className = 'toast' + (cls ? ' '+cls : '');
+  el.textContent = msg;
+  c.appendChild(el);
+  setTimeout(() => el.remove(), 3000);
+}
+function esc(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function basename(p) {
+  return p.replace(/\\/g,'/').split('/').filter(Boolean).pop() || p;
+}
+function fnShort(sig) {
+  const pi = sig.indexOf('(');
+  const before = pi >= 0 ? sig.slice(0, pi).trim() : sig;
+  const parts  = before.split(/\s+/);
+  return parts[parts.length - 1] || sig;
+}
+function markActive(listId, attr, val) {
+  document.getElementById(listId).querySelectorAll('.item').forEach(el => {
+    const v = el.getAttribute(attr);
+    const match = typeof val === 'number' ? parseInt(v) === val : v === String(val);
+    el.classList.toggle('active', match);
+    if (match) el.scrollIntoView({ block: 'nearest' });
+  });
+}
+
+// ── C Syntax Highlighter ─────────────────────────────────────────────
+const KW = new Set([
+  'auto','break','case','char','const','continue','default','do','double',
+  'else','enum','extern','float','for','goto','if','inline','int','long',
+  'register','restrict','return','short','signed','sizeof','static','struct',
+  'switch','typedef','union','unsigned','void','volatile','while',
+  'NULL','nullptr','true','false','bool'
+]);
+const TYPES = new Set([
+  'int8_t','int16_t','int32_t','int64_t',
+  'uint8_t','uint16_t','uint32_t','uint64_t',
+  'size_t','ssize_t','ptrdiff_t','intptr_t','uintptr_t',
+  'FILE','BOOL','DWORD','WORD','BYTE','HRESULT','HANDLE','HWND',
+  'uint','ulong','ushort','uchar'
+]);
+
+function hlC(src) {
+  let o = '', i = 0, n = src.length;
+  while (i < n) {
+    const c = src[i];
+
+    // Line comment
+    if (c === '/' && src[i+1] === '/') {
+      const e = src.indexOf('\n', i); const seg = e<0 ? src.slice(i) : src.slice(i,e);
+      o += `<span class="c">${esc(seg)}</span>`; i += seg.length; continue;
+    }
+    // Block comment
+    if (c === '/' && src[i+1] === '*') {
+      const e = src.indexOf('*/', i+2); const seg = e<0 ? src.slice(i) : src.slice(i,e+2);
+      o += `<span class="c">${esc(seg)}</span>`; i += seg.length; continue;
+    }
+    // Preprocessor
+    if (c === '#' && (i===0 || src[i-1]==='\n')) {
+      const e = src.indexOf('\n', i); const seg = e<0 ? src.slice(i) : src.slice(i,e);
+      o += `<span class="p">${esc(seg)}</span>`; i += seg.length; continue;
+    }
+    // String / char literal
+    if (c === '"' || c === "'") {
+      let j = i+1;
+      while (j<n && src[j]!==c) { if (src[j]==='\\') j++; j++; }
+      j++;
+      o += `<span class="s">${esc(src.slice(i,j))}</span>`; i=j; continue;
+    }
+    // Numbers (0x hex, decimal, float; also negative if preceded by operator/space/open)
+    if ((c>='0'&&c<='9') ||
+        (c==='-' && i>0 && /[\s=\(,\[{*+\-!|&^~<>%]/.test(src[i-1]) && src[i+1]>='0' && src[i+1]<='9')) {
+      let j = i; if (src[j]==='-') j++;
+      if (src[j]==='0' && src[j+1]==='x') {
+        j+=2; while (j<n && /[0-9a-fA-F]/.test(src[j])) j++;
+      } else {
+        while (j<n && src[j]>='0' && src[j]<='9') j++;
+        if (j<n && src[j]==='.') { j++; while(j<n&&src[j]>='0'&&src[j]<='9') j++; }
+        if (j<n && (src[j]==='e'||src[j]==='E')) {
+          j++; if(src[j]==='+'||src[j]==='-') j++;
+          while(j<n&&src[j]>='0'&&src[j]<='9') j++;
+        }
+      }
+      while (j<n && /[uUlLfF]/.test(src[j])) j++;
+      o += `<span class="n">${esc(src.slice(i,j))}</span>`; i=j; continue;
+    }
+    // Identifiers, keywords, types, function calls
+    if (/[a-zA-Z_]/.test(c)) {
+      let j = i; while (j<n && /[a-zA-Z0-9_]/.test(src[j])) j++;
+      const word = src.slice(i,j);
+      let k = j; while (k<n && (src[k]===' '||src[k]==='\t')) k++;
+      if (KW.has(word)) {
+        o += `<span class="k">${esc(word)}</span>`;
+      } else if (TYPES.has(word)) {
+        o += `<span class="t">${esc(word)}</span>`;
+      } else if (src[k]==='(' && word!=='if'&&word!=='while'&&word!=='for'&&word!=='switch'&&word!=='return') {
+        o += `<span class="f">${esc(word)}</span>`;
+      } else {
+        o += esc(word);
+      }
+      i=j; continue;
+    }
+    o += esc(c); i++;
+  }
+  return o;
+}
 </script>
-
-<script src="dis.js"></script>
 </body>
 </html>
