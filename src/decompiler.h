@@ -1770,6 +1770,22 @@ private:
                     // Inlining failed — emit 0 as safe fallback
                     return "0";
                 }
+                // Also inline temps used exactly twice (1 def + 1 use) when def is simple
+                if (m_tempUseCount[id] == 2) {
+                    auto it = m_tempDef.find(id);
+                    if (it != m_tempDef.end() && it->second) {
+                        auto *def = it->second;
+                        // Inline if the definition is a simple expression
+                        bool isSimple = (def->op == IROp::Var || def->op == IROp::Field ||
+                                        def->op == IROp::Const || def->op == IROp::Load ||
+                                        def->op == IROp::Call || def->op == IROp::String ||
+                                        def->op == IROp::Cast);
+                        if (isSimple) {
+                            std::string inlined = emitExpr(def, negate);
+                            if (!inlined.empty() && inlined != "0") return inlined;
+                        }
+                    }
+                }
                 // Use coalesced variable name if available
                 result = tempName(id);
                 // If we'd emit a raw "tN" name, force-declare it
