@@ -346,24 +346,13 @@ public:
             }
         }
 
-        // ── Pass 6: merge duplicate branches ─────────────────────────
-        // SSE float compares emit jp + jne to same target. Merge consecutive
-        // blocks where both end with a branch to the same true target.
-        for (size_t bi = 0; bi + 1 < func.blocks.size(); ++bi) {
-            auto &bb = func.blocks[bi];
-            auto &next = func.blocks[bi + 1];
-            if (bb.stmts.empty() || next.stmts.empty()) continue;
-            auto &lastA = bb.stmts.back();
-            auto &lastB = next.stmts.back();
-            if (lastA.kind == IRStmtKind::Branch && lastB.kind == IRStmtKind::Branch &&
-                lastA.trueTarget == lastB.trueTarget && lastA.falseTarget == (int)(bi + 1)) {
-                // Block A branches to same target as block B on the true path.
-                // Merge: replace A's branch with B's branch (which has the real condition)
-                // and mark B as empty.
-                lastA.falseTarget = lastB.falseTarget;
-                next.stmts.clear();
-            }
-        }
+        // ── Pass 6: merge duplicate SSE branches ─────────────────────
+        // SSE float compares (ucomisd) emit jp + jne to same target.
+        // Only merge when the second block has EXACTLY one Branch statement
+        // AND no preceding comparison instruction changed the flags.
+        // Disabled for now — the merge was incorrectly eating early-exit checks.
+        // TODO: re-enable with proper SSE pattern detection (check for ucomis* flag source)
+
 
         // ── Pass 7: wire up block edges ─────────────────────────────
         for (auto &bb : func.blocks) {

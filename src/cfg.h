@@ -523,15 +523,14 @@ private:
 
                         block->children.push_back(std::move(ifNode));
                         cur = convergence;
-                    } else if (convergence >= 0 && falseB == convergence && trueB != convergence) {
-                        // if (!cond) { falseB_body } — true branch IS the convergence
-                        auto ifNode = StructNode::mkIf(last.expr.get(), true);
-                        std::vector<bool> bodyVisited = visited;
-                        // Structure the false branch up to the convergence point
-                        // (but convergence == falseB, so no body to structure)
-                        // The true branch is the convergence point itself
+                    } else if (trueB >= 0 && trueB < n && visited[trueB] &&
+                               falseB >= 0 && falseB < n && !visited[falseB]) {
+                        // Early exit: true branch already visited (return/exit block)
+                        // → emit if (cond) { goto exit; } and continue with false path
+                        auto ifNode = StructNode::mkIf(last.expr.get(), false);
+                        ifNode->children.push_back(StructNode::mkGoto(trueB));
                         block->children.push_back(std::move(ifNode));
-                        cur = convergence;
+                        cur = falseB;
                     } else if (convergence >= 0 && falseB == convergence && trueB != convergence) {
                         // false IS convergence — the true path has the body
                         auto ifNode = StructNode::mkIf(last.expr.get(), false);

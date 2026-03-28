@@ -1523,16 +1523,33 @@ private:
                         out += pad(indent) + QString::fromStdString(buf) + ";\n";
                     }
                 }
-                // Add(base, Mul(idx, scale)) → base->arr_0[idx] = val
-                else if (a->op == IROp::Add && a->kids.size() == 2 &&
-                         a->kids[1]->op == IROp::Mul && a->kids[1]->kids.size() == 2 &&
-                         a->kids[1]->kids[1]->isConst() &&
-                         (a->kids[0]->op == IROp::Var || a->kids[0]->op == IROp::Temp)) {
-                    std::string base = emitExpr(a->kids[0].get());
-                    std::string idx = emitExpr(a->kids[1]->kids[0].get());
-                    int scale = (int)a->kids[1]->kids[1]->value;
-                    out += pad(indent) + QString::fromStdString(
-                        "*(int *)((char *)" + base + " + " + idx + " * " + std::to_string(scale) + ") = " + val) + ";\n";
+                // Add(base, Mul(idx, scale)) or Add(Mul(idx, scale), base) → base[idx] = val
+                else if (a->op == IROp::Add && a->kids.size() == 2) {
+                    IRExpr *storeBase = nullptr, *storeIdx = nullptr;
+                    int storeScale = 0;
+                    for (int side = 0; side < 2; ++side) {
+                        auto *maybeIdx = a->kids[side].get();
+                        auto *maybeBase = a->kids[1-side].get();
+                        if (maybeIdx && maybeIdx->op == IROp::Mul && maybeIdx->kids.size() == 2 &&
+                            maybeIdx->kids[1]->isConst() &&
+                            (maybeBase->op == IROp::Var || maybeBase->op == IROp::Temp || maybeBase->op == IROp::Const)) {
+                            storeBase = maybeBase;
+                            storeIdx = maybeIdx->kids[0].get();
+                            storeScale = (int)maybeIdx->kids[1]->value;
+                            break;
+                        }
+                    }
+                    if (storeBase && storeIdx && storeScale == 4) {
+                        std::string bs = emitExpr(storeBase);
+                        std::string is = emitExpr(storeIdx);
+                        out += pad(indent) + QString::fromStdString(bs + "[" + is + "] = " + val) + ";\n";
+                    } else if (storeBase && storeIdx) {
+                        std::string bs = emitExpr(storeBase);
+                        std::string is = emitExpr(storeIdx);
+                        out += pad(indent) + QString::fromStdString(
+                            "*(int *)((char *)" + bs + " + " + is + " * " + std::to_string(storeScale) + ") = " + val) + ";\n";
+                    }
+                    // handled — skip remaining else-ifs
                 }
                 // Add(Add(base, Mul(idx, scale)), const) → base->arr_NN[idx] = val
                 else if (a->op == IROp::Add && a->kids.size() == 2 &&
@@ -1875,7 +1892,7 @@ private:
                         auto *maybeBase = addr->kids[1-side].get();
                         if (maybeIdx->op == IROp::Mul && maybeIdx->kids.size() == 2 &&
                             maybeIdx->kids[1]->isConst() && maybeIdx->kids[1]->value == 4 &&
-                            (maybeBase->op == IROp::Var || maybeBase->op == IROp::Temp)) {
+                            (maybeBase->op == IROp::Var || maybeBase->op == IROp::Temp || maybeBase->op == IROp::Const)) {
                             arrBase = maybeBase; arrIdx = maybeIdx->kids[0].get();
                             break;
                         }
