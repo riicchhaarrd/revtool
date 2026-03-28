@@ -354,6 +354,48 @@ public:
         // TODO: re-enable with proper SSE pattern detection (check for ucomis* flag source)
 
 
+        // ── Pass 6b: CSE — eliminate duplicate Loads within each block ──
+        // When the same memory address is loaded twice in the same block,
+        // replace the second Load with a reference to the first temp.
+        // This is critical for matching: the compiler uses the register
+        // holding the first load, not a reload from memory.
+        for (auto &bb : func.blocks) {
+            // Map: (base_reg, offset) → temp that holds the loaded value
+            std::map<std::pair<int,int>, int> loadedTemps;
+            for (auto &stmt : bb.stmts) {
+                if (stmt.kind == IRStmtKind::Assign && stmt.destTemp >= 0 && stmt.expr) {
+                    auto *e = stmt.expr.get();
+                    // Detect Load(Add(Temp(base), Const(off))) or Load(Field(Temp(base), off))
+                    if (e->op == IROp::Load && !e->kids.empty()) {
+                        auto *addr = e->kids[0].get();
+                        int baseTemp = -1, offset = 0;
+                        if (addr->op == IROp::Temp) {
+                            baseTemp = addr->tempId();
+                            offset = 0;
+                        } else if (addr->op == IROp::Add && addr->kids.size() == 2 &&
+                                   addr->kids[0]->op == IROp::Temp && addr->kids[1]->isConst()) {
+                            baseTemp = addr->kids[0]->tempId();
+                            offset = (int)addr->kids[1]->value;
+                        }
+                        if (baseTemp >= 0) {
+                            auto key = std::make_pair(baseTemp, offset);
+                            auto it = loadedTemps.find(key);
+                            if (it != loadedTemps.end()) {
+                                // Replace this Load with a reference to the existing temp
+                                stmt.expr = IRExpr::mkTemp(it->second, func.tempType(it->second));
+                            } else {
+                                loadedTemps[key] = stmt.destTemp;
+                            }
+                        }
+                    }
+                }
+                // Stores invalidate the CSE cache for the stored address
+                if (stmt.kind == IRStmtKind::Store) {
+                    loadedTemps.clear(); // conservative: clear all on any store
+                }
+            }
+        }
+
         // ── Pass 7: wire up block edges ─────────────────────────────
         for (auto &bb : func.blocks) {
             if (bb.stmts.empty()) {

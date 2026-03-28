@@ -2084,7 +2084,13 @@ private:
             }
 
             case IROp::Neg:     result = "-" + emitExpr(e->kids[0].get()); break;
-            case IROp::Not:     result = "~" + emitExpr(e->kids[0].get()); break;
+            case IROp::Not:
+                // Simplify ~~x → x
+                if (e->kids[0] && e->kids[0]->op == IROp::Not && !e->kids[0]->kids.empty())
+                    result = emitExpr(e->kids[0]->kids[0].get(), negate);
+                else
+                    result = "~" + emitExpr(e->kids[0].get());
+                break;
             case IROp::BoolNot: result = "!" + emitExpr(e->kids[0].get()); break;
 
             case IROp::Cast:
@@ -2241,6 +2247,13 @@ private:
                 if (rhs == "0" && e->op == IROp::Mul) { result = "0"; break; }
                 if (lhs == rhs && e->op == IROp::Sub) { result = "0"; break; }
                 if (lhs == rhs && e->op == IROp::Xor) { result = "0"; break; }
+                // (x ^ -1) ^ -1 → x  [double XOR with -1 = identity]
+                if (e->op == IROp::Xor && e->kids[1]->isConst() && e->kids[1]->value == -1 &&
+                    e->kids[0]->op == IROp::Xor && e->kids[0]->kids.size() == 2 &&
+                    e->kids[0]->kids[1]->isConst() && e->kids[0]->kids[1]->value == -1) {
+                    result = emitExpr(e->kids[0]->kids[0].get(), negate);
+                    break;
+                }
                 std::string op;
                 switch (e->op) {
                 case IROp::Add:  op = " + "; break;
