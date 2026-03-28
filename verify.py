@@ -291,21 +291,46 @@ def get_decomp_output(binary, flag, value):
 
 
 def make_compilable(code):
-    """Patch decompiled C to be compilable with system gcc."""
+    """Patch decompiled C to be compilable with the cross-compiler."""
     lines = code.split('\n')
     out = []
 
-    # Add system headers we need
-    out.append('#include <stddef.h>')
-    out.append('#include <stdint.h>')
-    out.append('#include <math.h>')
+    # Provide minimal type stubs instead of system headers — works with any compiler
+    out.append('/* minimal stubs for compilation */')
+    out.append('typedef unsigned int size_t;')
+    out.append('typedef int ssize_t;')
+    out.append('typedef int int32_t;')
+    out.append('typedef unsigned int uint32_t;')
+    out.append('typedef short int16_t;')
+    out.append('typedef unsigned short uint16_t;')
+    out.append('typedef signed char int8_t;')
+    out.append('typedef unsigned char uint8_t;')
+    out.append('typedef long long int64_t;')
+    out.append('typedef unsigned long long uint64_t;')
+    out.append('typedef int intptr_t;')
+    out.append('typedef unsigned int uintptr_t;')
+    out.append('typedef int ptrdiff_t;')
+    out.append('#define NULL ((void*)0)')
+    out.append('float floorf(float); float ceilf(float); float sqrtf(float);')
+    out.append('float sinf(float); float cosf(float); float tanf(float);')
+    out.append('float fabsf(float); float fminf(float,float); float fmaxf(float,float);')
+    out.append('float acosf(float); float asinf(float); float atanf(float);')
+    out.append('double atan2(double,double); double floor(double); double ceil(double);')
+    out.append('double sqrt(double); double fabs(double); double pow(double,double);')
+    out.append('double sin(double); double cos(double); double log(double);')
+    out.append('void *memset(void*,int,size_t); void *memcpy(void*,const void*,size_t);')
+    out.append('size_t strlen(const char*); int strcmp(const char*,const char*);')
+    out.append('char *strcpy(char*,const char*); char *strcat(char*,const char*);')
+    out.append('int sprintf(char*,const char*,...); int printf(const char*,...);')
+    out.append('int snprintf(char*,size_t,const char*,...);')
+    out.append('int setjmp(void*); void longjmp(void*,int);')
+    out.append('int atoi(const char*); void exit(int); void *malloc(size_t); void free(void*);')
+    out.append('int abs(int);')
     out.append('')
 
     for line in lines:
-        # Strip non-system #include directives (we don't have the game headers)
-        if re.match(r'#include\s*[<"](?!std|math|string)', line):
-            # Replace with comment
-            out.append('/* ' + line.strip() + ' */')
+        # Strip all #include directives — we provide stubs above
+        if re.match(r'\s*#include\s', line):
             continue
         out.append(line)
 
@@ -314,6 +339,7 @@ def make_compilable(code):
 
 APPLE_GCC = '/tmp/apple-gcc-build/gcc/xgcc'
 APPLE_GCC_FLAGS = ['-B/tmp/apple-gcc-build/gcc/', '-m32', '-O2', '-mdynamic-no-pic',
+                   '-fno-schedule-insns', '-fno-schedule-insns2', '-mtune=pentium4',
                    '-std=c99', '-w', '-fno-stack-protector']
 SYSTEM_GCC_FLAGS = ['-m32', '-O2', '-std=c99', '-w', '-Wno-int-conversion',
                     '-fno-pic', '-fno-pie', '-fno-stack-protector', '-fno-omit-frame-pointer']
