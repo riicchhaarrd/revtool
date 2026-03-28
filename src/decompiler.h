@@ -234,8 +234,18 @@ public:
                 // Check if this global name appears in the function bodies
                 if (body.find(name) != std::string::npos) {
                     emittedGlobals.insert(name);
-                    out += QString::fromStdString(
-                        "extern " + types.formatDecl(gvar->typeRef, name)) + ";\n";
+                    // Emit as initialized definition for direct addressing
+                    // Structs/unions/arrays with unknown size must stay extern
+                    std::string decl = types.formatDecl(gvar->typeRef, name);
+                    auto *gt = types.resolveType(gvar->typeRef);
+                    bool isStruct = (gt && (gt->kind == StabsTypeKind::Struct ||
+                                            gt->kind == StabsTypeKind::Union));
+                    bool isArray = (gt && gt->kind == StabsTypeKind::Array);
+                    bool isPtr = (gt && gt->kind == StabsTypeKind::Pointer);
+                    if (isStruct || isArray)
+                        out += QString::fromStdString("extern " + decl) + ";\n";
+                    else
+                        out += QString::fromStdString(decl + " = 0") + ";\n";
                     anyExterns = true;
                 }
             }
@@ -293,7 +303,7 @@ public:
                     bool isFunc = (body.find(name + "(") != std::string::npos);
                     if (isUsed && !isFunc) {
                         knownNames.insert(name);
-                        out += QString::fromStdString("int " + name + ";\n");
+                        out += QString::fromStdString("int " + name + " = 0;\n");
                         anyUndeclared = true;
                     }
                 }
@@ -1825,18 +1835,25 @@ private:
                     return "0";
                 }
                 // Also inline temps used exactly twice (1 def + 1 use) when def is simple
+                // BUT don't inline if the temp has a declared variable name (v2, v3 etc.)
+                // — using the variable name produces better register allocation matching
                 if (m_tempUseCount[id] == 2) {
-                    auto it = m_tempDef.find(id);
-                    if (it != m_tempDef.end() && it->second) {
-                        auto *def = it->second;
-                        // Inline if the definition is a simple expression
-                        bool isSimple = (def->op == IROp::Var || def->op == IROp::Field ||
-                                        def->op == IROp::Const || def->op == IROp::Load ||
-                                        def->op == IROp::Call || def->op == IROp::String ||
-                                        def->op == IROp::Cast);
-                        if (isSimple) {
-                            std::string inlined = emitExpr(def, negate);
-                            if (!inlined.empty() && inlined != "0") return inlined;
+                    // Check if this temp has a coalesced variable name
+                    std::string varName = tempName(id);
+                    bool hasVarName = (varName.size() >= 2 && varName[0] == 'v' &&
+                                       varName[1] >= '0' && varName[1] <= '9');
+                    if (!hasVarName) {
+                        auto it = m_tempDef.find(id);
+                        if (it != m_tempDef.end() && it->second) {
+                            auto *def = it->second;
+                            bool isSimple = (def->op == IROp::Var || def->op == IROp::Field ||
+                                            def->op == IROp::Const || def->op == IROp::Load ||
+                                            def->op == IROp::Call || def->op == IROp::String ||
+                                            def->op == IROp::Cast);
+                            if (isSimple) {
+                                std::string inlined = emitExpr(def, negate);
+                                if (!inlined.empty() && inlined != "0") return inlined;
+                            }
                         }
                     }
                 }
@@ -2075,7 +2092,13 @@ private:
             }
 
             case IROp::Neg:     result = "-" + emitExpr(e->kids[0].get()); break;
-            case IROp::Not:     result = "~" + emitExpr(e->kids[0].get()); break;
+            case IROp::Not:
+                // Simplify ~~x → x
+                if (e->kids[0] && e->kids[0]->op == IROp::Not && !e->kids[0]->kids.empty())
+                    result = emitExpr(e->kids[0]->kids[0].get(), negate);
+                else
+                    result = "~" + emitExpr(e->kids[0].get());
+                break;
             case IROp::BoolNot: result = "!" + emitExpr(e->kids[0].get()); break;
 
             case IROp::Cast:
@@ -2232,6 +2255,13 @@ private:
                 if (rhs == "0" && e->op == IROp::Mul) { result = "0"; break; }
                 if (lhs == rhs && e->op == IROp::Sub) { result = "0"; break; }
                 if (lhs == rhs && e->op == IROp::Xor) { result = "0"; break; }
+                // (x ^ -1) ^ -1 → x  [double XOR with -1 = identity]
+                if (e->op == IROp::Xor && e->kids[1]->isConst() && e->kids[1]->value == -1 &&
+                    e->kids[0]->op == IROp::Xor && e->kids[0]->kids.size() == 2 &&
+                    e->kids[0]->kids[1]->isConst() && e->kids[0]->kids[1]->value == -1) {
+                    result = emitExpr(e->kids[0]->kids[0].get(), negate);
+                    break;
+                }
                 std::string op;
                 switch (e->op) {
                 case IROp::Add:  op = " + "; break;
@@ -2430,7 +2460,7 @@ private:
             case CastKind::ZeroExt16:  return "(unsigned short)(" + inner + ")";
             case CastKind::SignExt8:   return "(signed char)(" + inner + ")";
             case CastKind::SignExt16:  return "(short)(" + inner + ")";
-            case CastKind::Trunc8:     return "(char)(" + inner + ")";
+            case CastKind::Trunc8:     return "(unsigned char)(" + inner + ")";
             case CastKind::Trunc16:    return "(short)(" + inner + ")";
             case CastKind::IntToFloat: return "(double)(" + inner + ")";
             case CastKind::FloatToInt: return "(int)(" + inner + ")";

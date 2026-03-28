@@ -354,6 +354,48 @@ public:
         // TODO: re-enable with proper SSE pattern detection (check for ucomis* flag source)
 
 
+        // ── Pass 6b: CSE — eliminate duplicate Loads within each block ──
+        // When the same memory address is loaded twice in the same block,
+        // replace the second Load with a reference to the first temp.
+        // This is critical for matching: the compiler uses the register
+        // holding the first load, not a reload from memory.
+        for (auto &bb : func.blocks) {
+            // Map: (base_reg, offset) → temp that holds the loaded value
+            std::map<std::pair<int,int>, int> loadedTemps;
+            for (auto &stmt : bb.stmts) {
+                if (stmt.kind == IRStmtKind::Assign && stmt.destTemp >= 0 && stmt.expr) {
+                    auto *e = stmt.expr.get();
+                    // Detect Load(Add(Temp(base), Const(off))) or Load(Field(Temp(base), off))
+                    if (e->op == IROp::Load && !e->kids.empty()) {
+                        auto *addr = e->kids[0].get();
+                        int baseTemp = -1, offset = 0;
+                        if (addr->op == IROp::Temp) {
+                            baseTemp = addr->tempId();
+                            offset = 0;
+                        } else if (addr->op == IROp::Add && addr->kids.size() == 2 &&
+                                   addr->kids[0]->op == IROp::Temp && addr->kids[1]->isConst()) {
+                            baseTemp = addr->kids[0]->tempId();
+                            offset = (int)addr->kids[1]->value;
+                        }
+                        if (baseTemp >= 0) {
+                            auto key = std::make_pair(baseTemp, offset);
+                            auto it = loadedTemps.find(key);
+                            if (it != loadedTemps.end()) {
+                                // Replace this Load with a reference to the existing temp
+                                stmt.expr = IRExpr::mkTemp(it->second, func.tempType(it->second));
+                            } else {
+                                loadedTemps[key] = stmt.destTemp;
+                            }
+                        }
+                    }
+                }
+                // Stores invalidate the CSE cache for the stored address
+                if (stmt.kind == IRStmtKind::Store) {
+                    loadedTemps.clear(); // conservative: clear all on any store
+                }
+            }
+        }
+
         // ── Pass 7: wire up block edges ─────────────────────────────
         for (auto &bb : func.blocks) {
             if (bb.stmts.empty()) {
@@ -607,6 +649,28 @@ private:
                 auto it = m_localByOffset.find(d);
                 if (it != m_localByOffset.end())
                     return IRExpr::mkVar(it->second->name, it->second->typeRef);
+                // Check if offset falls within an array local
+                for (auto &[off, loc] : m_localByOffset) {
+                    if (off > d) continue;
+                    auto *lt = m_types.resolveType(loc->typeRef);
+                    if (lt && lt->kind == StabsTypeKind::Array) {
+                        int arrSz = lt->sizeBytes;
+                        if (arrSz <= 0 && lt->arrayHigh >= lt->arrayLow) {
+                            auto *et = m_types.resolveType(lt->targetType);
+                            arrSz = (lt->arrayHigh - lt->arrayLow + 1) * (et && et->sizeBytes > 0 ? et->sizeBytes : 4);
+                        }
+                        if (arrSz <= 0) arrSz = 64;
+                        int elemSz = 4;
+                        { auto *et = m_types.resolveType(lt->targetType); if (et && et->sizeBytes > 0) elemSz = et->sizeBytes; }
+                        int arrayEnd = off + arrSz;
+                        if (d >= off && d < arrayEnd) {
+                            int idx = (d - off) / elemSz;
+                            char idxBuf[64];
+                            snprintf(idxBuf, sizeof(idxBuf), "%s[%d]", loc->name.c_str(), idx);
+                            return IRExpr::mkVar(idxBuf, lt->targetType);
+                        }
+                    }
+                }
             }
             // Unnamed stack slot
             char buf[32];
@@ -735,6 +799,29 @@ private:
                     bb.stmts.push_back(IRStmt::mkVarSet(it->second->name, std::move(val), it->second->typeRef));
                     return;
                 }
+                // Check if offset falls within an array local
+                for (auto &[off, loc] : m_localByOffset) {
+                    if (off > d) continue;
+                    auto *lt = m_types.resolveType(loc->typeRef);
+                    if (lt && lt->kind == StabsTypeKind::Array) {
+                        int arrSz = lt->sizeBytes;
+                        if (arrSz <= 0 && lt->arrayHigh >= lt->arrayLow) {
+                            auto *et = m_types.resolveType(lt->targetType);
+                            arrSz = (lt->arrayHigh - lt->arrayLow + 1) * (et && et->sizeBytes > 0 ? et->sizeBytes : 4);
+                        }
+                        if (arrSz <= 0) arrSz = 64;
+                        int elemSz = 4;
+                        { auto *et = m_types.resolveType(lt->targetType); if (et && et->sizeBytes > 0) elemSz = et->sizeBytes; }
+                        int arrayEnd = off + arrSz;
+                        if (d >= off && d < arrayEnd) {
+                            int idx = (d - off) / elemSz;
+                            char idxBuf[64];
+                            snprintf(idxBuf, sizeof(idxBuf), "%s[%d]", loc->name.c_str(), idx);
+                            bb.stmts.push_back(IRStmt::mkVarSet(idxBuf, std::move(val), lt->targetType));
+                            return;
+                        }
+                    }
+                }
             }
             char buf[32];
             if (d > 0) snprintf(buf, sizeof(buf), "arg_%x", (d - 8) / 4);
@@ -812,6 +899,11 @@ private:
         if (op.type == X86_OP_REG) {
             assignReg(op.reg, std::move(val), bb, t);
         } else if (op.type == X86_OP_MEM) {
+            // Preserve byte-width stores for matching
+            if (op.size == 1)
+                val = IRExpr::mkCast(CastKind::Trunc8, std::move(val));
+            else if (op.size == 2)
+                val = IRExpr::mkCast(CastKind::Trunc16, std::move(val));
             writeMem(op.mem, std::move(val), bb);
         }
     }
@@ -848,6 +940,16 @@ private:
         if (isTest && lhs->op == rhs->op && lhs->op == IROp::Temp &&
             lhs->value == rhs->value) {
             // test reg, reg → flags based on reg value
+            rhs = IRExpr::mkConst(0);
+            if      (jmn == "je"  || jmn == "jz")  cmpOp = IROp::Eq;
+            else if (jmn == "jne" || jmn == "jnz") cmpOp = IROp::Ne;
+            else if (jmn == "js")                   cmpOp = IROp::Slt;
+            else if (jmn == "jns")                  cmpOp = IROp::Sge;
+            else cmpOp = IROp::Ne;
+        } else if (isTest) {
+            // test with different operands: condition is (lhs & rhs) vs 0
+            auto andExpr = IRExpr::mkBinary(IROp::And, std::move(lhs), std::move(rhs));
+            lhs = std::move(andExpr);
             rhs = IRExpr::mkConst(0);
             if      (jmn == "je"  || jmn == "jz")  cmpOp = IROp::Eq;
             else if (jmn == "jne" || jmn == "jnz") cmpOp = IROp::Ne;
@@ -1140,12 +1242,17 @@ private:
         if (mn == "cmp" && n == 2) {
             m_flags.lhs = readOp(o[0]);
             m_flags.rhs = readOp(o[1]);
+            // Preserve byte-width for correct comparison codegen (memory operands only)
+            if (o[0].type == X86_OP_MEM && o[0].size == 1 && m_flags.lhs)
+                m_flags.lhs = IRExpr::mkCast(CastKind::Trunc8, std::move(m_flags.lhs));
             m_flags.op = IROp::Sub;
             return;
         }
         if (mn == "test" && n == 2) {
             m_flags.lhs = readOp(o[0]);
             m_flags.rhs = readOp(o[1]);
+            // Note: register-width truncation for test/cmp disabled for now
+            // because it causes re-emission of inlined call expressions
             m_flags.op = IROp::And;
             return;
         }
@@ -1249,6 +1356,30 @@ private:
                     // Fallback: just return ST0 temp (may be uninitialized)
                     bb.stmts.push_back(IRStmt::mkReturn(readReg(X86_REG_ST0)));
                     return;
+                }
+            }
+            // Heuristic: detect void functions with STABS "int" return type
+            {
+                std::string retStr = m_types.formatType(m_func->returnType);
+                bool isDefaultInt = (retStr == "int" || retStr == "Bool" || retStr == "BOOL");
+                if (isDefaultInt) {
+                    // If the block has NO statements, the function is an empty stub → void
+                    if (bb.stmts.empty()) {
+                        bb.stmts.push_back(IRStmt::mkReturn());
+                        return;
+                    }
+                    // If the last statement is a Store/VarSet, EAX is leftover → void
+                    auto &lastStmt = bb.stmts.back();
+                    if (lastStmt.kind == IRStmtKind::Store ||
+                        lastStmt.kind == IRStmtKind::VarSet) {
+                        bb.stmts.push_back(IRStmt::mkReturn());
+                        return;
+                    }
+                    // If the last statement is a Call (void call), the function is void
+                    if (lastStmt.kind == IRStmtKind::Call) {
+                        bb.stmts.push_back(IRStmt::mkReturn());
+                        return;
+                    }
                 }
             }
             auto eax = readReg(X86_REG_EAX);
@@ -1390,6 +1521,10 @@ private:
             }
             int t = func.newTemp();
             bb.stmts.push_back(IRStmt::mkAssign(t, IRExpr::mkCall(fname, std::move(args))));
+            // Assign strlen result directly to ECX.
+            // Note: repne scasb produces ~(len+1) in ECX, but we abstract to strlen().
+            // The subsequent xor edi,-1 pattern will produce (strlen ^ -1) in the output.
+            // For correct C: the original pattern is strlen(s)+1 (including null terminator).
             assignReg(X86_REG_ECX, IRExpr::mkTemp(t), bb);
             return;
         }

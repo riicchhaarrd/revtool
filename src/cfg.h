@@ -252,7 +252,7 @@ private:
         auto block = StructNode::mkBlock();
         int n = (int)m_func->blocks.size();
         ++m_depth;
-        if (m_depth > 200 || ++m_totalCalls > n * 4) { --m_depth; return block; }
+        if (m_depth > 200 || ++m_totalCalls > n * 20) { --m_depth; return block; }
         int cur = start;
 
         while (cur >= 0 && cur < n && cur != end && !visited[cur]) {
@@ -523,6 +523,24 @@ private:
 
                         block->children.push_back(std::move(ifNode));
                         cur = convergence;
+                    } else if (convergence >= 0 && trueB == convergence && falseB != convergence &&
+                               falseB >= 0 && falseB < n && !visited[falseB]) {
+                        // true IS convergence — structure false path then continue at convergence
+                        // This handles: if (initialized) goto common_tail; init_code; common_tail:
+                        auto ifNode = StructNode::mkIf(last.expr.get(), true);
+                        std::vector<bool> bodyVisited = visited;
+                        ifNode->children.push_back(structureRegion(falseB, convergence, bodyVisited));
+                        for (int vi = 0; vi < n; ++vi) if (bodyVisited[vi]) visited[vi] = true;
+                        block->children.push_back(std::move(ifNode));
+                        cur = convergence;
+                        // Unvisit convergence if it's a simple return block
+                        // (avoids skipping the common tail code)
+                        if (cur >= 0 && cur < n) {
+                            auto &convBB = m_func->blocks[cur];
+                            bool isSimple = !convBB.stmts.empty() &&
+                                convBB.stmts.back().kind == IRStmtKind::Return;
+                            if (isSimple) visited[cur] = false;
+                        }
                     } else if (trueB >= 0 && trueB < n && visited[trueB] &&
                                falseB >= 0 && falseB < n && !visited[falseB]) {
                         // Early exit: true branch already visited (return/exit block)
@@ -539,14 +557,39 @@ private:
                         for (int vi = 0; vi < n; ++vi) if (bodyVisited[vi]) visited[vi] = true;
                         block->children.push_back(std::move(ifNode));
                         cur = convergence;
+                        // Unvisit convergence if it's a simple return block
+                        if (cur >= 0 && cur < n) {
+                            auto &convBB = m_func->blocks[cur];
+                            bool isSimple = !convBB.stmts.empty() &&
+                                convBB.stmts.back().kind == IRStmtKind::Return;
+                            if (isSimple) visited[cur] = false;
+                        }
                     } else if (falseB == cur + 1 || (falseB >= 0 && falseB < n && !visited[falseB])) {
                         // if (cond) { trueB } — false falls through
                         auto ifNode = StructNode::mkIf(last.expr.get(), false);
 
                         if (trueB >= 0 && trueB < n && !visited[trueB] && trueB != falseB) {
-                            std::vector<bool> thenVisited = visited;
-                            ifNode->children.push_back(structureRegion(trueB, falseB, thenVisited));
-                            for (int vi = 0; vi < n; ++vi) if (thenVisited[vi]) visited[vi] = true;
+                            if (trueB > falseB && (end < 0 || trueB >= end)) {
+                                // Forward jump: trueB is past current region.
+                                // Emit as if/else: if(cond) { trueB_block } else { falseB_to_end }
+                                std::vector<bool> thenVisited = visited;
+                                ifNode->children.push_back(structureRegion(trueB, n, thenVisited));
+                                for (int vi = 0; vi < n; ++vi) if (thenVisited[vi]) visited[vi] = true;
+
+                                std::vector<bool> elseVisited = visited;
+                                auto elseBody = structureRegion(falseB, end, elseVisited);
+                                for (int vi = 0; vi < n; ++vi) if (elseVisited[vi]) visited[vi] = true;
+                                ifNode->elseNode = std::move(elseBody);
+
+                                block->children.push_back(std::move(ifNode));
+                                cur = -1; // both paths structured
+                                continue;
+                            } else {
+                                std::vector<bool> thenVisited = visited;
+                                int thenEnd = (trueB > falseB) ? end : falseB;
+                                ifNode->children.push_back(structureRegion(trueB, (thenEnd >= 0 ? thenEnd : n), thenVisited));
+                                for (int vi = 0; vi < n; ++vi) if (thenVisited[vi]) visited[vi] = true;
+                            }
                         } else if (trueB >= 0) {
                             ifNode->children.push_back(StructNode::mkGoto(trueB));
                         }
