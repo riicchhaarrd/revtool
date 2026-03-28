@@ -812,6 +812,11 @@ private:
         if (op.type == X86_OP_REG) {
             assignReg(op.reg, std::move(val), bb, t);
         } else if (op.type == X86_OP_MEM) {
+            // Preserve byte-width stores for matching
+            if (op.size == 1)
+                val = IRExpr::mkCast(CastKind::Trunc8, std::move(val));
+            else if (op.size == 2)
+                val = IRExpr::mkCast(CastKind::Trunc16, std::move(val));
             writeMem(op.mem, std::move(val), bb);
         }
     }
