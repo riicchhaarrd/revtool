@@ -568,12 +568,24 @@ private:
         if (t->kind == StabsTypeKind::Struct || t->kind == StabsTypeKind::Union) {
             if (t->name.empty()) return;
             if (t->fields.empty()) {
-                // Forward declaration for struct with no known fields
+                // Struct with no STABS fields — generate int fields at known offsets
+                // to support field_X access patterns
                 std::string kw = (t->kind == StabsTypeKind::Union) ? "union" : "struct";
-                // Emit as opaque struct with size placeholder if we know the size
-                if (t->sizeBytes > 0) {
+                int sz = t->sizeBytes > 0 ? t->sizeBytes : 0;
+                if (sz > 0 && sz <= 65536) {
+                    // Emit as a struct padded with ints to cover the full size
+                    // Fields will be accessed as ->field_X where X is hex offset
+                    out += QString::fromStdString(kw + " " + t->name + " {\n");
+                    int numInts = (sz + 3) / 4;
+                    for (int i = 0; i < numInts; ++i) {
+                        char fname[32];
+                        snprintf(fname, sizeof(fname), "    int field_%X;\n", i * 4);
+                        out += fname;
+                    }
+                    out += "};\n\n";
+                } else if (sz > 65536) {
                     out += QString::fromStdString(kw + " " + t->name +
-                        " { char _opaque[" + std::to_string(t->sizeBytes) + "]; };\n\n");
+                        " { char _opaque[" + std::to_string(sz) + "]; };\n\n");
                 } else {
                     out += QString::fromStdString(kw + " " + t->name + ";\n");
                 }
@@ -735,13 +747,24 @@ private:
                     if (declared.count(tname) || paramNames.count(tname)) continue;
                     // Use coalesced var type, then tempTypes, then inferred
                     std::string ttype;
+                    TypeRef resolvedType = NullType;
                     if (vit != m_func.tempToVar.end()) {
                         auto vtit = m_func.varTypes.find(vit->second);
                         if (vtit != m_func.varTypes.end() && vtit->second != NullType)
-                            ttype = m_types.formatType(vtit->second);
+                            resolvedType = vtit->second;
+                    }
+                    if (resolvedType == NullType && type != NullType)
+                        resolvedType = type;
+                    if (resolvedType != NullType) {
+                        // Array types decay to pointers when assigned to temps
+                        auto *rt = m_types.resolveType(resolvedType);
+                        if (rt && rt->kind == StabsTypeKind::Array)
+                            ttype = m_types.formatType(rt->targetType) + " *";
+                        else
+                            ttype = m_types.formatType(resolvedType);
                     }
                     if (ttype.empty())
-                        ttype = (type != NullType) ? m_types.formatType(type) : inferTempType(id);
+                        ttype = inferTempType(id);
                     // Override to struct pointer if temp is used with -> field access
                     if (ttype == "int" || ttype == "int *") {
                         auto sit = m_tempStructPtr.find(id);
