@@ -320,6 +320,92 @@ public:
         return clangFormat(cleanupOutput(out)); // cleanup + format
     }
 
+    // Dump all STABS types as a C header
+    static QString dumpTypes(const MachOFile &mf) {
+        auto &types = mf.typeTable();
+        QString out;
+        out += "/* Auto-generated type definitions from STABS debug info */\n";
+        out += "#pragma once\n\n";
+        out += platformTypedefs();
+        out += "\n";
+
+        // Collect ALL type refs used across all functions
+        std::set<TypeRef> allTypes;
+        for (auto &fn : mf.stabsFunctions()) {
+            if (fn.returnType != NullType) allTypes.insert(fn.returnType);
+            for (auto &p : fn.params)
+                if (p.typeRef != NullType) allTypes.insert(p.typeRef);
+            for (auto &l : fn.locals)
+                if (l.typeRef != NullType) allTypes.insert(l.typeRef);
+        }
+        // Also add all globals
+        for (auto &g : types.globals())
+            if (g.typeRef != NullType) allTypes.insert(g.typeRef);
+
+        // Emit forward declarations for all structs/unions
+        std::set<std::string> fwdDeclared;
+        for (auto ref : allTypes) {
+            auto *t = types.resolveType(ref);
+            if (!t) continue;
+            if (t->kind == StabsTypeKind::Struct || t->kind == StabsTypeKind::Union) {
+                if (t->name.empty() || t->name.find('<') != std::string::npos) continue;
+                if (fwdDeclared.count(t->name)) continue;
+                fwdDeclared.insert(t->name);
+                std::string kw = (t->kind == StabsTypeKind::Union) ? "union" : "struct";
+                out += QString::fromStdString(kw + " " + t->name + ";\n");
+            }
+        }
+        if (!fwdDeclared.empty()) out += "\n";
+
+        // Emit full type definitions
+        emitTypeDefs(out, types, allTypes);
+
+        // Emit extern declarations for globals
+        std::set<std::string> globalDeclared;
+        for (auto &g : types.globals()) {
+            if (g.address == 0 || g.name.empty()) continue;
+            if (globalDeclared.count(g.name)) continue;
+            if (g.name.find('<') != std::string::npos) continue;
+            globalDeclared.insert(g.name);
+            std::string decl;
+            if (g.typeRef != NullType)
+                decl = types.formatDecl(g.typeRef, g.name);
+            else
+                decl = "int " + g.name;
+            out += "extern " + QString::fromStdString(decl) + ";\n";
+        }
+
+        // Emit function prototypes
+        out += "\n/* Function prototypes */\n";
+        std::set<std::string> protoDeclared;
+        for (auto &fn : mf.stabsFunctions()) {
+            if (fn.address == 0 || fn.name.empty()) continue;
+            std::string cname = fn.name;
+            for (auto &c : cname) { if (c == ':') c = '_'; if (c == '~') c = 'd'; }
+            if (protoDeclared.count(cname)) continue;
+            if (cname.find('<') != std::string::npos) continue;
+            protoDeclared.insert(cname);
+            std::string retStr = fn.returnType != NullType ?
+                types.formatType(fn.returnType) : "int";
+            out += QString::fromStdString(retStr + " " + cname + "(");
+            if (fn.params.empty()) {
+                out += "void";
+            } else {
+                for (size_t i = 0; i < fn.params.size(); ++i) {
+                    if (i) out += ", ";
+                    auto &p = fn.params[i];
+                    if (p.typeRef != NullType)
+                        out += QString::fromStdString(types.formatDecl(p.typeRef, p.name));
+                    else
+                        out += "int " + QString::fromStdString(p.name);
+                }
+            }
+            out += ");\n";
+        }
+
+        return out;
+    }
+
     // Platform type definitions for compilable output
     static QString platformTypedefs() {
         return QString(
