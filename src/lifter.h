@@ -1434,6 +1434,10 @@ private:
             }
             int t = func.newTemp();
             bb.stmts.push_back(IRStmt::mkAssign(t, IRExpr::mkCall(fname, std::move(args))));
+            // Assign strlen result directly to ECX.
+            // Note: repne scasb produces ~(len+1) in ECX, but we abstract to strlen().
+            // The subsequent xor edi,-1 pattern will produce (strlen ^ -1) in the output.
+            // For correct C: the original pattern is strlen(s)+1 (including null terminator).
             assignReg(X86_REG_ECX, IRExpr::mkTemp(t), bb);
             return;
         }
