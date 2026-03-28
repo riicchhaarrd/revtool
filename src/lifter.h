@@ -1310,6 +1310,17 @@ private:
             }
             return;
         }
+        // General sbb: 64-bit subtract high word.
+        // sub lo, X; sbb hi, Y produces hi:lo = (hi:lo) - (Y:X).
+        // Emit as a simple subtract — the full 64-bit result is consumed
+        // by later patterns (push hi; push lo; fild qword [esp]).
+        if (mn == "sbb" && n == 2) {
+            auto dst = readOp(o[0]);
+            auto src = readOp(o[1]);
+            if (dst && src)
+                writeOp(o[0], IRExpr::mkBinary(IROp::Sub, std::move(dst), std::move(src)), bb);
+            return;
+        }
         // adc reg, 0 → reg = reg + CF → reg = reg + (prev_cmp < 0 unsigned)
         if (mn == "adc" && n == 2 && o[1].type == X86_OP_IMM && o[1].imm == 0) {
             if (m_flags.lhs) {
