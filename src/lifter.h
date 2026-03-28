@@ -649,6 +649,28 @@ private:
                 auto it = m_localByOffset.find(d);
                 if (it != m_localByOffset.end())
                     return IRExpr::mkVar(it->second->name, it->second->typeRef);
+                // Check if offset falls within an array local
+                for (auto &[off, loc] : m_localByOffset) {
+                    if (off > d) continue;
+                    auto *lt = m_types.resolveType(loc->typeRef);
+                    if (lt && lt->kind == StabsTypeKind::Array) {
+                        int arrSz = lt->sizeBytes;
+                        if (arrSz <= 0 && lt->arrayHigh >= lt->arrayLow) {
+                            auto *et = m_types.resolveType(lt->targetType);
+                            arrSz = (lt->arrayHigh - lt->arrayLow + 1) * (et && et->sizeBytes > 0 ? et->sizeBytes : 4);
+                        }
+                        if (arrSz <= 0) arrSz = 64;
+                        int elemSz = 4;
+                        { auto *et = m_types.resolveType(lt->targetType); if (et && et->sizeBytes > 0) elemSz = et->sizeBytes; }
+                        int arrayEnd = off + arrSz;
+                        if (d >= off && d < arrayEnd) {
+                            int idx = (d - off) / elemSz;
+                            char idxBuf[64];
+                            snprintf(idxBuf, sizeof(idxBuf), "%s[%d]", loc->name.c_str(), idx);
+                            return IRExpr::mkVar(idxBuf, lt->targetType);
+                        }
+                    }
+                }
             }
             // Unnamed stack slot
             char buf[32];
@@ -776,6 +798,29 @@ private:
                 if (it != m_localByOffset.end()) {
                     bb.stmts.push_back(IRStmt::mkVarSet(it->second->name, std::move(val), it->second->typeRef));
                     return;
+                }
+                // Check if offset falls within an array local
+                for (auto &[off, loc] : m_localByOffset) {
+                    if (off > d) continue;
+                    auto *lt = m_types.resolveType(loc->typeRef);
+                    if (lt && lt->kind == StabsTypeKind::Array) {
+                        int arrSz = lt->sizeBytes;
+                        if (arrSz <= 0 && lt->arrayHigh >= lt->arrayLow) {
+                            auto *et = m_types.resolveType(lt->targetType);
+                            arrSz = (lt->arrayHigh - lt->arrayLow + 1) * (et && et->sizeBytes > 0 ? et->sizeBytes : 4);
+                        }
+                        if (arrSz <= 0) arrSz = 64;
+                        int elemSz = 4;
+                        { auto *et = m_types.resolveType(lt->targetType); if (et && et->sizeBytes > 0) elemSz = et->sizeBytes; }
+                        int arrayEnd = off + arrSz;
+                        if (d >= off && d < arrayEnd) {
+                            int idx = (d - off) / elemSz;
+                            char idxBuf[64];
+                            snprintf(idxBuf, sizeof(idxBuf), "%s[%d]", loc->name.c_str(), idx);
+                            bb.stmts.push_back(IRStmt::mkVarSet(idxBuf, std::move(val), lt->targetType));
+                            return;
+                        }
+                    }
                 }
             }
             char buf[32];
