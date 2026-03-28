@@ -2052,6 +2052,25 @@ private:
                 writeOp(o[0], IRExpr::mkVar("0.0f"), bb);
                 return true;
             }
+            // Detect negation pattern: xorps xmm, [0x80000000 mask]
+            if (o[1].type == X86_OP_MEM) {
+                uint32_t caddr = resolveMemAddr(o[1].mem);
+                if (caddr) {
+                    int64_t foff = m_mf.fileOffsetForAddress(caddr);
+                    if (foff >= 0) {
+                        const uint8_t *cp = m_mf.bytesAt((uint32_t)foff, 4);
+                        if (cp) {
+                            uint32_t mask; memcpy(&mask, cp, 4);
+                            if (mask == 0x80000000) {
+                                // xorps with 0x80000000 = float negation
+                                auto src = readSSEOp(o[0], false);
+                                if (src) writeOp(o[0], IRExpr::mkUnary(IROp::Neg, std::move(src)), bb);
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
             auto lhs = readSSEOp(o[0], false);
             auto rhs = readSSEOp(o[1], false);
             if (lhs && rhs) writeOp(o[0], IRExpr::mkBinary(IROp::Xor, std::move(lhs), std::move(rhs)), bb);
@@ -2059,6 +2078,29 @@ private:
         }
         if ((mn == "andps" || mn == "andpd" || mn == "pand" ||
              mn == "andnps" || mn == "andnpd" || mn == "pandn") && n == 2) {
+            // Detect fabsf pattern: andps xmm, [0x7FFFFFFF mask]
+            if (o[1].type == X86_OP_MEM) {
+                uint32_t caddr = resolveMemAddr(o[1].mem);
+                if (caddr) {
+                    int64_t foff = m_mf.fileOffsetForAddress(caddr);
+                    if (foff >= 0) {
+                        const uint8_t *cp = m_mf.bytesAt((uint32_t)foff, 4);
+                        if (cp) {
+                            uint32_t mask; memcpy(&mask, cp, 4);
+                            if (mask == 0x7FFFFFFF) {
+                                // andps with 0x7FFFFFFF = fabsf
+                                auto src = readSSEOp(o[0], false);
+                                if (src) {
+                                    std::vector<std::unique_ptr<IRExpr>> args;
+                                    args.push_back(std::move(src));
+                                    writeOp(o[0], IRExpr::mkCall("fabsf", std::move(args)), bb);
+                                }
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
             auto lhs = readSSEOp(o[0], false);
             auto rhs = readSSEOp(o[1], false);
             if (lhs && rhs) writeOp(o[0], IRExpr::mkBinary(IROp::And, std::move(lhs), std::move(rhs)), bb);
@@ -2164,6 +2206,15 @@ private:
     }
 
     // Try to read a float/double constant from a known memory address
+    // Resolve a memory operand to a virtual address (for constant pool lookups)
+    uint32_t resolveMemAddr(x86_op_mem &m) {
+        if (m.base == X86_REG_INVALID && m.index == X86_REG_INVALID && m.disp)
+            return (uint32_t)m.disp;
+        if (m_hasPIC && m.base == X86_REG_EBX && m.index == X86_REG_INVALID && m_picBase)
+            return m_picBase + (int)m.disp;
+        return 0;
+    }
+
     std::unique_ptr<IRExpr> resolveFloatConst(x86_op_mem &m, bool isDouble) {
         uint32_t addr = 0;
 
@@ -2203,8 +2254,15 @@ private:
         } else {
             const uint8_t *p = m_mf.bytesAt((uint32_t)off, 4);
             if (!p) return nullptr;
+            uint32_t bits;
+            memcpy(&bits, p, 4);
+            // Special IEEE754 bit patterns used as SSE masks
+            if (bits == 0x7FFFFFFF) return nullptr;  // fabsf mask — handle at andps level
+            if (bits == 0x80000000) return nullptr;  // sign bit mask — handle at xorps level
+            uint32_t exp = (bits >> 23) & 0xFF;
+            if (exp == 0xFF) return nullptr;  // inf/nan — not a valid float constant
             float val;
-            memcpy(&val, p, 4);
+            memcpy(&val, &bits, 4);
             char buf[64]; snprintf(buf, sizeof(buf), "%.7g", val);
             // Ensure decimal point for valid C float suffix
             if (strchr(buf, '.') == nullptr && strchr(buf, 'e') == nullptr)
