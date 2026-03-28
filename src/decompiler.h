@@ -995,6 +995,7 @@ private:
         std::set<int>         m_pointerTemps;   // temps used as pointers (dereference targets)
         std::map<int, TypeRef> m_tempStructPtr;   // temp → struct pointer type (from Field access)
         std::set<int>         m_forceDeclareTemps; // temps that leak as raw tN and need declaration
+        std::set<int>         m_inliningTemps;    // cycle guard for temp inlining in emitExpr
 
         // Force temps with cross-block def/use to be declared (not inlined)
         void forceDeclCrossBlockTemps() {
@@ -1825,11 +1826,21 @@ private:
             }
             case IROp::Temp: {
                 int id = e->tempId();
+                // Cycle guard: prevent infinite recursion through temp chains
+                if (m_inliningTemps.count(id)) {
+                    // Already inlining this temp — break the cycle
+                    auto vit = m_func.tempToVar.find(id);
+                    if (vit != m_func.tempToVar.end())
+                        return m_func.varNames[vit->second];
+                    return "t" + std::to_string(id);
+                }
                 // Inline temps used only once
                 if (m_tempUseCount[id] <= 1) {
                     auto it = m_tempDef.find(id);
                     if (it != m_tempDef.end() && it->second) {
+                        m_inliningTemps.insert(id);
                         std::string inlined = emitExpr(it->second, negate);
+                        m_inliningTemps.erase(id);
                         if (!inlined.empty()) return inlined;
                     }
                     // Inlining failed — emit 0 as safe fallback
@@ -1852,7 +1863,9 @@ private:
                                             def->op == IROp::Call || def->op == IROp::String ||
                                             def->op == IROp::Cast);
                             if (isSimple) {
+                                m_inliningTemps.insert(id);
                                 std::string inlined = emitExpr(def, negate);
+                                m_inliningTemps.erase(id);
                                 if (!inlined.empty() && inlined != "0") return inlined;
                             }
                         }
@@ -2162,6 +2175,7 @@ private:
                 }
                 // Try to evaluate to a simpler form: detect compiler multiply expansion
                 // e.g. (x + (x + x*4) * 8) * 4 = x * 164
+                std::set<int> evalMulVisited;
                 std::function<std::pair<IRExpr*, int64_t>(IRExpr*)> evalMul;
                 evalMul = [&](IRExpr *expr) -> std::pair<IRExpr*, int64_t> {
                     // Returns (baseVar, multiplier) if expr is baseVar * N
@@ -2169,8 +2183,11 @@ private:
                     // For Temp nodes: if the temp has a known definition, recurse into it
                     // so that multi-use temps don't block chain folding
                     if (expr->op == IROp::Temp) {
-                        auto dit = m_tempDef.find(expr->tempId());
+                        int tid = expr->tempId();
+                        if (evalMulVisited.count(tid)) return {expr, 1}; // cycle guard
+                        auto dit = m_tempDef.find(tid);
                         if (dit != m_tempDef.end() && dit->second) {
+                            evalMulVisited.insert(tid);
                             auto [b, m] = evalMul(dit->second);
                             if (b && m != 0) return {b, m};
                         }
