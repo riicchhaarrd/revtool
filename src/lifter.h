@@ -1547,6 +1547,26 @@ private:
                     if (fmtRet == "void") isVoid = true;
                 }
             }
+            // Known C library / math functions that return float/double via ST(0)
+            // but may not have STABS entries
+            if (!isFloatRet && !isVoid) {
+                static const std::set<std::string> floatFuncs = {
+                    "sinf", "cosf", "tanf", "asinf", "acosf", "atanf", "atan2f",
+                    "sqrtf", "fabsf", "floorf", "ceilf", "roundf", "truncf",
+                    "fmodf", "powf", "logf", "log10f", "expf", "exp2f",
+                    "fminf", "fmaxf", "hypotf", "cbrtf",
+                    "sin", "cos", "tan", "asin", "acos", "atan", "atan2",
+                    "sqrt", "fabs", "floor", "ceil", "round", "trunc",
+                    "fmod", "pow", "log", "log10", "exp", "exp2",
+                    "fmin", "fmax", "hypot", "cbrt",
+                    "AngleDelta", "AngleNormalize180", "AngleNormalize180Accurate",
+                    "AngleNormalize360", "AngleSubtract",
+                    "Vec2Normalize", "Vec3Normalize", "Vec3NormalizeTo",
+                    "VectorLength", "VectorNormalize",
+                    "PitchForYawOnNormal",
+                };
+                if (floatFuncs.count(target)) isFloatRet = true;
+            }
 
             if (isVoid) {
                 bb.stmts.push_back(IRStmt::mkCall(std::move(callExpr)));
@@ -1643,7 +1663,7 @@ private:
             assignReg(X86_REG_ECX, IRExpr::mkTemp(t), bb);
             return;
         }
-        if (mn == "movsb" || mn == "movsd" || mn == "movsw") {
+        if (mn == "movsb" || (mn == "movsd" && n == 0) || mn == "movsw") {
             auto dst = readReg(X86_REG_EDI);
             auto src = readReg(X86_REG_ESI);
             // *(dst) = *(src) — single element copy
@@ -2062,6 +2082,13 @@ private:
     bool liftSSE(const std::string &mn, cs_x86_op *o, int n, BasicBlock &bb, cs_insn &in) {
         // ── Scalar moves: movss, movsd ──────────────────────────────
         if ((mn == "movss" || mn == "movsd") && n == 2) {
+            // movss/movsd [esp+N], xmm → collect as call argument
+            if (o[0].type == X86_OP_MEM && o[0].mem.base == X86_REG_ESP &&
+                o[0].mem.index == X86_REG_INVALID) {
+                auto src = readSSEOp(o[1], mn == "movsd");
+                if (src) m_espArgs[(int)o[0].mem.disp] = std::move(src);
+                return true;
+            }
             auto src = readSSEOp(o[1], mn == "movsd");
             if (src) writeOp(o[0], std::move(src), bb);
             return true;
