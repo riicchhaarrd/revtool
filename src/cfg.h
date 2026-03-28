@@ -252,7 +252,7 @@ private:
         auto block = StructNode::mkBlock();
         int n = (int)m_func->blocks.size();
         ++m_depth;
-        if (m_depth > 200 || ++m_totalCalls > n * 4) { --m_depth; return block; }
+        if (m_depth > 200 || ++m_totalCalls > n * 20) { --m_depth; return block; }
         int cur = start;
 
         while (cur >= 0 && cur < n && cur != end && !visited[cur]) {
@@ -554,9 +554,15 @@ private:
                         auto ifNode = StructNode::mkIf(last.expr.get(), false);
 
                         if (trueB >= 0 && trueB < n && !visited[trueB] && trueB != falseB) {
-                            std::vector<bool> thenVisited = visited;
-                            ifNode->children.push_back(structureRegion(trueB, falseB, thenVisited));
-                            for (int vi = 0; vi < n; ++vi) if (thenVisited[vi]) visited[vi] = true;
+                            if (trueB > falseB && (end < 0 || trueB >= end)) {
+                                // Forward jump past false path AND past region end → goto
+                                ifNode->children.push_back(StructNode::mkGoto(trueB));
+                            } else {
+                                std::vector<bool> thenVisited = visited;
+                                int thenEnd = (trueB > falseB) ? end : falseB;
+                                ifNode->children.push_back(structureRegion(trueB, (thenEnd >= 0 ? thenEnd : n), thenVisited));
+                                for (int vi = 0; vi < n; ++vi) if (thenVisited[vi]) visited[vi] = true;
+                            }
                         } else if (trueB >= 0) {
                             ifNode->children.push_back(StructNode::mkGoto(trueB));
                         }
