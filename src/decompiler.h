@@ -1147,7 +1147,8 @@ private:
                     if (k == IRStmtKind::Branch || k == IRStmtKind::Jump ||
                         k == IRStmtKind::Label || k == IRStmtKind::Phi)
                         continue;
-                    if (k == IRStmtKind::Assign && m_tempUseCount[bb.stmts[i].destTemp] <= 1)
+                    if (k == IRStmtKind::Assign && m_tempUseCount[bb.stmts[i].destTemp] <= 1 &&
+                        !(bb.stmts[i].expr && bb.stmts[i].expr->op == IROp::Call))
                         continue; // would be inlined, not emitted
                     return true;
                 }
@@ -1382,7 +1383,8 @@ private:
                         if (s.kind != IRStmtKind::Jump && s.kind != IRStmtKind::Branch &&
                             s.kind != IRStmtKind::Label) {
                             // Check if this is a suppressed assign
-                            if (s.kind == IRStmtKind::Assign && m_tempUseCount[s.destTemp] <= 1)
+                            if (s.kind == IRStmtKind::Assign && m_tempUseCount[s.destTemp] <= 1 &&
+                                !(s.expr && s.expr->op == IROp::Call))
                                 continue;
                             allEmpty = false; break;
                         }
@@ -1430,8 +1432,14 @@ private:
             switch (stmt.kind) {
             case IRStmtKind::Assign: {
                 std::string rhs = stmt.expr ? emitExpr(stmt.expr.get()) : "0";
-                // Skip assignment for inlined or propagated temps
-                if (m_tempUseCount[stmt.destTemp] <= 1) return;
+                // Skip assignment for inlined temps — BUT keep calls (they have side effects)
+                if (m_tempUseCount[stmt.destTemp] <= 1) {
+                    if (stmt.expr && stmt.expr->op == IROp::Call) {
+                        // Emit as standalone call (discard return value)
+                        out += pad(indent) + QString::fromStdString(rhs) + ";\n";
+                    }
+                    return;
+                }
                 if (m_copyPropagated.count(stmt.destTemp)) return;
                 std::string lhs = tempName(stmt.destTemp);
                 // Skip self-assignment (v = v) and trivial alias (v = param)
