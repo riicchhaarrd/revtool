@@ -69,6 +69,7 @@ struct StabsTypedVar {
     std::string name;
     TypeRef     typeRef = NullType;
     int         stackOffset = 0; // ebp-relative (n_value for N_PSYM/N_LSYM)
+    int         regNum = -1;     // STABS register number (-1 = not a register var)
 };
 
 struct StabsGlobalVar {
@@ -130,7 +131,7 @@ public:
             }
             result.isType = true;
         } else if (ch == 't' || ch == 'G' || ch == 'S' || ch == 'V' ||
-                   ch == 'F' || ch == 'f' || ch == 'p' || ch == 'r') {
+                   ch == 'F' || ch == 'f' || ch == 'p' || ch == 'P' || ch == 'r') {
             result.descriptor = ch;
             pos += 1;
             result.isType = (ch == 't');
