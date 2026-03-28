@@ -1432,10 +1432,11 @@ private:
             switch (stmt.kind) {
             case IRStmtKind::Assign: {
                 std::string rhs = stmt.expr ? emitExpr(stmt.expr.get()) : "0";
-                // Skip assignment for inlined temps — BUT keep calls (they have side effects)
+                // Skip assignment for inlined temps — BUT keep calls with truly unused results
                 if (m_tempUseCount[stmt.destTemp] <= 1) {
-                    if (stmt.expr && stmt.expr->op == IROp::Call) {
-                        // Emit as standalone call (discard return value)
+                    if (stmt.expr && stmt.expr->op == IROp::Call &&
+                        m_tempUseCount[stmt.destTemp] == 0) {
+                        // Return value truly unused — emit as standalone call
                         out += pad(indent) + QString::fromStdString(rhs) + ";\n";
                     }
                     return;
