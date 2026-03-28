@@ -548,6 +548,19 @@ public:
                 lines[i+1].trimmed() == "}") {
                 ++i; continue;
             }
+            // Fix: while (cond) { return/break; } → if (cond) { return/break; }
+            if (i + 2 < lines.size() &&
+                lines[i].trimmed().startsWith("while (") &&
+                lines[i].trimmed().endsWith("{") &&
+                (lines[i+1].trimmed().startsWith("return ") || lines[i+1].trimmed() == "break;") &&
+                lines[i+2].trimmed() == "}") {
+                QString fixed = lines[i];
+                fixed.replace("while (", "if (");
+                pass1.append(fixed);
+                pass1.append(lines[i+1]);
+                pass1.append(lines[i+2]);
+                i += 2; continue;
+            }
             pass1.append(lines[i]);
         }
         // Pass 2: Remove unused variable declarations
@@ -1520,6 +1533,24 @@ private:
             case IRStmtKind::VarSet: {
                 std::string val = stmt.expr ? emitExpr(stmt.expr.get()) : "0";
                 std::string dest = stmt.destVar;
+                // Suppress parameter slot reuse for call arguments
+                // Pattern: param = expr before a call → the compiler is setting up
+                // call args by writing to the parameter area on the stack
+                {
+                    bool isParam = false;
+                    for (auto &p : m_func.params)
+                        if (p.name == dest) { isParam = true; break; }
+                    if (isParam && stmt.expr) {
+                        // Check if the value is a string literal (format string) or
+                        // a small integer (error code) being assigned to a param
+                        bool isCallSetup = false;
+                        if (stmt.expr->op == IROp::String) isCallSetup = true;
+                        if (stmt.expr->op == IROp::Const &&
+                            (stmt.expr->value >= 0 && stmt.expr->value <= 10)) isCallSetup = true;
+                        if (stmt.expr->op == IROp::Temp || stmt.expr->op == IROp::Var) isCallSetup = true;
+                        if (isCallSetup) break; // suppress the VarSet
+                    }
+                }
                 // Suppress dead stores to 'this' from register reuse
                 if (dest == "this" && stmt.expr) {
                     bool bogus = false;
