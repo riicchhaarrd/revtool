@@ -21,6 +21,10 @@
 class IRSimplifier {
 public:
     void simplify(IRFunc &func) {
+        // IR-level copy/const propagation: replace temps that are assigned
+        // from a Const or Var with the value directly in all uses
+        propagateConsts(func);
+
         // Run expression simplification on all statements
         bool changed = true;
         for (int iter = 0; iter < 4 && changed; ++iter) {
@@ -37,6 +41,47 @@ public:
     }
 
 private:
+    // ── IR-level const propagation ────────────────────────────────
+    // Replace Temp references with Const values where the temp is assigned
+    // a simple constant.  This enables constant folding of branches like
+    // (0 & 32) != 0 which become dead code.
+    void propagateConsts(IRFunc &func) {
+        // Pass 1: collect temps assigned to constants
+        std::map<int, int64_t> constTemps;
+        for (auto &bb : func.blocks) {
+            for (auto &stmt : bb.stmts) {
+                if (stmt.kind == IRStmtKind::Assign && stmt.destTemp >= 0 &&
+                    stmt.expr && stmt.expr->isConst()) {
+                    constTemps[stmt.destTemp] = stmt.expr->value;
+                }
+            }
+        }
+        if (constTemps.empty()) return;
+
+        // Pass 2: replace all Temp refs with the constant value
+        for (auto &bb : func.blocks) {
+            for (auto &stmt : bb.stmts) {
+                propagateConstsInExpr(stmt.expr, constTemps);
+                propagateConstsInExpr(stmt.addr, constTemps);
+                for (auto &a : stmt.args) propagateConstsInExpr(a, constTemps);
+            }
+        }
+    }
+
+    static void propagateConstsInExpr(std::unique_ptr<IRExpr> &e,
+                                       const std::map<int, int64_t> &consts) {
+        if (!e) return;
+        if (e->op == IROp::Temp) {
+            auto it = consts.find(e->tempId());
+            if (it != consts.end()) {
+                TypeRef t = e->typeRef;
+                e = IRExpr::mkConst(it->second, t);
+                return;
+            }
+        }
+        for (auto &k : e->kids) propagateConstsInExpr(k, consts);
+    }
+
     // ── Structural expression equality ──────────────────────────────
     static bool exprEqual(const IRExpr *a, const IRExpr *b) {
         if (!a && !b) return true;
