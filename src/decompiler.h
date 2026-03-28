@@ -1852,12 +1852,25 @@ private:
                 break;
             }
 
-            case IROp::AddrOf:
-                result = "&" + emitExpr(e->kids[0].get());
+            case IROp::AddrOf: {
+                // &(0->field_X) = just the offset value
+                auto *inner = e->kids[0].get();
+                if (inner && inner->op == IROp::Field && !inner->kids.empty() &&
+                    inner->kids[0]->isConst() && inner->kids[0]->value == 0) {
+                    result = std::to_string((int)inner->value);
+                } else {
+                    result = "&" + emitExpr(inner);
+                }
                 break;
+            }
 
             case IROp::Field: {
                 std::string base = emitExpr(e->kids[0].get());
+                // If base is literal 0 (NULL), emit as offset constant
+                if (e->kids[0] && e->kids[0]->isConst() && e->kids[0]->value == 0) {
+                    result = std::to_string((int)e->value);
+                    break;
+                }
                 // For scalar pointer types (float*, int*), use array notation
                 // field_4 on float* → base[1], field_8 → base[2], etc.
                 if (e->name.find("field_") == 0 && e->kids[0]) {
