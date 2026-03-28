@@ -739,9 +739,11 @@ private:
         // String literal?
         std::string s = tryString(v);
         if (!s.empty()) return IRExpr::mkString(s);
-        // Global variable (from STABS)?
+        // Global variable address (from STABS)?
+        // An immediate that matches a global address is &global, not *global.
+        // Loading the value would be mov eax, [addr] (memory operand), not mov eax, addr (imm).
         auto *g = m_types.globalAtAddress(v);
-        if (g) return IRExpr::mkVar(g->name, g->typeRef);
+        if (g) return IRExpr::mkAddrOf(IRExpr::mkVar(g->name, g->typeRef));
         // Don't resolve function addresses here — they'd be misidentified as data.
         // Function refs are handled in the 'call' and 'lea' instruction handlers.
         return IRExpr::mkConst(imm);
@@ -1024,7 +1026,7 @@ private:
         int64_t off = m_mf.fileOffsetForAddress(addr);
         if (off < 0) return "";
         const Section *sec = m_mf.sectionForAddress(addr);
-        if (!sec || (sec->sectname != "__cstring" && sec->sectname != "__const")) return "";
+        if (!sec || sec->sectname != "__cstring") return "";
         const uint8_t *p = m_mf.bytesAt(off, std::min((uint32_t)80, (uint32_t)(m_mf.size() - off)));
         if (!p) return "";
         std::string s;
@@ -1527,9 +1529,28 @@ private:
                 }
             } else {
                 // Indirect call through function pointer
-                auto tgt = readOp(o[0]);
-                if (tgt) {
-                    // Assign the function pointer to a temp, then call through it
+                if (o[0].type == X86_OP_MEM) {
+                    // Detect vtable call pattern: call [reg + offset]
+                    // where reg was loaded from [this] (i.e., vtable pointer)
+                    auto &mem = o[0].mem;
+                    if (mem.base != X86_REG_INVALID && mem.index == X86_REG_INVALID && mem.disp >= 0) {
+                        int slot = (int)mem.disp / 4;
+                        char buf[32]; snprintf(buf, sizeof(buf), "vfunc_%d", slot);
+                        target = buf;
+                    } else if (mem.base == X86_REG_INVALID && mem.index != X86_REG_INVALID) {
+                        // call [reg*4 + table_addr] — function pointer table
+                        char buf[64]; snprintf(buf, sizeof(buf), "fptable_%X",
+                            (unsigned)(uint32_t)mem.disp);
+                        target = buf;
+                    } else {
+                        auto tgt = readOp(o[0]);
+                        int fpTemp = func.newTemp();
+                        bb.stmts.push_back(IRStmt::mkAssign(fpTemp, std::move(tgt)));
+                        target = "t" + std::to_string(fpTemp);
+                    }
+                } else if (o[0].type == X86_OP_REG) {
+                    // call reg — function pointer in register
+                    auto tgt = readReg(o[0].reg);
                     int fpTemp = func.newTemp();
                     bb.stmts.push_back(IRStmt::mkAssign(fpTemp, std::move(tgt)));
                     target = "t" + std::to_string(fpTemp);
