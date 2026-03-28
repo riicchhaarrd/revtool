@@ -2432,7 +2432,7 @@ private:
             case CastKind::ZeroExt16:  return "(unsigned short)(" + inner + ")";
             case CastKind::SignExt8:   return "(signed char)(" + inner + ")";
             case CastKind::SignExt16:  return "(short)(" + inner + ")";
-            case CastKind::Trunc8:     return "(char)(" + inner + ")";
+            case CastKind::Trunc8:     return "(unsigned char)(" + inner + ")";
             case CastKind::Trunc16:    return "(short)(" + inner + ")";
             case CastKind::IntToFloat: return "(double)(" + inner + ")";
             case CastKind::FloatToInt: return "(int)(" + inner + ")";
