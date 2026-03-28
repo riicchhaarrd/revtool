@@ -859,6 +859,16 @@ private:
             else if (jmn == "js")                   cmpOp = IROp::Slt;
             else if (jmn == "jns")                  cmpOp = IROp::Sge;
             else cmpOp = IROp::Ne;
+        } else if (isTest) {
+            // test with different operands: condition is (lhs & rhs) vs 0
+            auto andExpr = IRExpr::mkBinary(IROp::And, std::move(lhs), std::move(rhs));
+            lhs = std::move(andExpr);
+            rhs = IRExpr::mkConst(0);
+            if      (jmn == "je"  || jmn == "jz")  cmpOp = IROp::Eq;
+            else if (jmn == "jne" || jmn == "jnz") cmpOp = IROp::Ne;
+            else if (jmn == "js")                   cmpOp = IROp::Slt;
+            else if (jmn == "jns")                  cmpOp = IROp::Sge;
+            else cmpOp = IROp::Ne;
         } else {
             // cmp or sub-based flags
             if      (jmn == "je"  || jmn == "jz")  cmpOp = IROp::Eq;

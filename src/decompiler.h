@@ -1827,18 +1827,25 @@ private:
                     return "0";
                 }
                 // Also inline temps used exactly twice (1 def + 1 use) when def is simple
+                // BUT don't inline if the temp has a declared variable name (v2, v3 etc.)
+                // — using the variable name produces better register allocation matching
                 if (m_tempUseCount[id] == 2) {
-                    auto it = m_tempDef.find(id);
-                    if (it != m_tempDef.end() && it->second) {
-                        auto *def = it->second;
-                        // Inline if the definition is a simple expression
-                        bool isSimple = (def->op == IROp::Var || def->op == IROp::Field ||
-                                        def->op == IROp::Const || def->op == IROp::Load ||
-                                        def->op == IROp::Call || def->op == IROp::String ||
-                                        def->op == IROp::Cast);
-                        if (isSimple) {
-                            std::string inlined = emitExpr(def, negate);
-                            if (!inlined.empty() && inlined != "0") return inlined;
+                    // Check if this temp has a coalesced variable name
+                    std::string varName = tempName(id);
+                    bool hasVarName = (varName.size() >= 2 && varName[0] == 'v' &&
+                                       varName[1] >= '0' && varName[1] <= '9');
+                    if (!hasVarName) {
+                        auto it = m_tempDef.find(id);
+                        if (it != m_tempDef.end() && it->second) {
+                            auto *def = it->second;
+                            bool isSimple = (def->op == IROp::Var || def->op == IROp::Field ||
+                                            def->op == IROp::Const || def->op == IROp::Load ||
+                                            def->op == IROp::Call || def->op == IROp::String ||
+                                            def->op == IROp::Cast);
+                            if (isSimple) {
+                                std::string inlined = emitExpr(def, negate);
+                                if (!inlined.empty() && inlined != "0") return inlined;
+                            }
                         }
                     }
                 }
