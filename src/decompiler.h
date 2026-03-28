@@ -526,7 +526,19 @@ public:
 
     // Remove empty if blocks from output text
     static QString cleanupOutput(const QString &code) {
-        QStringList lines = code.split('\n');
+        // Pre-pass: fix &0->field_X and &(0)->field_X patterns → 0xX
+        QString cleaned = code;
+        cleaned.replace("&0->field_", "0x__F");  // temporary marker
+        cleaned.replace("&(0)->field_", "0x__F");
+        // Fix the marker: "0x__F" followed by hex digits becomes "0x" + hex
+        {
+            int pos = 0;
+            while ((pos = cleaned.indexOf("0x__F", pos)) != -1) {
+                cleaned.remove(pos + 2, 3); // remove "__F"
+                pos += 2;
+            }
+        }
+        QStringList lines = cleaned.split('\n');
         // Pass 1: Remove empty if blocks
         QStringList pass1;
         for (int i = 0; i < lines.size(); ++i) {
@@ -1853,8 +1865,8 @@ private:
             }
 
             case IROp::AddrOf: {
-                // &(0->field_X) = just the offset value
                 auto *inner = e->kids[0].get();
+                // &(0->field_X) = just the offset value
                 if (inner && inner->op == IROp::Field && !inner->kids.empty() &&
                     inner->kids[0]->isConst() && inner->kids[0]->value == 0) {
                     result = std::to_string((int)inner->value);
@@ -1866,8 +1878,19 @@ private:
 
             case IROp::Field: {
                 std::string base = emitExpr(e->kids[0].get());
-                // If base is literal 0 (NULL), emit as offset constant
-                if (e->kids[0] && e->kids[0]->isConst() && e->kids[0]->value == 0) {
+                // If base is literal 0 (NULL or Temp that inlined to "0"), emit as offset constant
+                // Also handle parenthesized zero: "(0)" from sub-expressions
+                {
+                    std::string stripped = base;
+                    while (!stripped.empty() && stripped.front() == '(' && stripped.back() == ')')
+                        stripped = stripped.substr(1, stripped.size() - 2);
+                    if ((e->kids[0] && e->kids[0]->isConst() && e->kids[0]->value == 0) ||
+                        stripped == "0") {
+                        result = std::to_string((int)e->value);
+                        break;
+                    }
+                }
+                if (false) { // dead — handled above
                     result = std::to_string((int)e->value);
                     break;
                 }
