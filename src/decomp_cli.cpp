@@ -96,6 +96,7 @@ int main(int argc, char *argv[]) {
             "  -s <idx>     Decompile source file by index\n"
             "  -a           Decompile all source files\n"
             "  --gcc        Pipe output through gcc to count errors\n"
+            "  --ssa        Enable full SSA pass (experimental)\n"
             "  -q           Quiet: suppress decompiled output (use with --gcc)\n"
         );
         return 1;
@@ -113,6 +114,7 @@ int main(int argc, char *argv[]) {
         else if (strcmp(argv[i], "-F") == 0) doFuncs = true;
         else if (strcmp(argv[i], "-a") == 0) doAll = true;
         else if (strcmp(argv[i], "--gcc") == 0) doGcc = true;
+        else if (strcmp(argv[i], "--ssa") == 0) Decompiler::s_useSSA = true;
         else if (strcmp(argv[i], "-q") == 0) quiet = true;
         else if (strcmp(argv[i], "-f") == 0 && i + 1 < argc)
             funcAddr = strtoul(argv[++i], nullptr, 16);
