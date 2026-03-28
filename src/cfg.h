@@ -523,6 +523,16 @@ private:
 
                         block->children.push_back(std::move(ifNode));
                         cur = convergence;
+                    } else if (convergence >= 0 && trueB == convergence && falseB != convergence &&
+                               falseB >= 0 && falseB < n && !visited[falseB]) {
+                        // true IS convergence — structure false path then continue at convergence
+                        // This handles: if (initialized) goto common_tail; init_code; common_tail:
+                        auto ifNode = StructNode::mkIf(last.expr.get(), true);
+                        std::vector<bool> bodyVisited = visited;
+                        ifNode->children.push_back(structureRegion(falseB, convergence, bodyVisited));
+                        for (int vi = 0; vi < n; ++vi) if (bodyVisited[vi]) visited[vi] = true;
+                        block->children.push_back(std::move(ifNode));
+                        cur = convergence;
                     } else if (trueB >= 0 && trueB < n && visited[trueB] &&
                                falseB >= 0 && falseB < n && !visited[falseB]) {
                         // Early exit: true branch already visited (return/exit block)

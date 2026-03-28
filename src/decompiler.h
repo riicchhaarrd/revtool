@@ -230,8 +230,10 @@ public:
                 // Check if this global name appears in the function bodies
                 if (body.find(name) != std::string::npos) {
                     emittedGlobals.insert(name);
-                    out += QString::fromStdString(
-                        "extern " + types.formatDecl(gvar->typeRef, name)) + ";\n";
+                    // Emit as initialized definition for direct addressing
+                    // (= 0 forces .data instead of .comm, enabling direct absolute addressing)
+                    std::string decl = types.formatDecl(gvar->typeRef, name);
+                    out += QString::fromStdString(decl + " = 0") + ";\n";
                     anyExterns = true;
                 }
             }
