@@ -531,6 +531,34 @@ public:
         // &0->field_X → 0xX
         cleaned.replace("&0->field_", "0x__F");
         cleaned.replace("&(0)->field_", "0x__F");
+        // &VAR->field_1 → (VAR + 1) — general case for non-pointer bases
+        {
+            // Use a simple scan for &WORD->field_HEX patterns
+            int pos = 0;
+            while ((pos = cleaned.indexOf("&", pos)) != -1) {
+                // Check if followed by IDENTIFIER->field_HEX
+                int start = pos + 1;
+                int nameEnd = start;
+                while (nameEnd < cleaned.size() && (cleaned[nameEnd].isLetterOrNumber() || cleaned[nameEnd] == '_'))
+                    ++nameEnd;
+                if (nameEnd > start && nameEnd + 8 < cleaned.size() &&
+                    cleaned.mid(nameEnd, 8) == "->field_") {
+                    int hexStart = nameEnd + 8;
+                    int hexEnd = hexStart;
+                    while (hexEnd < cleaned.size() && QString("0123456789ABCDEFabcdef").contains(cleaned[hexEnd]))
+                        ++hexEnd;
+                    if (hexEnd > hexStart) {
+                        QString varName = cleaned.mid(start, nameEnd - start);
+                        QString hexOff = cleaned.mid(hexStart, hexEnd - hexStart);
+                        QString replacement = "(" + varName + " + 0x" + hexOff + ")";
+                        cleaned.replace(pos, hexEnd - pos, replacement);
+                        pos += replacement.size();
+                        continue;
+                    }
+                }
+                ++pos;
+            }
+        }
         // Fix the marker: "0x__F" followed by hex digits becomes "0x" + hex
         {
             int pos = 0;
