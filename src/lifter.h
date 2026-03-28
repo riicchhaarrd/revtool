@@ -2076,7 +2076,7 @@ private:
 
     // Helper: extract a readable string from an IR expr (for intrinsic text)
     static std::string varText(std::unique_ptr<IRExpr> e) {
-        if (!e) return "?";
+        if (!e) return "0";
         if (e->op == IROp::Var) return e->name;
         if (e->op == IROp::String) return e->name;
         if (e->op == IROp::FuncRef) return e->name;
@@ -2087,9 +2087,9 @@ private:
         }
         if (e->op == IROp::Temp) return "t" + std::to_string(e->value);
         if (e->op == IROp::Field) {
-            std::string base = e->kids.empty() ? "?" : varText(std::move(e->kids[0]));
+            std::string base = e->kids.empty() ? "0" : varText(std::move(e->kids[0]));
             return base + "->" + e->name;
         }
-        return "?";
+        return "0 /* unknown */";
     }
 };

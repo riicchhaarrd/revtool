@@ -237,7 +237,7 @@ public:
         // (globals resolved from nlist but not in STABS globals table)
         {
             std::string body = funcBodies.toStdString();
-            // Collect all param/local names across all functions in this file
+            // Collect all known names (params, locals, globals, functions, types)
             std::set<std::string> knownNames = emittedGlobals;
             for (size_t fi : sorted) {
                 auto &fn = mf.stabsFunctions()[fi];
@@ -245,31 +245,48 @@ public:
                 for (auto &p : fn.params) knownNames.insert(p.name);
                 for (auto &l : fn.locals) knownNames.insert(l.name);
             }
-            // Find assignment targets that look like globals (name = expr;)
-            // Pattern: starts at indent, name followed by =, ; at end
+            // C keywords to exclude
+            static const std::set<std::string> kw = {
+                "if","else","while","for","do","return","switch","case","break",
+                "continue","default","goto","int","char","void","float","double",
+                "unsigned","long","short","const","static","struct","enum","typedef",
+                "sizeof","extern","NULL","true","false","inline","register","volatile",
+                "signed","union","auto","this","memcpy","memcmp","memset","strlen",
+                "memchr","printf","sprintf","fprintf","snprintf","strcmp","strcpy",
+                "strcat","strncpy","strncmp","atoi","atof","free","malloc"
+            };
+            // Scan function bodies for identifiers that look like globals
             bool anyUndeclared = false;
             std::set<std::string> checked;
-            size_t pos = 0;
-            while ((pos = body.find(" = ", pos)) != std::string::npos) {
-                // Walk backwards to find the variable name
-                size_t nameEnd = pos;
-                size_t nameStart = nameEnd;
-                while (nameStart > 0 && (isalnum(body[nameStart-1]) || body[nameStart-1] == '_'))
-                    --nameStart;
-                std::string name = body.substr(nameStart, nameEnd - nameStart);
-                pos += 3;
-                if (name.empty() || name[0] == 'v' || name[0] == 't' || name.find("var_") == 0 ||
-                    name.find("arg_") == 0 || name.find("bb_") == 0 || name.find("g_") == 0)
-                    continue;
-                if (knownNames.count(name) || checked.count(name)) continue;
-                checked.insert(name);
-                // Verify it appears as a standalone identifier (not inside a string/comment)
-                // Simple heuristic: if it also appears as "name =" or "name)" it's a real var
-                if (body.find(name + " =") != std::string::npos ||
-                    body.find("= " + name) != std::string::npos) {
-                    knownNames.insert(name);
-                    out += QString::fromStdString("int " + name + ";\n");
-                    anyUndeclared = true;
+            for (size_t i = 0; i < body.size(); ++i) {
+                if (isalpha(body[i]) || body[i] == '_') {
+                    size_t start = i;
+                    while (i < body.size() && (isalnum(body[i]) || body[i] == '_')) ++i;
+                    std::string name = body.substr(start, i - start);
+                    // Skip temps, vars, short names, keywords
+                    if (name.size() < 3) continue;
+                    if (name[0] == 'v' && name.size() <= 4 && isdigit(name[1])) continue;
+                    if (name[0] == 't' && isdigit(name[1])) continue;
+                    if (name.find("var_") == 0 || name.find("arg_") == 0 ||
+                        name.find("bb_") == 0 || name.find("g_") == 0 ||
+                        name.find("field_") == 0) continue;
+                    if (kw.count(name) || knownNames.count(name) || checked.count(name)) continue;
+                    checked.insert(name);
+                    // Only declare if followed by usage context (not inside string/type/label)
+                    bool isUsed = (body.find(name + " =") != std::string::npos ||
+                                   body.find("= " + name) != std::string::npos ||
+                                   body.find(": " + name) != std::string::npos ||
+                                   body.find("(" + name + ")") != std::string::npos ||
+                                   body.find("(" + name + ",") != std::string::npos ||
+                                   body.find(", " + name + ")") != std::string::npos ||
+                                   body.find(", " + name + ",") != std::string::npos);
+                    // Exclude function calls (name followed by '(')
+                    bool isFunc = (body.find(name + "(") != std::string::npos);
+                    if (isUsed && !isFunc) {
+                        knownNames.insert(name);
+                        out += QString::fromStdString("int " + name + ";\n");
+                        anyUndeclared = true;
+                    }
                 }
             }
             if (anyUndeclared) out += "\n";
@@ -1888,19 +1905,32 @@ private:
                     if (baseType != NullType) {
                         TypeRef structRef = m_types.getPointedStruct(baseType);
                         if (structRef != NullType) {
-                            // Check if there's a real field at this offset
-                            auto *field = m_types.findFieldAtOffset(structRef, (int)e->value);
-                            if (!field || field->name.empty() || field->name[0] == '!')
-                                fieldValid = false;
+                            // Check if the struct has ANY fields at all
+                            auto *st = m_types.resolveType(structRef);
+                            if (st && st->fields.empty()) {
+                                fieldValid = false; // empty struct
+                            } else {
+                                auto *field = m_types.findFieldAtOffset(structRef, (int)e->value);
+                                if (!field || field->name.empty() || field->name[0] == '!')
+                                    fieldValid = false;
+                            }
+                        } else {
+                            // Pointer to forward-declared/incomplete struct
+                            fieldValid = false;
                         }
                     } else {
                         // No type info at all — use cast-based access for synthetic fields
                         fieldValid = false;
                     }
                 }
-                // Always use arrow notation for field access — more readable
-                // (struct definitions will include synthetic fields as needed)
-                result = base + "->" + e->name;
+                if (isSynthField && !fieldValid) {
+                    // Struct is empty/forward-declared — use cast-based pointer arithmetic
+                    int off = (int)e->value;
+                    result = "*(int *)((char *)" + base + " + 0x" +
+                        ([&]{ char buf[16]; snprintf(buf, sizeof(buf), "%X", off); return std::string(buf); })() + ")";
+                } else {
+                    result = base + "->" + e->name;
+                }
                 break;
             }
 
@@ -2111,11 +2141,14 @@ private:
                 break;
             }
 
-            case IROp::Ternary:
-                result = "(" + emitExpr(e->kids[0].get()) + " ? " +
-                         emitExpr(e->kids[1].get()) + " : " +
-                         emitExpr(e->kids[2].get()) + ")";
+            case IROp::Ternary: {
+                std::string cond = (e->kids.size() > 0) ? emitExpr(e->kids[0].get()) : "";
+                std::string tval = (e->kids.size() > 1) ? emitExpr(e->kids[1].get()) : "0";
+                std::string fval = (e->kids.size() > 2) ? emitExpr(e->kids[2].get()) : "0";
+                if (cond.empty()) cond = "0";
+                result = "(" + cond + " ? " + tval + " : " + fval + ")";
                 break;
+            }
 
             case IROp::Call: {
                 result = cName(e->name) + "(";
