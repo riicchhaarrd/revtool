@@ -530,7 +530,20 @@ public:
 
     // Remove empty if blocks from output text
     static QString cleanupOutput(const QString &code) {
-        QStringList lines = code.split('\n');
+        // Pre-pass: fix &EXPR->field_X patterns → (EXPR + 0xX)
+        QString cleaned = code;
+        // &0->field_X → 0xX
+        cleaned.replace("&0->field_", "0x__F");
+        cleaned.replace("&(0)->field_", "0x__F");
+        // Fix the marker: "0x__F" followed by hex digits becomes "0x" + hex
+        {
+            int pos = 0;
+            while ((pos = cleaned.indexOf("0x__F", pos)) != -1) {
+                cleaned.remove(pos + 2, 3); // remove "__F"
+                pos += 2;
+            }
+        }
+        QStringList lines = cleaned.split('\n');
         // Pass 1: Remove empty if blocks
         QStringList pass1;
         for (int i = 0; i < lines.size(); ++i) {
@@ -539,6 +552,19 @@ public:
                 lines[i].trimmed().endsWith("{") &&
                 lines[i+1].trimmed() == "}") {
                 ++i; continue;
+            }
+            // Fix: while (cond) { return/break; } → if (cond) { return/break; }
+            if (i + 2 < lines.size() &&
+                lines[i].trimmed().startsWith("while (") &&
+                lines[i].trimmed().endsWith("{") &&
+                (lines[i+1].trimmed().startsWith("return ") || lines[i+1].trimmed() == "break;") &&
+                lines[i+2].trimmed() == "}") {
+                QString fixed = lines[i];
+                fixed.replace("while (", "if (");
+                pass1.append(fixed);
+                pass1.append(lines[i+1]);
+                pass1.append(lines[i+2]);
+                i += 2; continue;
             }
             pass1.append(lines[i]);
         }
@@ -1516,6 +1542,15 @@ private:
             case IRStmtKind::VarSet: {
                 std::string val = stmt.expr ? emitExpr(stmt.expr.get()) : "0";
                 std::string dest = stmt.destVar;
+                // Suppress parameter slot reuse when assigning a string literal to a param
+                // (clear indicator of Com_Error/Com_Printf call argument setup)
+                {
+                    bool isParam = false;
+                    for (auto &p : m_func.params)
+                        if (p.name == dest) { isParam = true; break; }
+                    if (isParam && stmt.expr && stmt.expr->op == IROp::String)
+                        break; // suppress string-to-param assignment
+                }
                 // Suppress dead stores to 'this' from register reuse
                 if (dest == "this" && stmt.expr) {
                     bool bogus = false;
@@ -1735,6 +1770,22 @@ private:
                     // Inlining failed — emit 0 as safe fallback
                     return "0";
                 }
+                // Also inline temps used exactly twice (1 def + 1 use) when def is simple
+                if (m_tempUseCount[id] == 2) {
+                    auto it = m_tempDef.find(id);
+                    if (it != m_tempDef.end() && it->second) {
+                        auto *def = it->second;
+                        // Inline if the definition is a simple expression
+                        bool isSimple = (def->op == IROp::Var || def->op == IROp::Field ||
+                                        def->op == IROp::Const || def->op == IROp::Load ||
+                                        def->op == IROp::Call || def->op == IROp::String ||
+                                        def->op == IROp::Cast);
+                        if (isSimple) {
+                            std::string inlined = emitExpr(def, negate);
+                            if (!inlined.empty() && inlined != "0") return inlined;
+                        }
+                    }
+                }
                 // Use coalesced variable name if available
                 result = tempName(id);
                 // If we'd emit a raw "tN" name, force-declare it
@@ -1861,11 +1912,24 @@ private:
             }
 
             case IROp::AddrOf: {
-                // &(0->field_X) = just the offset value
                 auto *inner = e->kids[0].get();
-                if (inner && inner->op == IROp::Field && !inner->kids.empty() &&
-                    inner->kids[0]->isConst() && inner->kids[0]->value == 0) {
-                    result = std::to_string((int)inner->value);
+                if (inner && inner->op == IROp::Field && !inner->kids.empty()) {
+                    // &(base->field_X) where field_X is synthetic = base + offset
+                    if (inner->name.find("field_") == 0) {
+                        std::string base = emitExpr(inner->kids[0].get());
+                        int off = (int)inner->value;
+                        // Strip parens from base for cleaner output
+                        std::string stripped = base;
+                        while (!stripped.empty() && stripped.front() == '(' && stripped.back() == ')')
+                            stripped = stripped.substr(1, stripped.size() - 2);
+                        if (stripped == "0") {
+                            result = std::to_string(off);
+                        } else {
+                            result = "(" + base + " + " + std::to_string(off) + ")";
+                        }
+                    } else {
+                        result = "&" + emitExpr(inner);
+                    }
                 } else {
                     result = "&" + emitExpr(inner);
                 }
@@ -1874,8 +1938,19 @@ private:
 
             case IROp::Field: {
                 std::string base = emitExpr(e->kids[0].get());
-                // If base is literal 0 (NULL), emit as offset constant
-                if (e->kids[0] && e->kids[0]->isConst() && e->kids[0]->value == 0) {
+                // If base is literal 0 (NULL or Temp that inlined to "0"), emit as offset constant
+                // Also handle parenthesized zero: "(0)" from sub-expressions
+                {
+                    std::string stripped = base;
+                    while (!stripped.empty() && stripped.front() == '(' && stripped.back() == ')')
+                        stripped = stripped.substr(1, stripped.size() - 2);
+                    if ((e->kids[0] && e->kids[0]->isConst() && e->kids[0]->value == 0) ||
+                        stripped == "0") {
+                        result = std::to_string((int)e->value);
+                        break;
+                    }
+                }
+                if (false) { // dead — handled above
                     result = std::to_string((int)e->value);
                     break;
                 }
