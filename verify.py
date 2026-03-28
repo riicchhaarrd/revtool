@@ -112,10 +112,50 @@ def disasm_recompiled(obj_path, func_name):
 
 # ── Normalization for comparison ──
 
+
+# Mnemonic aliases: different encodings for the same instruction
+MNEMONIC_ALIASES = {
+    # Conditional jump aliases
+    'jnae': 'jb',   'jc': 'jb',
+    'jnb': 'jae',   'jnc': 'jae',
+    'jna': 'jbe',
+    'jnbe': 'ja',
+    'jnge': 'jl',
+    'jnl': 'jge',
+    'jng': 'jle',
+    'jnle': 'jg',
+    'je': 'jz',
+    'jne': 'jnz',
+    # SETcc aliases
+    'setnae': 'setb',  'setc': 'setb',
+    'setnb': 'setae',  'setnc': 'setae',
+    'setna': 'setbe',
+    'setnbe': 'seta',
+    'setnge': 'setl',
+    'setnl': 'setge',
+    'setng': 'setle',
+    'setnle': 'setg',
+    'sete': 'setz',
+    'setne': 'setnz',
+    # CMOVcc aliases
+    'cmovnae': 'cmovb',  'cmovc': 'cmovb',
+    'cmovnb': 'cmovae',  'cmovnc': 'cmovae',
+    'cmovna': 'cmovbe',
+    'cmovnbe': 'cmova',
+    'cmovnge': 'cmovl',
+    'cmovnl': 'cmovge',
+    'cmovng': 'cmovle',
+    'cmovnle': 'cmovg',
+    'cmove': 'cmovz',
+    'cmovne': 'cmovnz',
+}
+
+
 def normalize_insn(mnemonic, operands):
     """Normalize an instruction for comparison (strip addresses, constants)."""
     # Normalize mnemonic aliases
     mn = mnemonic.lower()
+    mn = MNEMONIC_ALIASES.get(mn, mn)
 
     # Normalize operands: replace absolute addresses with <addr>
     ops = operands
@@ -129,9 +169,55 @@ def normalize_insn(mnemonic, operands):
     return mn, ops
 
 
+def normalize_insn_stream(insns):
+    """Normalize instruction stream for semantic equivalences.
+
+    Handles multi-instruction patterns that are semantically identical:
+      - test reg, reg  ->  cmp reg, 0
+      - xor reg, reg   ->  mov reg, 0
+      - mov esp, ebp; pop ebp  ->  leave
+    """
+    result = []
+    i = 0
+    while i < len(insns):
+        addr, mn, ops = insns[i]
+        mn_low = mn.lower()
+        ops_parts = [x.strip() for x in ops.split(',')]
+
+        # test reg, reg -> cmp reg, 0
+        if mn_low == 'test' and len(ops_parts) == 2 and ops_parts[0] == ops_parts[1]:
+            result.append((addr, 'cmp', f'{ops_parts[0]}, 0'))
+            i += 1
+            continue
+
+        # xor reg, reg -> mov reg, 0
+        if mn_low == 'xor' and len(ops_parts) == 2 and ops_parts[0] == ops_parts[1]:
+            result.append((addr, 'mov', f'{ops_parts[0]}, 0'))
+            i += 1
+            continue
+
+        # mov esp, ebp; pop ebp -> leave
+        if (mn_low == 'mov' and
+            ops.lower().replace(' ', '') in ('esp,ebp', '%esp,%ebp') and
+            i + 1 < len(insns) and
+            insns[i + 1][1].lower() == 'pop' and
+            insns[i + 1][2].strip().lower() in ('ebp', '%ebp')):
+            result.append((addr, 'leave', ''))
+            i += 2
+            continue
+
+        result.append(insns[i])
+        i += 1
+    return result
+
+
 def compare_functions(orig_insns, recomp_insns, func_name):
     """Compare two instruction streams and produce a report."""
-    # Normalize both
+    # Apply semantic normalization (multi-instruction patterns)
+    orig_insns = normalize_insn_stream(orig_insns)
+    recomp_insns = normalize_insn_stream(recomp_insns)
+
+    # Normalize both (single-instruction aliases + operand normalization)
     orig_norm = [(normalize_insn(m, o)) for _, m, o in orig_insns]
     recomp_norm = [(normalize_insn(m, o)) for _, m, o in recomp_insns]
 

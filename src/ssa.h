@@ -77,7 +77,15 @@ public:
                     hasAlready.insert(y);
 
                     // Insert phi at start of block y
-                    int phiTemp = func.newTemp();
+                    // Propagate type from existing definitions of this register
+                    TypeRef phiType = NullType;
+                    for (auto &[tid, reg2] : func.tempToReg) {
+                        if (reg2 == reg && func.tempType(tid) != NullType) {
+                            phiType = func.tempType(tid);
+                            break;
+                        }
+                    }
+                    int phiTemp = func.newTemp(phiType);
                     func.tempToReg[phiTemp] = reg;
 
                     // Build phi sources from predecessors
@@ -127,8 +135,10 @@ public:
                     if (predId < 0 || predId >= (int)func.blocks.size()) continue;
                     auto &pred = func.blocks[predId];
                     // Insert copy before the terminal statement (branch/jump)
+                    TypeRef copyType = func.tempType(phi.destTemp);
+                    if (copyType == NullType) copyType = func.tempType(srcTemp);
                     auto copy = IRStmt::mkAssign(phi.destTemp,
-                        IRExpr::mkTemp(srcTemp, func.tempType(srcTemp)));
+                        IRExpr::mkTemp(srcTemp, copyType), copyType);
                     if (!pred.stmts.empty()) {
                         auto k = pred.stmts.back().kind;
                         if (k == IRStmtKind::Branch || k == IRStmtKind::Jump ||

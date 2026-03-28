@@ -5,6 +5,7 @@
 #include "ssa.h"
 #include "type_infer.h"
 #include "coalesce.h"
+#include "simplify.h"
 #include "macho.h"
 #include <QString>
 #include <QProcess>
@@ -22,19 +23,27 @@
 
 class Decompiler {
 public:
+    static inline bool s_useSSA = false;
+
     // Decompile a single function
     static QString decompile(const MachOFile &mf, uint32_t funcAddr, bool format = true) {
         Lifter lifter(mf);
         IRFunc func = lifter.liftFunction(funcAddr);
         if (func.blocks.empty()) return "/* could not decompile */\n";
 
-        // Type Inference + Variable Coalescing
-        // We compute idom for dominance info (used by coalescer for liveness),
-        // run type inference on the raw IR, and coalesce variables.
-        // SSA phi insertion is skipped to avoid IR mutation that could break
-        // the emitter's copy-propagation/inlining assumptions.
-        SSABuilder().computeIdomOnly(func);
-        TypeInferer().infer(func, mf.typeTable(), &mf);
+        // Analysis + optimization pipeline
+        if (s_useSSA) {
+            SSABuilder ssa;
+            ssa.buildSSA(func);
+            IRSimplifier().simplify(func);
+            TypeInferer().infer(func, mf.typeTable(), &mf);
+            ssa.destroySSA(func);
+            IRSimplifier().simplify(func);  // clean up copies from destroySSA
+        } else {
+            SSABuilder().computeIdomOnly(func);
+            IRSimplifier().simplify(func);
+            TypeInferer().infer(func, mf.typeTable(), &mf);
+        }
         VarCoalescer().coalesce(func, mf.typeTable());
 
         CfgStructurer structurer;
