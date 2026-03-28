@@ -2090,6 +2090,6 @@ private:
             std::string base = e->kids.empty() ? "0" : varText(std::move(e->kids[0]));
             return base + "->" + e->name;
         }
-        return "0 /* unknown */";
+        return "0";
     }
 };

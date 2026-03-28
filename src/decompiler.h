@@ -512,6 +512,9 @@ public:
             "typedef struct centity_s centity_t;\n"
             "typedef struct cgs_s cgs_t;\n"
             "typedef struct snapshot_s snapshot_t;\n"
+            "typedef struct client_s client_t;\n"
+            "typedef int *JSAMPROW;\n"
+            "typedef struct ShadowCookieGlob_s { int _[64]; } ShadowCookieGlob;\n"
             "\n"
         );
     }
@@ -1900,27 +1903,20 @@ private:
                 bool isSynthField = (e->name.find("field_") == 0);
                 bool fieldValid = true;
                 if (isSynthField) {
-                    // Verify the struct type actually has a field at this offset
+                    // For synthetic field_X access, check if the struct actually has
+                    // a real field at this offset. If not, use cast-based access.
+                    fieldValid = false; // assume invalid unless proven otherwise
                     TypeRef baseType = exprType(e->kids[0].get());
                     if (baseType != NullType) {
                         TypeRef structRef = m_types.getPointedStruct(baseType);
                         if (structRef != NullType) {
-                            // Check if the struct has ANY fields at all
                             auto *st = m_types.resolveType(structRef);
-                            if (st && st->fields.empty()) {
-                                fieldValid = false; // empty struct
-                            } else {
+                            if (st && !st->fields.empty()) {
                                 auto *field = m_types.findFieldAtOffset(structRef, (int)e->value);
-                                if (!field || field->name.empty() || field->name[0] == '!')
-                                    fieldValid = false;
+                                if (field && !field->name.empty() && field->name[0] != '!')
+                                    fieldValid = true; // real field exists
                             }
-                        } else {
-                            // Pointer to forward-declared/incomplete struct
-                            fieldValid = false;
                         }
-                    } else {
-                        // No type info at all — use cast-based access for synthetic fields
-                        fieldValid = false;
                     }
                 }
                 if (isSynthField && !fieldValid) {
