@@ -532,11 +532,11 @@ private:
                         // The true branch is the convergence point itself
                         block->children.push_back(std::move(ifNode));
                         cur = convergence;
-                    } else if (convergence >= 0 && trueB == convergence && falseB != convergence) {
-                        // if (cond) { falseB_body } — false path has the body, true IS convergence
-                        auto ifNode = StructNode::mkIf(last.expr.get(), true);
+                    } else if (convergence >= 0 && falseB == convergence && trueB != convergence) {
+                        // false IS convergence — the true path has the body
+                        auto ifNode = StructNode::mkIf(last.expr.get(), false);
                         std::vector<bool> bodyVisited = visited;
-                        ifNode->children.push_back(structureRegion(falseB, convergence, bodyVisited));
+                        ifNode->children.push_back(structureRegion(trueB, convergence, bodyVisited));
                         for (int vi = 0; vi < n; ++vi) if (bodyVisited[vi]) visited[vi] = true;
                         block->children.push_back(std::move(ifNode));
                         cur = convergence;

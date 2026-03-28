@@ -535,6 +535,34 @@ public:
         // &0->field_X → 0xX
         cleaned.replace("&0->field_", "0x__F");
         cleaned.replace("&(0)->field_", "0x__F");
+        // &VAR->field_1 → (VAR + 1) — general case for non-pointer bases
+        {
+            // Use a simple scan for &WORD->field_HEX patterns
+            int pos = 0;
+            while ((pos = cleaned.indexOf("&", pos)) != -1) {
+                // Check if followed by IDENTIFIER->field_HEX
+                int start = pos + 1;
+                int nameEnd = start;
+                while (nameEnd < cleaned.size() && (cleaned[nameEnd].isLetterOrNumber() || cleaned[nameEnd] == '_'))
+                    ++nameEnd;
+                if (nameEnd > start && nameEnd + 8 < cleaned.size() &&
+                    cleaned.mid(nameEnd, 8) == "->field_") {
+                    int hexStart = nameEnd + 8;
+                    int hexEnd = hexStart;
+                    while (hexEnd < cleaned.size() && QString("0123456789ABCDEFabcdef").contains(cleaned[hexEnd]))
+                        ++hexEnd;
+                    if (hexEnd > hexStart) {
+                        QString varName = cleaned.mid(start, nameEnd - start);
+                        QString hexOff = cleaned.mid(hexStart, hexEnd - hexStart);
+                        QString replacement = "(" + varName + " + 0x" + hexOff + ")";
+                        cleaned.replace(pos, hexEnd - pos, replacement);
+                        pos += replacement.size();
+                        continue;
+                    }
+                }
+                ++pos;
+            }
+        }
         // Fix the marker: "0x__F" followed by hex digits becomes "0x" + hex
         {
             int pos = 0;
@@ -1127,7 +1155,8 @@ private:
                     if (k == IRStmtKind::Branch || k == IRStmtKind::Jump ||
                         k == IRStmtKind::Label || k == IRStmtKind::Phi)
                         continue;
-                    if (k == IRStmtKind::Assign && m_tempUseCount[bb.stmts[i].destTemp] <= 1)
+                    if (k == IRStmtKind::Assign && m_tempUseCount[bb.stmts[i].destTemp] <= 1 &&
+                        !(bb.stmts[i].expr && bb.stmts[i].expr->op == IROp::Call))
                         continue; // would be inlined, not emitted
                     return true;
                 }
@@ -1362,7 +1391,8 @@ private:
                         if (s.kind != IRStmtKind::Jump && s.kind != IRStmtKind::Branch &&
                             s.kind != IRStmtKind::Label) {
                             // Check if this is a suppressed assign
-                            if (s.kind == IRStmtKind::Assign && m_tempUseCount[s.destTemp] <= 1)
+                            if (s.kind == IRStmtKind::Assign && m_tempUseCount[s.destTemp] <= 1 &&
+                                !(s.expr && s.expr->op == IROp::Call))
                                 continue;
                             allEmpty = false; break;
                         }
@@ -1410,8 +1440,15 @@ private:
             switch (stmt.kind) {
             case IRStmtKind::Assign: {
                 std::string rhs = stmt.expr ? emitExpr(stmt.expr.get()) : "0";
-                // Skip assignment for inlined or propagated temps
-                if (m_tempUseCount[stmt.destTemp] <= 1) return;
+                // Skip assignment for inlined temps — BUT keep calls with truly unused results
+                if (m_tempUseCount[stmt.destTemp] <= 1) {
+                    if (stmt.expr && stmt.expr->op == IROp::Call &&
+                        m_tempUseCount[stmt.destTemp] == 0) {
+                        // Return value truly unused — emit as standalone call
+                        out += pad(indent) + QString::fromStdString(rhs) + ";\n";
+                    }
+                    return;
+                }
                 if (m_copyPropagated.count(stmt.destTemp)) return;
                 std::string lhs = tempName(stmt.destTemp);
                 // Skip self-assignment (v = v) and trivial alias (v = param)
