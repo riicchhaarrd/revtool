@@ -200,6 +200,11 @@ public:
                     cname.replace(p, 2, "_"); }
                 { size_t p = 0; while ((p = cname.find("~", p)) != std::string::npos)
                     cname.replace(p, 1, "dtor_"); }
+                { size_t p = 0; while ((p = cname.find(" ", p)) != std::string::npos)
+                    cname.replace(p, 1, "_"); }
+                // Skip names with C++ template characters
+                if (cname.find('<') != std::string::npos || cname.find('>') != std::string::npos)
+                    continue;
                 std::string retStr = fn.returnType != NullType ?
                     types.formatType(fn.returnType) : "int";
                 out += QString::fromStdString("static " + retStr + " " + cname + "();\n");
@@ -830,7 +835,7 @@ private:
                         if (sit != m_tempStructPtr.end() && sit->second != NullType)
                             ttype = m_types.formatType(sit->second);
                         else if (m_pointerTemps.count(id) && ttype == "int")
-                            ttype = "int *";
+                            ttype = "char *";
                     }
                     // Strip const from temp declarations (temps are always assignable)
                     if (ttype.substr(0, 6) == "const ") ttype = ttype.substr(6);
@@ -1903,21 +1908,10 @@ private:
                 bool isSynthField = (e->name.find("field_") == 0);
                 bool fieldValid = true;
                 if (isSynthField) {
-                    // For synthetic field_X access, check if the struct actually has
-                    // a real field at this offset. If not, use cast-based access.
-                    fieldValid = false; // assume invalid unless proven otherwise
-                    TypeRef baseType = exprType(e->kids[0].get());
-                    if (baseType != NullType) {
-                        TypeRef structRef = m_types.getPointedStruct(baseType);
-                        if (structRef != NullType) {
-                            auto *st = m_types.resolveType(structRef);
-                            if (st && !st->fields.empty()) {
-                                auto *field = m_types.findFieldAtOffset(structRef, (int)e->value);
-                                if (field && !field->name.empty() && field->name[0] != '!')
-                                    fieldValid = true; // real field exists
-                            }
-                        }
-                    }
+                    // Synthetic field_X: ALWAYS use cast-based access.
+                    // The struct definition may not have a field at this exact offset,
+                    // or the field may be at a different sub-offset within a larger field.
+                    fieldValid = false;
                 }
                 if (isSynthField && !fieldValid) {
                     // Struct is empty/forward-declared — use cast-based pointer arithmetic
@@ -2221,7 +2215,8 @@ private:
                 if (sit != m_tempStructPtr.end() && sit->second != NullType)
                     return m_types.formatType(sit->second);
             }
-            // If this temp is used as a pointer (dereferenced), declare as int*
+            // If this temp is used as a pointer (dereferenced), declare as char*
+            // (char* is compatible with pointer arithmetic and casting)
             if (m_pointerTemps.count(id)) return "int *";
             return "int";
         }
