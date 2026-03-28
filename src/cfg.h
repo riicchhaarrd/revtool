@@ -533,6 +533,14 @@ private:
                         for (int vi = 0; vi < n; ++vi) if (bodyVisited[vi]) visited[vi] = true;
                         block->children.push_back(std::move(ifNode));
                         cur = convergence;
+                        // Unvisit convergence if it's a simple return block
+                        // (avoids skipping the common tail code)
+                        if (cur >= 0 && cur < n) {
+                            auto &convBB = m_func->blocks[cur];
+                            bool isSimple = !convBB.stmts.empty() &&
+                                convBB.stmts.back().kind == IRStmtKind::Return;
+                            if (isSimple) visited[cur] = false;
+                        }
                     } else if (trueB >= 0 && trueB < n && visited[trueB] &&
                                falseB >= 0 && falseB < n && !visited[falseB]) {
                         // Early exit: true branch already visited (return/exit block)
@@ -549,6 +557,13 @@ private:
                         for (int vi = 0; vi < n; ++vi) if (bodyVisited[vi]) visited[vi] = true;
                         block->children.push_back(std::move(ifNode));
                         cur = convergence;
+                        // Unvisit convergence if it's a simple return block
+                        if (cur >= 0 && cur < n) {
+                            auto &convBB = m_func->blocks[cur];
+                            bool isSimple = !convBB.stmts.empty() &&
+                                convBB.stmts.back().kind == IRStmtKind::Return;
+                            if (isSimple) visited[cur] = false;
+                        }
                     } else if (falseB == cur + 1 || (falseB >= 0 && falseB < n && !visited[falseB])) {
                         // if (cond) { trueB } — false falls through
                         auto ifNode = StructNode::mkIf(last.expr.get(), false);
