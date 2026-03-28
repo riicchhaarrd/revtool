@@ -255,6 +255,31 @@ public:
             }
         }
 
+        // ── Pass 3b: detect float-returning calls by post-call FPU usage ─
+        // If the instruction after a call reads ST(0) (fstp, fst, fadd, etc.),
+        // the call returns float/double via the x87 FPU stack.
+        m_floatReturnAddrs.clear();
+        for (size_t i = 0; i + 1 < funcEndIdx; ++i) {
+            if (std::string(insn[i].mnemonic) != "call") continue;
+            std::string nextMn = insn[i+1].mnemonic;
+            // Any FPU instruction that reads ST(0) implies float return
+            if (nextMn == "fstp" || nextMn == "fst" || nextMn == "fmul" ||
+                nextMn == "fmulp" || nextMn == "fadd" || nextMn == "faddp" ||
+                nextMn == "fsub" || nextMn == "fsubp" || nextMn == "fdiv" ||
+                nextMn == "fdivp" || nextMn == "fxch" || nextMn == "fchs" ||
+                nextMn == "fcomp" || nextMn == "fcompp" || nextMn == "fucomip" ||
+                nextMn == "fucomp" || nextMn == "fucompp" || nextMn == "fild" ||
+                nextMn == "fabs") {
+                // Mark the call target address as float-returning
+                if (insn[i].detail && insn[i].detail->x86.op_count >= 1 &&
+                    insn[i].detail->x86.operands[0].type == X86_OP_IMM) {
+                    m_floatReturnAddrs.insert((uint32_t)insn[i].detail->x86.operands[0].imm);
+                }
+                // Also mark by instruction address for indirect calls
+                m_floatRetCallSites.insert(insn[i].address);
+            }
+        }
+
         // ── Pass 4: build param/local offset maps ───────────────────
         m_paramByOffset.clear();
         m_localByOffset.clear();
@@ -527,6 +552,8 @@ private:
     std::map<int, const StabsTypedVar*> m_localByOffset;
     std::map<x86_reg, const StabsTypedVar*> m_regParamRegs;  // register params (regparm)
     std::set<x86_reg> m_regParamInjected;  // which reg params we've already injected
+    std::set<uint32_t> m_floatReturnAddrs;   // call target addresses known to return float
+    std::set<uint32_t> m_floatRetCallSites;  // instruction addresses of float-returning calls
 
     // Register → temp mapping (current state)
     std::map<x86_reg, int> m_regTemps;
@@ -1547,25 +1574,15 @@ private:
                     if (fmtRet == "void") isVoid = true;
                 }
             }
-            // Known C library / math functions that return float/double via ST(0)
-            // but may not have STABS entries
+            // Detect float return from pre-scan: if the instruction after this
+            // call reads ST(0) (fstp, fst, etc.), the call returns float.
             if (!isFloatRet && !isVoid) {
-                static const std::set<std::string> floatFuncs = {
-                    "sinf", "cosf", "tanf", "asinf", "acosf", "atanf", "atan2f",
-                    "sqrtf", "fabsf", "floorf", "ceilf", "roundf", "truncf",
-                    "fmodf", "powf", "logf", "log10f", "expf", "exp2f",
-                    "fminf", "fmaxf", "hypotf", "cbrtf",
-                    "sin", "cos", "tan", "asin", "acos", "atan", "atan2",
-                    "sqrt", "fabs", "floor", "ceil", "round", "trunc",
-                    "fmod", "pow", "log", "log10", "exp", "exp2",
-                    "fmin", "fmax", "hypot", "cbrt",
-                    "AngleDelta", "AngleNormalize180", "AngleNormalize180Accurate",
-                    "AngleNormalize360", "AngleSubtract",
-                    "Vec2Normalize", "Vec3Normalize", "Vec3NormalizeTo",
-                    "VectorLength", "VectorNormalize",
-                    "PitchForYawOnNormal",
-                };
-                if (floatFuncs.count(target)) isFloatRet = true;
+                if (m_floatRetCallSites.count(in.address))
+                    isFloatRet = true;
+                // Also check by target address (covers all call sites to this func)
+                if (o[0].type == X86_OP_IMM &&
+                    m_floatReturnAddrs.count((uint32_t)o[0].imm))
+                    isFloatRet = true;
             }
 
             if (isVoid) {
