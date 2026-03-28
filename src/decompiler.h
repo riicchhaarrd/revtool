@@ -465,6 +465,36 @@ public:
             "/* C library */\n"
             "int Gestalt(unsigned int, int *);\n"
             "int sysctl(void *, unsigned int, void *, void *, void *, unsigned int);\n"
+            "/* Engine types */\n"
+            "typedef struct XVertexInfo_s XVertexInfo;\n"
+            "typedef struct source_s source_t;\n"
+            "typedef struct Alloc_s Alloc_t;\n"
+            "typedef struct scr_block_s scr_block_t;\n"
+            "typedef struct token_s token_t;\n"
+            "typedef struct XModelParts_s XModelParts;\n"
+            "typedef struct cStaticModel_s cStaticModel_t;\n"
+            "typedef struct svEntity_s svEntity_t;\n"
+            "typedef struct script_s script_t;\n"
+            "typedef struct cLeafBrushNode_s cLeafBrushNode_t;\n"
+            "typedef struct worldSector_s worldSector_t;\n"
+            "typedef struct snd_alias_build_s snd_alias_build_t;\n"
+            "typedef struct XSurface_s XSurface;\n"
+            "typedef struct GfxSamplerState_s GfxSamplerState;\n"
+            "typedef struct XModelCollSurf_s XModelCollSurf;\n"
+            "typedef struct AILSOUNDINFO_s AILSOUNDINFO;\n"
+            "typedef unsigned int UINT4;\n"
+            "typedef struct define_s define_t;\n"
+            "typedef struct cmd_function_s cmd_function_t;\n"
+            "typedef struct hudelem_s hudelem_t;\n"
+            "typedef struct FsListBehavior_s FsListBehavior;\n"
+            "typedef struct XPartBits_s { int _[2]; } XPartBits;\n"
+            "typedef float XQuat[4];\n"
+            "typedef struct FxRange_s FxRange;\n"
+            "typedef struct GfxCmdArray_s GfxCmdArray;\n"
+            "typedef struct sortedColumn_s sortedColumn_t;\n"
+            "typedef struct centity_s centity_t;\n"
+            "typedef struct cgs_s cgs_t;\n"
+            "typedef struct snapshot_s snapshot_t;\n"
             "\n"
         );
     }
@@ -567,6 +597,8 @@ private:
         }
         if (t->kind == StabsTypeKind::Struct || t->kind == StabsTypeKind::Union) {
             if (t->name.empty()) return;
+            // Skip C++ template types (not valid C)
+            if (t->name.find('<') != std::string::npos) return;
             if (t->fields.empty()) {
                 // Struct with no STABS fields — generate int fields at known offsets
                 // to support field_X access patterns
@@ -662,9 +694,16 @@ private:
             for (auto &l : m_func.locals) {
                 if (l.name.empty() || declared.count(l.name) || paramNames.count(l.name)) continue;
                 declared.insert(l.name);
-                out += "    " + QString::fromStdString(
-                    l.typeRef != NullType ? m_types.formatDecl(l.typeRef, l.name)
-                                          : "int " + l.name) + ";\n";
+                std::string decl;
+                if (l.typeRef != NullType) {
+                    decl = m_types.formatDecl(l.typeRef, l.name);
+                    // Strip const from local declarations (locals may be reassigned)
+                    if (decl.substr(0, 6) == "const " && decl.find('*') == std::string::npos)
+                        decl = decl.substr(6);
+                } else {
+                    decl = "int " + l.name;
+                }
+                out += "    " + QString::fromStdString(decl) + ";\n";
             }
 
             // Collect goto targets and emitted blocks BEFORE declaring temps
@@ -773,6 +812,8 @@ private:
                         else if (m_pointerTemps.count(id) && ttype == "int")
                             ttype = "int *";
                     }
+                    // Strip const from temp declarations (temps are always assignable)
+                    if (ttype.substr(0, 6) == "const ") ttype = ttype.substr(6);
                     out += "    " + QString::fromStdString(ttype + " " + tname) + ";\n";
                     declared.insert(tname);
                 }
