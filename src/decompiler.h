@@ -1724,7 +1724,7 @@ private:
                         std::string inlined = emitExpr(it->second, negate);
                         if (!inlined.empty()) return inlined;
                     }
-                    // Inlining failed — emit 0 rather than raw temp name
+                    // Inlining failed — emit 0 as safe fallback
                     return "0";
                 }
                 // Use coalesced variable name if available
