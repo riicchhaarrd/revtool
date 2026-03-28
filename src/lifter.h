@@ -1251,16 +1251,25 @@ private:
                     return;
                 }
             }
-            // Heuristic: if the last emitted statement is a Store (memory write),
-            // the function is likely void — EAX just holds a leftover value
-            if (!bb.stmts.empty()) {
-                auto &lastStmt = bb.stmts.back();
-                if (lastStmt.kind == IRStmtKind::Store ||
-                    lastStmt.kind == IRStmtKind::VarSet) {
-                    // Check if STABS says int (the default for untyped functions)
-                    // Resolve through typedefs to get the actual type
-                    std::string retStr = m_types.formatType(m_func->returnType);
-                    if (retStr == "int" || retStr == "Bool" || retStr == "BOOL") {
+            // Heuristic: detect void functions with STABS "int" return type
+            {
+                std::string retStr = m_types.formatType(m_func->returnType);
+                bool isDefaultInt = (retStr == "int" || retStr == "Bool" || retStr == "BOOL");
+                if (isDefaultInt) {
+                    // If the block has NO statements, the function is an empty stub → void
+                    if (bb.stmts.empty()) {
+                        bb.stmts.push_back(IRStmt::mkReturn());
+                        return;
+                    }
+                    // If the last statement is a Store/VarSet, EAX is leftover → void
+                    auto &lastStmt = bb.stmts.back();
+                    if (lastStmt.kind == IRStmtKind::Store ||
+                        lastStmt.kind == IRStmtKind::VarSet) {
+                        bb.stmts.push_back(IRStmt::mkReturn());
+                        return;
+                    }
+                    // If the last statement is a Call (void call), the function is void
+                    if (lastStmt.kind == IRStmtKind::Call) {
                         bb.stmts.push_back(IRStmt::mkReturn());
                         return;
                     }
