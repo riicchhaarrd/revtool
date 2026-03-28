@@ -1389,14 +1389,6 @@ private:
                 std::string val = stmt.expr ? emitExpr(stmt.expr.get()) : "0";
                 if (!stmt.addr) break;
                 auto *a = stmt.addr.get();
-                fprintf(stderr, "STORE_DEBUG: addr_op=%d", (int)a->op);
-                if (a->op == IROp::Field) fprintf(stderr, " field=%s", a->name.c_str());
-                if (a->op == IROp::Add && a->kids.size() >= 2) {
-                    fprintf(stderr, " kids[0]_op=%d kids[1]_op=%d", (int)a->kids[0]->op, (int)a->kids[1]->op);
-                    if (a->kids[0]->op == IROp::Var) fprintf(stderr, " base=%s", a->kids[0]->name.c_str());
-                    if (a->kids[1]->isConst()) fprintf(stderr, " off=%lld", (long long)a->kids[1]->value);
-                }
-                fprintf(stderr, "\n");
                 // Field expression → base->field = val
                 if (a->op == IROp::Field) {
                     out += pad(indent) + QString::fromStdString(emitExpr(a) + " = " + val) + ";\n";
@@ -1454,8 +1446,10 @@ private:
                         }
                     }
                     if (!usedArrayNotation) {
-                        char fname[32]; snprintf(fname, sizeof(fname), "field_%X", (unsigned)off);
-                        out += pad(indent) + QString::fromStdString(base + "->" + fname + " = " + val) + ";\n";
+                        char buf[128];
+                        snprintf(buf, sizeof(buf), "*(int *)((char *)%s + 0x%X) = %s",
+                                 base.c_str(), (unsigned)off, val.c_str());
+                        out += pad(indent) + QString::fromStdString(buf) + ";\n";
                     }
                 }
                 // Add(base, Mul(idx, scale)) → base->arr_0[idx] = val
@@ -1465,8 +1459,9 @@ private:
                          (a->kids[0]->op == IROp::Var || a->kids[0]->op == IROp::Temp)) {
                     std::string base = emitExpr(a->kids[0].get());
                     std::string idx = emitExpr(a->kids[1]->kids[0].get());
+                    int scale = (int)a->kids[1]->kids[1]->value;
                     out += pad(indent) + QString::fromStdString(
-                        base + "->arr_0[" + idx + "] = " + val) + ";\n";
+                        "*(int *)((char *)" + base + " + " + idx + " * " + std::to_string(scale) + ") = " + val) + ";\n";
                 }
                 // Add(Add(base, Mul(idx, scale)), const) → base->arr_NN[idx] = val
                 else if (a->op == IROp::Add && a->kids.size() == 2 &&
@@ -1798,21 +1793,18 @@ private:
                         }
                     }
                 }
-                // (base + const) → base->field_XX for pointer-like expressions
+                // (base + const) → *(int *)((char *)base + off) for pointer-like expressions
                 else if (addr && addr->op == IROp::Add && addr->kids.size() == 2 &&
                     addr->kids[1]->isConst() &&
                     (int64_t)addr->kids[1]->value != 0 &&
                     std::abs((int64_t)addr->kids[1]->value) < 0x10000 &&
                     (addr->kids[0]->op == IROp::Var || addr->kids[0]->op == IROp::Temp)) {
-                    // Use -> notation: cleaner than *((int*)((base + off)))
                     std::string base = emitExpr(addr->kids[0].get());
                     int64_t off = (int64_t)addr->kids[1]->value;
-                    char fname[32];
-                    if (off >= 0)
-                        snprintf(fname, sizeof(fname), "field_%llX", (unsigned long long)off);
-                    else
-                        snprintf(fname, sizeof(fname), "field_neg%llX", (unsigned long long)(-off));
-                    result = base + "->" + fname;
+                    char buf[64];
+                    snprintf(buf, sizeof(buf), "*(int *)((char *)%s + 0x%llX)",
+                             base.c_str(), (unsigned long long)off);
+                    result = buf;
                 }
                 // General Add/Sub expression → *(expr) without ugly cast
                 else if (addr && (addr->op == IROp::Add || addr->op == IROp::Sub) &&
@@ -1846,8 +1838,16 @@ private:
                         result = "*(" + emitExpr(addr) + ")";
                     }
                 } else {
-                    // Final fallback: *(expr) — no cast needed
                     result = "*(" + emitExpr(addr) + ")";
+                }
+                // If result uses *(expr) and expr isn't a pointer type, add a cast
+                if (!result.empty() && result[0] == '*' && addr) {
+                    TypeRef at = exprType(addr);
+                    if (at != NullType) {
+                        auto *rt = m_types.resolveType(at);
+                        if (rt && rt->kind != StabsTypeKind::Pointer)
+                            result = "*(int *)(" + emitExpr(addr) + ")";
+                    }
                 }
                 break;
             }
