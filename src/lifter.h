@@ -296,6 +296,45 @@ public:
         m_regParamInjected.clear();
         m_flags = {-1, IROp::Eq, nullptr, nullptr};
 
+        // Inject register parameter initializations.
+        // Scan the first few instructions for "mov REGPARAM_DEST, SRC" patterns
+        // where DEST is a regparam register. Pre-bind the SRC register to the
+        // parameter name since the calling convention delivers the value there.
+        if (!func.blocks.empty() && !m_regParamRegs.empty()) {
+            auto &bb0 = func.blocks[0];
+            // First, scan prologue instructions to find source registers
+            std::set<x86_reg> sourcesHandled;
+            for (size_t pi = 0; pi < std::min(funcEndIdx, (size_t)20); ++pi) {
+                auto &pin = insn[pi];
+                std::string pmn = pin.mnemonic;
+                if (pmn != "mov" && pmn != "movaps") continue;
+                if (pin.detail->x86.op_count != 2) continue;
+                auto &dst = pin.detail->x86.operands[0];
+                auto &src = pin.detail->x86.operands[1];
+                if (dst.type != X86_OP_REG || src.type != X86_OP_REG) continue;
+                x86_reg dstR = canonReg(dst.reg);
+                x86_reg srcR = canonReg(src.reg);
+                auto pit = m_regParamRegs.find(dstR);
+                if (pit == m_regParamRegs.end()) continue;
+                if (sourcesHandled.count(srcR)) continue;
+                sourcesHandled.insert(srcR);
+                // Pre-bind the source register to the parameter
+                auto *param = pit->second;
+                int t = func.newTemp(param->typeRef);
+                bb0.stmts.push_back(IRStmt::mkAssign(t,
+                    IRExpr::mkVar(param->name, param->typeRef), param->typeRef));
+                m_regTemps[srcR] = t;
+            }
+            // Also bind the regparam registers themselves (for direct use)
+            for (auto &[xr, param] : m_regParamRegs) {
+                if (m_regTemps.count(xr)) continue; // already bound via source
+                int t = func.newTemp(param->typeRef);
+                bb0.stmts.push_back(IRStmt::mkAssign(t,
+                    IRExpr::mkVar(param->name, param->typeRef), param->typeRef));
+                m_regTemps[xr] = t;
+            }
+        }
+
         int curBlock = 0;
         for (size_t i = 0; i < funcEndIdx; ++i) {
             auto &in = insn[i];
@@ -537,13 +576,6 @@ private:
         x86_reg canon = canonReg(reg);
         int t = regTemp(reg);
         if (t >= 0) return IRExpr::mkTemp(t, m_func->tempType(t));
-        // Check if this register holds a parameter (regparm calling convention)
-        auto pit = m_regParamRegs.find(canon);
-        if (pit != m_regParamRegs.end() && !m_regParamInjected.count(canon)) {
-            m_regParamInjected.insert(canon);
-            auto *param = pit->second;
-            return IRExpr::mkVar(param->name, param->typeRef);
-        }
         // No temp for this register — create one initialized to 0
         // This avoids raw register names leaking into decompiled C
         int newT = m_func->newTemp();
