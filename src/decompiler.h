@@ -231,9 +231,17 @@ public:
                 if (body.find(name) != std::string::npos) {
                     emittedGlobals.insert(name);
                     // Emit as initialized definition for direct addressing
-                    // (= 0 forces .data instead of .comm, enabling direct absolute addressing)
+                    // Structs/unions/arrays with unknown size must stay extern
                     std::string decl = types.formatDecl(gvar->typeRef, name);
-                    out += QString::fromStdString(decl + " = 0") + ";\n";
+                    auto *gt = types.resolveType(gvar->typeRef);
+                    bool isStruct = (gt && (gt->kind == StabsTypeKind::Struct ||
+                                            gt->kind == StabsTypeKind::Union));
+                    bool isArray = (gt && gt->kind == StabsTypeKind::Array);
+                    bool isPtr = (gt && gt->kind == StabsTypeKind::Pointer);
+                    if (isStruct || isArray)
+                        out += QString::fromStdString("extern " + decl) + ";\n";
+                    else
+                        out += QString::fromStdString(decl + " = 0") + ";\n";
                     anyExterns = true;
                 }
             }
@@ -291,7 +299,7 @@ public:
                     bool isFunc = (body.find(name + "(") != std::string::npos);
                     if (isUsed && !isFunc) {
                         knownNames.insert(name);
-                        out += QString::fromStdString("int " + name + ";\n");
+                        out += QString::fromStdString("int " + name + " = 0;\n");
                         anyUndeclared = true;
                     }
                 }
