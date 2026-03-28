@@ -1484,7 +1484,9 @@ private:
                 // Fallback: look up by name (handles import stubs → real function)
                 if (!callee && !target.empty())
                     callee = m_mf.stabsFunctionByName(target);
-                if (callee) retType = callee->returnType;
+                if (callee) {
+                    retType = callee->returnType;
+                }
             } else {
                 // Indirect call through function pointer
                 auto tgt = readOp(o[0]);
@@ -1523,6 +1525,16 @@ private:
                            rt->kind == StabsTypeKind::Double ||
                            rt->kind == StabsTypeKind::LongDouble))
                     isFloatRet = true;
+                // Fallback: check formatted type string for float/double
+                // (handles cases where type table conflicts cause wrong kind)
+                if (!isFloatRet && !isVoid) {
+                    std::string fmtRet = m_types.formatType(retType);
+                    if (fmtRet.find("float") != std::string::npos ||
+                        fmtRet.find("double") != std::string::npos ||
+                        fmtRet == "vec_t" || fmtRet == "const vec_t")
+                        isFloatRet = true;
+                    if (fmtRet == "void") isVoid = true;
+                }
             }
 
             if (isVoid) {
