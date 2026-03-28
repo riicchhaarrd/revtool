@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>dis — Mach-O Decompiler</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #1e1e1e; color: #d4d4d4; font-family: monospace; font-size: 14px; }
+  header { padding: 12px 20px; background: #252526; border-bottom: 1px solid #3e3e42;
+           display: flex; align-items: center; gap: 16px; }
+  header h1 { font-size: 18px; color: #9cdcfe; }
+  #status  { color: #4ec9b0; font-size: 12px; }
+  #drop-zone { margin: 20px; padding: 30px; border: 2px dashed #555; border-radius: 6px;
+               text-align: center; cursor: pointer; color: #888; transition: border-color .2s; }
+  #drop-zone.over { border-color: #9cdcfe; color: #9cdcfe; }
+  #drop-zone input { display: none; }
+  #controls { display: none; margin: 0 20px 10px; gap: 8px; flex-wrap: wrap; }
+  #controls.visible { display: flex; }
+  button { background: #0e639c; color: #fff; border: none; padding: 6px 14px;
+           border-radius: 4px; cursor: pointer; font-family: monospace; font-size: 13px; }
+  button:hover { background: #1177bb; }
+  #func-select { background: #3c3c3c; color: #d4d4d4; border: 1px solid #555;
+                 padding: 5px 8px; border-radius: 4px; font-family: monospace;
+                 font-size: 13px; max-width: 500px; }
+  #src-select  { background: #3c3c3c; color: #d4d4d4; border: 1px solid #555;
+                 padding: 5px 8px; border-radius: 4px; font-family: monospace;
+                 font-size: 13px; max-width: 500px; }
+  #output { margin: 0 20px 20px; padding: 16px; background: #1a1a1a;
+            border: 1px solid #3e3e42; border-radius: 4px; white-space: pre;
+            overflow: auto; max-height: 70vh; line-height: 1.5; color: #ce9178; }
+  #output.info { color: #9cdcfe; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>dis — Mach-O Decompiler (WASM)</h1>
+  <span id="status">Loading module…</span>
+</header>
+
+<div id="drop-zone">
+  <p>Drop a Mach-O binary here, or click to browse</p>
+  <input type="file" id="file-input">
+</div>
+
+<div id="controls">
+  <button id="btn-srcs">Source Files</button>
+  <button id="btn-funcs">Functions</button>
+  <select id="src-select"><option value="">— decompile source file —</option></select>
+  <button id="btn-decsrc">Decompile File</button>
+  <select id="func-select"><option value="">— decompile function —</option></select>
+  <button id="btn-decfn">Decompile</button>
+</div>
+
+<pre id="output" class="info">Waiting for module…</pre>
+
+<script>
+let mod = null;
+
+// Load WASM module
+createDisModule().then(m => {
+  mod = m;
+  document.getElementById('status').textContent = 'Ready';
+  document.getElementById('output').textContent = 'Module loaded. Drop a Mach-O binary above.';
+}).catch(e => {
+  document.getElementById('status').textContent = 'Error loading module';
+  document.getElementById('output').textContent = String(e);
+});
+
+// Drag-and-drop / file picker
+const zone  = document.getElementById('drop-zone');
+const input = document.getElementById('file-input');
+
+zone.addEventListener('click', () => input.click());
+zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('over'); });
+zone.addEventListener('dragleave', () => zone.classList.remove('over'));
+zone.addEventListener('drop', e => { e.preventDefault(); zone.classList.remove('over'); loadFile(e.dataTransfer.files[0]); });
+input.addEventListener('change', () => input.files[0] && loadFile(input.files[0]));
+
+function loadFile(file) {
+  const reader = new FileReader();
+  reader.onload = ev => {
+    const bytes = new Uint8Array(ev.target.result);
+    // Pass binary data via pointer to avoid UTF-8 corruption in Embind strings
+    const ptr = mod._malloc(bytes.length);
+    mod.HEAPU8.set(bytes, ptr);
+    const result = mod.loadBinaryPtr(ptr, bytes.length);
+    mod._free(ptr);
+    setOutput(result, 'info');
+    if (result.startsWith('ok:')) populateLists();
+    document.getElementById('controls').classList.add('visible');
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+function populateLists() {
+  // Populate function selector
+  const fsel = document.getElementById('func-select');
+  fsel.innerHTML = '<option value="">— decompile function —</option>';
+  const funcs = mod.listFunctions().split('\n').filter(Boolean);
+  for (const line of funcs) {
+    const m = line.match(/^(0x[0-9A-Fa-f]+)\s+(.+)/);
+    if (!m) continue;
+    const opt = document.createElement('option');
+    opt.value = parseInt(m[1], 16);
+    opt.textContent = line.trim();
+    fsel.appendChild(opt);
+  }
+
+  // Populate source file selector
+  const ssel = document.getElementById('src-select');
+  ssel.innerHTML = '<option value="">— decompile source file —</option>';
+  const srcs = mod.listSourceFiles().split('\n').filter(Boolean);
+  for (const line of srcs) {
+    const m = line.match(/^\[(\d+)\]\s+(.+)/);
+    if (!m) continue;
+    const opt = document.createElement('option');
+    opt.value = parseInt(m[1]);
+    opt.textContent = line.trim();
+    ssel.appendChild(opt);
+  }
+}
+
+function setOutput(text, cls) {
+  const el = document.getElementById('output');
+  el.className = cls || '';
+  el.textContent = text;
+}
+
+document.getElementById('btn-srcs').addEventListener('click', () =>
+  setOutput(mod.listSourceFiles(), 'info'));
+
+document.getElementById('btn-funcs').addEventListener('click', () =>
+  setOutput(mod.listFunctions(), 'info'));
+
+document.getElementById('btn-decfn').addEventListener('click', () => {
+  const v = document.getElementById('func-select').value;
+  if (!v) return;
+  setOutput('Decompiling…', 'info');
+  setTimeout(() => setOutput(mod.decompileFunction(parseInt(v))), 10);
+});
+
+document.getElementById('btn-decsrc').addEventListener('click', () => {
+  const v = document.getElementById('src-select').value;
+  if (v === '') return;
+  setOutput('Decompiling…', 'info');
+  setTimeout(() => setOutput(mod.decompileSourceFile(parseInt(v))), 10);
+});
+</script>
+
+<script src="dis.js"></script>
+</body>
+</html>

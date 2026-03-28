@@ -6,8 +6,12 @@
 #include "type_infer.h"
 #include "coalesce.h"
 #include "macho.h"
+#ifdef __EMSCRIPTEN__
+#include "qstring_shim.h"
+#else
 #include <QString>
 #include <QProcess>
+#endif
 #include <string>
 #include <map>
 #include <set>
@@ -580,6 +584,9 @@ public:
 
     // Run clang-format on the output for clean formatting
     static QString clangFormat(const QString &code) {
+#ifdef __EMSCRIPTEN__
+        return code; // no subprocess support in WASM
+#else
         // Skip clang-format for very large outputs (>500KB) to avoid timeout
         if (code.size() > 500000) return code;
         QProcess proc;
@@ -592,6 +599,7 @@ public:
         if (!proc.waitForFinished(30000)) { proc.kill(); return code; }
         if (proc.exitCode() != 0) return code;
         return QString::fromUtf8(proc.readAllStandardOutput());
+#endif
     }
 
 private:
