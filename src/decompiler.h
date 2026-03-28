@@ -526,9 +526,10 @@ public:
 
     // Remove empty if blocks from output text
     static QString cleanupOutput(const QString &code) {
-        // Pre-pass: fix &0->field_X and &(0)->field_X patterns → 0xX
+        // Pre-pass: fix &EXPR->field_X patterns → (EXPR + 0xX)
         QString cleaned = code;
-        cleaned.replace("&0->field_", "0x__F");  // temporary marker
+        // &0->field_X → 0xX
+        cleaned.replace("&0->field_", "0x__F");
         cleaned.replace("&(0)->field_", "0x__F");
         // Fix the marker: "0x__F" followed by hex digits becomes "0x" + hex
         {
@@ -1533,23 +1534,14 @@ private:
             case IRStmtKind::VarSet: {
                 std::string val = stmt.expr ? emitExpr(stmt.expr.get()) : "0";
                 std::string dest = stmt.destVar;
-                // Suppress parameter slot reuse for call arguments
-                // Pattern: param = expr before a call → the compiler is setting up
-                // call args by writing to the parameter area on the stack
+                // Suppress parameter slot reuse when assigning a string literal to a param
+                // (clear indicator of Com_Error/Com_Printf call argument setup)
                 {
                     bool isParam = false;
                     for (auto &p : m_func.params)
                         if (p.name == dest) { isParam = true; break; }
-                    if (isParam && stmt.expr) {
-                        // Check if the value is a string literal (format string) or
-                        // a small integer (error code) being assigned to a param
-                        bool isCallSetup = false;
-                        if (stmt.expr->op == IROp::String) isCallSetup = true;
-                        if (stmt.expr->op == IROp::Const &&
-                            (stmt.expr->value >= 0 && stmt.expr->value <= 10)) isCallSetup = true;
-                        if (stmt.expr->op == IROp::Temp || stmt.expr->op == IROp::Var) isCallSetup = true;
-                        if (isCallSetup) break; // suppress the VarSet
-                    }
+                    if (isParam && stmt.expr && stmt.expr->op == IROp::String)
+                        break; // suppress string-to-param assignment
                 }
                 // Suppress dead stores to 'this' from register reuse
                 if (dest == "this" && stmt.expr) {
@@ -1913,10 +1905,23 @@ private:
 
             case IROp::AddrOf: {
                 auto *inner = e->kids[0].get();
-                // &(0->field_X) = just the offset value
-                if (inner && inner->op == IROp::Field && !inner->kids.empty() &&
-                    inner->kids[0]->isConst() && inner->kids[0]->value == 0) {
-                    result = std::to_string((int)inner->value);
+                if (inner && inner->op == IROp::Field && !inner->kids.empty()) {
+                    // &(base->field_X) where field_X is synthetic = base + offset
+                    if (inner->name.find("field_") == 0) {
+                        std::string base = emitExpr(inner->kids[0].get());
+                        int off = (int)inner->value;
+                        // Strip parens from base for cleaner output
+                        std::string stripped = base;
+                        while (!stripped.empty() && stripped.front() == '(' && stripped.back() == ')')
+                            stripped = stripped.substr(1, stripped.size() - 2);
+                        if (stripped == "0") {
+                            result = std::to_string(off);
+                        } else {
+                            result = "(" + base + " + " + std::to_string(off) + ")";
+                        }
+                    } else {
+                        result = "&" + emitExpr(inner);
+                    }
                 } else {
                     result = "&" + emitExpr(inner);
                 }
