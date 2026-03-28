@@ -586,14 +586,37 @@ private:
                 break;
             }
             case N_RSYM: {
-                // Register variable — parse type info
+                // Register variable or register parameter.
+                // n_value = STABS register number (0=eax,1=ecx,2=edx,3=ebx,
+                //           6=esi,7=edi, 21-28=xmm0-7)
+                // Descriptor 'P' = register parameter, 'r' = register local
                 auto parsed = m_typeTable.parseSymbol(sym.name);
                 if (curFunc) {
                     StabsTypedVar tv;
                     tv.name = parsed.name;
                     tv.typeRef = parsed.typeRef;
-                    tv.stackOffset = 0; // register, not stack
-                    curFunc->locals.push_back(tv);
+                    tv.stackOffset = 0;
+                    tv.regNum = (int)sym.n_value;
+                    if (parsed.descriptor == 'P') {
+                        // Register parameter — add as param if not already present
+                        bool dup = false;
+                        for (auto &p : curFunc->params)
+                            if (p.name == tv.name) { p.regNum = tv.regNum; dup = true; break; }
+                        if (!dup)
+                            curFunc->params.push_back(tv);
+                    } else {
+                        // Register local — check if it matches an existing param
+                        bool isParam = false;
+                        for (auto &p : curFunc->params) {
+                            if (p.name == tv.name && p.stackOffset == 0) {
+                                p.regNum = tv.regNum;
+                                isParam = true;
+                                break;
+                            }
+                        }
+                        if (!isParam)
+                            curFunc->locals.push_back(tv);
+                    }
                 }
                 break;
             }

@@ -269,6 +269,22 @@ public:
             }
         }
 
+        // ── Pass 4b: inject register parameter assignments ────────
+        // When STABS says a param is in a register (regNum >= 0, stackOffset == 0),
+        // inject a VarSet at the start of block 0 capturing the register value.
+        // STABS register numbers: 0=eax, 1=ecx, 2=edx, 3=ebx, 4=esp, 5=ebp,
+        // 6=esi, 7=edi, 12-19=xmm0-7, 21-28=st0-7
+        m_regParamRegs.clear();
+        if (sfn) {
+            for (auto &p : sfn->params) {
+                if (p.regNum >= 0 && p.stackOffset == 0) {
+                    x86_reg xr = stabsRegToX86(p.regNum);
+                    if (xr != X86_REG_INVALID)
+                        m_regParamRegs[xr] = &p;
+                }
+            }
+        }
+
         // ── Pass 5: lift instructions into basic blocks ─────────────
         m_func = &func;
         m_cs = cs;
@@ -277,6 +293,7 @@ public:
         m_pushArgs.clear();
         m_fpuStack.clear();
         m_lastFpuTop = -1;
+        m_regParamInjected.clear();
         m_flags = {-1, IROp::Eq, nullptr, nullptr};
 
         int curBlock = 0;
@@ -469,6 +486,8 @@ private:
     // Param/local lookup
     std::map<int, const StabsTypedVar*> m_paramByOffset;
     std::map<int, const StabsTypedVar*> m_localByOffset;
+    std::map<x86_reg, const StabsTypedVar*> m_regParamRegs;  // register params (regparm)
+    std::set<x86_reg> m_regParamInjected;  // which reg params we've already injected
 
     // Register → temp mapping (current state)
     std::map<x86_reg, int> m_regTemps;
@@ -515,12 +534,20 @@ private:
                 return IRExpr::mkTemp(t, m_func->tempType(t));
             }
         }
+        x86_reg canon = canonReg(reg);
         int t = regTemp(reg);
         if (t >= 0) return IRExpr::mkTemp(t, m_func->tempType(t));
+        // Check if this register holds a parameter (regparm calling convention)
+        auto pit = m_regParamRegs.find(canon);
+        if (pit != m_regParamRegs.end() && !m_regParamInjected.count(canon)) {
+            m_regParamInjected.insert(canon);
+            auto *param = pit->second;
+            return IRExpr::mkVar(param->name, param->typeRef);
+        }
         // No temp for this register — create one initialized to 0
         // This avoids raw register names leaking into decompiled C
         int newT = m_func->newTemp();
-        m_regTemps[canonReg(reg)] = newT;
+        m_regTemps[canon] = newT;
         return IRExpr::mkTemp(newT);
     }
 
@@ -595,6 +622,31 @@ private:
     int stRegIndex(x86_reg r) {
         if (r >= X86_REG_ST0 && r <= X86_REG_ST7) return (int)(r - X86_REG_ST0);
         return 0;
+    }
+
+    // Convert STABS register number to Capstone x86_reg
+    // STABS: 0=eax, 1=ecx, 2=edx, 3=ebx, 4=esp, 5=ebp, 6=esi, 7=edi
+    //        12-19=st0-st7, 21-28=xmm0-xmm7
+    static x86_reg stabsRegToX86(int stabsReg) {
+        switch (stabsReg) {
+        case 0: return X86_REG_EAX;
+        case 1: return X86_REG_ECX;
+        case 2: return X86_REG_EDX;
+        case 3: return X86_REG_EBX;
+        case 4: return X86_REG_ESP;
+        case 5: return X86_REG_EBP;
+        case 6: return X86_REG_ESI;
+        case 7: return X86_REG_EDI;
+        case 21: return X86_REG_XMM0;
+        case 22: return X86_REG_XMM1;
+        case 23: return X86_REG_XMM2;
+        case 24: return X86_REG_XMM3;
+        case 25: return X86_REG_XMM4;
+        case 26: return X86_REG_XMM5;
+        case 27: return X86_REG_XMM6;
+        case 28: return X86_REG_XMM7;
+        default: return X86_REG_INVALID;
+        }
     }
 
     // Normalize sub-registers to their 32-bit parent
@@ -1402,8 +1454,16 @@ private:
                     callee = m_mf.stabsFunctionByName(target);
                 if (callee) retType = callee->returnType;
             } else {
+                // Indirect call through function pointer
                 auto tgt = readOp(o[0]);
-                target = tgt ? varText(std::move(tgt)) : "???";
+                if (tgt) {
+                    // Assign the function pointer to a temp, then call through it
+                    int fpTemp = func.newTemp();
+                    bb.stmts.push_back(IRStmt::mkAssign(fpTemp, std::move(tgt)));
+                    target = "t" + std::to_string(fpTemp);
+                } else {
+                    target = "???";
+                }
             }
 
             // Gather args
@@ -1729,6 +1789,12 @@ private:
                     fpuPop();
                     if (idx > 0 && idx - 1 < (int)m_fpuStack.size())
                         fpuWrite(idx - 1, std::move(st0), bb);
+                } else if (o[0].type == X86_OP_MEM &&
+                           o[0].mem.base == X86_REG_ESP &&
+                           o[0].mem.index == X86_REG_INVALID) {
+                    // fstp [esp+N] → collect as call argument (float pushed to stack)
+                    m_espArgs[(int)o[0].mem.disp] = std::move(st0);
+                    if (mn == "fstp") fpuPop();
                 } else {
                     writeOp(o[0], std::move(st0), bb);
                     if (mn == "fstp") fpuPop();
@@ -2274,20 +2340,42 @@ private:
 
     // Helper: extract a readable string from an IR expr (for intrinsic text)
     static std::string varText(std::unique_ptr<IRExpr> e) {
+        return varTextExpr(e.get());
+    }
+
+    // Recursive expression-to-string for generating readable C-like text
+    static std::string varTextExpr(const IRExpr *e) {
         if (!e) return "0";
-        if (e->op == IROp::Var) return e->name;
-        if (e->op == IROp::String) return e->name;
-        if (e->op == IROp::FuncRef) return e->name;
-        if (e->op == IROp::Const) {
+        switch (e->op) {
+        case IROp::Var:     return e->name;
+        case IROp::String:  return e->name;
+        case IROp::FuncRef: return e->name;
+        case IROp::Const: {
             if (e->value >= -256 && e->value <= 256) return std::to_string(e->value);
-            char buf[32]; snprintf(buf, sizeof(buf), "0x%X", (unsigned)e->value);
+            char buf[32]; snprintf(buf, sizeof(buf), "0x%X", (unsigned)(uint32_t)e->value);
             return buf;
         }
-        if (e->op == IROp::Temp) return "t" + std::to_string(e->value);
-        if (e->op == IROp::Field) {
-            std::string base = e->kids.empty() ? "0" : varText(std::move(e->kids[0]));
+        case IROp::Temp: return "t" + std::to_string(e->value);
+        case IROp::Field: {
+            std::string base = e->kids.empty() ? "0" : varTextExpr(e->kids[0].get());
             return base + "->" + e->name;
         }
-        return "0";
+        case IROp::Load:
+            if (!e->kids.empty())
+                return "*(" + varTextExpr(e->kids[0].get()) + ")";
+            return "*0";
+        case IROp::Add: case IROp::Sub: case IROp::Mul: {
+            if (e->kids.size() < 2) return "0";
+            std::string l = varTextExpr(e->kids[0].get());
+            std::string r = varTextExpr(e->kids[1].get());
+            const char *op = e->op == IROp::Add ? " + " :
+                             e->op == IROp::Sub ? " - " : " * ";
+            return "(" + l + op + r + ")";
+        }
+        case IROp::Cast:
+            if (!e->kids.empty()) return varTextExpr(e->kids[0].get());
+            return "0";
+        default: return "0";
+        }
     }
 };
