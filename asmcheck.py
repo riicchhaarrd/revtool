@@ -625,17 +625,24 @@ def check_function(name_or_addr, data, text_addr, text_off, verbose=True):
     orig = norm_prologue(orig, recomp)
     recomp = norm_prologue(recomp, orig)
 
-    # Compare
-    matches = 0
-    total = max(len(orig), len(recomp))
-    diffs = []
-    for i in range(total):
-        o = orig[i] if i < len(orig) else ''
-        r = recomp[i] if i < len(recomp) else ''
-        if norm(o) == norm(r):
-            matches += 1
-        else:
-            diffs.append(i)
+    # Compare using LCS (longest common subsequence) for alignment-tolerant matching
+    normed_o = [norm(x) for x in orig]
+    normed_r = [norm(x) for x in recomp]
+    m, n = len(normed_o), len(normed_r)
+    total = max(m, n)
+
+    # Compute LCS length
+    # Use space-efficient 2-row DP
+    prev = [0] * (n + 1)
+    for i in range(m):
+        curr = [0] * (n + 1)
+        for j in range(n):
+            if normed_o[i] == normed_r[j]:
+                curr[j+1] = prev[j] + 1
+            else:
+                curr[j+1] = max(curr[j], prev[j+1])
+        prev = curr
+    matches = prev[n]
 
     pct = matches * 100 // total if total else 0
 
@@ -644,13 +651,12 @@ def check_function(name_or_addr, data, text_addr, text_off, verbose=True):
             print(f'{func_name}: {matches}/{total} PERFECT ({pct}%)')
         else:
             print(f'{func_name}: {matches}/{total} ({pct}%)')
-            # Show diffs
+            # Show diffs using position-by-position for readability
             for i in range(total):
                 o = orig[i] if i < len(orig) else ''
                 r = recomp[i] if i < len(recomp) else ''
-                m = norm(o) == norm(r)
-                marker = ' ' if m else '|'
-                print(f'  {marker} {o:42s} {r}')
+                mk = ' ' if norm(o) == norm(r) else '|'
+                print(f'  {mk} {o:42s} {r}')
 
     return pct
 

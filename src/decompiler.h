@@ -1889,6 +1889,25 @@ private:
                     for (auto &child : node->children) emitNode(out, child.get(), indent);
                     break;
                 }
+                // When the condition was negated by the structurer (the if-body
+                // corresponds to the original's fall-through/likely path),
+                // add __builtin_expect to preserve the original branch direction.
+                // Only for simple conditions (pointer != 0, func() != 0, etc.)
+                // to avoid changing complex control flow unnecessarily.
+                if (node->negated && !hasElse && !condTrue && !condFalse) {
+                    // Only add for simple integer zero-check conditions
+                    // (not float comparisons like "x == 0.0f")
+                    bool isSimpleZeroCheck = false;
+                    for (auto &sfx : {" != 0", " == 0", " > 0", " <= 0"}) {
+                        size_t len = strlen(sfx);
+                        if (cond.size() >= len &&
+                            cond.compare(cond.size() - len, len, sfx) == 0) {
+                            isSimpleZeroCheck = true; break;
+                        }
+                    }
+                    if (isSimpleZeroCheck)
+                        cond = "__builtin_expect(" + cond + ", 1)";
+                }
                 out += pad(indent) + "if (" + QString::fromStdString(cond) + ") {\n";
                 for (auto &child : node->children)
                     emitNode(out, child.get(), indent + 1);
