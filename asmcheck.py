@@ -237,6 +237,10 @@ def compile_to_asm(c_code):
             # Don't add if function is defined in the code
             if re.search(r'\b' + re.escape(proto_name) + r'\s*\([^)]*\)\s*\{', c_code):
                 continue
+            # Skip known variadic functions (prototype has fewer args than calls)
+            if proto_name in ('va', 'Com_Printf', 'Com_Error', 'Com_DPrintf',
+                              'Sys_Error', 'dprintf', 'Com_sprintf'):
+                continue
             # Only include if all types in the prototype are known
             # (check for struct/union references that aren't extracted)
             proto_types = re.findall(r'\b(struct|union)\s+(\w+)', line)

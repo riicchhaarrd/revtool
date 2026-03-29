@@ -168,8 +168,22 @@ private:
 
             // t = expr -> t has type of expr
             TypeRef exprT = inferExprType(stmt.expr.get());
-            if (exprT != NullType)
-                setType(stmt.destTemp, exprT);
+            if (exprT != NullType) {
+                // Don't propagate union/struct types to scalar temps
+                auto *et = m_types->resolveType(exprT);
+                if (et && (et->kind == StabsTypeKind::Union || et->kind == StabsTypeKind::Struct))
+                    exprT = NullType;
+                // Also check by formatted name (cross-CU type conflicts)
+                if (exprT != NullType) {
+                    std::string fmt = m_types->formatType(exprT);
+                    if (fmt.find("DvarValue") != std::string::npos ||
+                        fmt.find("DvarLimits") != std::string::npos ||
+                        fmt.find("union ") == 0 || fmt.find("struct ") == 0)
+                        exprT = NullType;
+                }
+                if (exprT != NullType)
+                    setType(stmt.destTemp, exprT);
+            }
 
             // t = otherTemp -> propagate type (but don't unite if struct/union
             // to avoid spreading struct types to unrelated temps)
@@ -354,6 +368,8 @@ private:
         }
         if (e->op == IROp::Field) return e->typeRef;
         if (e->op == IROp::Call) return e->typeRef;
+        // &expr → pointer to expr's type (don't propagate struct types through AddrOf)
+        if (e->op == IROp::AddrOf) return NullType;
 
         // Load(addr) -> type is the pointee type of addr
         if (e->op == IROp::Load && !e->kids.empty()) {

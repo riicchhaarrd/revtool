@@ -1282,12 +1282,21 @@ private:
                     if (resolvedType == NullType && type != NullType)
                         resolvedType = type;
                     if (resolvedType != NullType) {
-                        // Array types decay to pointers when assigned to temps
                         auto *rt = m_types.resolveType(resolvedType);
+                        // Array types decay to pointers when assigned to temps
                         if (rt && rt->kind == StabsTypeKind::Array)
                             ttype = m_types.formatType(rt->targetType) + " *";
-                        else
+                        // Union/struct by value for a temp → use int
+                        // (temps should never hold struct values; the type is from inference leakage)
+                        else if (rt && (rt->kind == StabsTypeKind::Union ||
+                                        rt->kind == StabsTypeKind::Struct))
+                            ttype = "int";
+                        else {
                             ttype = m_types.formatType(resolvedType);
+                            // Also check formatted name for cross-CU conflicts
+                            if (ttype.find("union ") == 0 || ttype.find("struct ") == 0)
+                                ttype = "int";
+                        }
                     }
                     if (ttype.empty())
                         ttype = inferTempType(id);
@@ -2022,8 +2031,14 @@ private:
                     auto *dt = m_types.resolveType(stmt.destType);
                     if (dt && dt->kind == StabsTypeKind::Array)
                         dest += "[0]";
+                    // If dest is a struct/union and value is a scalar, cast the store
+                    if (dt && (dt->kind == StabsTypeKind::Struct || dt->kind == StabsTypeKind::Union)) {
+                        out += pad(indent) + QString::fromStdString(
+                            "*(int *)(&" + cName(dest) + ") = (int)" + val) + ";\n";
+                        break;
+                    }
                 }
-                out += pad(indent) + QString::fromStdString(dest + " = " + val) + ";\n";
+                out += pad(indent) + QString::fromStdString(cName(dest) + " = " + val) + ";\n";
                 break;
             }
             case IRStmtKind::Call: {

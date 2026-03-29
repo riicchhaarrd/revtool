@@ -373,6 +373,9 @@ public:
                         return f.name + "." + firstField->name;
                     }
                 }
+                // If field is an array, accessing at its base offset = first element
+                if (ft && ft->kind == StabsTypeKind::Array)
+                    return f.name + "[0]";
                 return f.name;
             }
         }

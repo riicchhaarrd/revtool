@@ -345,10 +345,13 @@ public:
                     };
                     if (!fmtType.empty() && !scalarTypes.count(fmtType) &&
                         fmtType.find("*") == std::string::npos) {
-                        // Check if it looks like a struct (has _s or State in name)
+                        // Check if it looks like a struct/union
                         if (fmtType.find("_s") != std::string::npos ||
                             fmtType.find("State") != std::string::npos ||
-                            fmtType.find("Info") != std::string::npos) {
+                            fmtType.find("Info") != std::string::npos ||
+                            fmtType.find("Dvar") != std::string::npos ||
+                            fmtType.find("union ") == 0 ||
+                            fmtType.find("struct ") == 0) {
                             isStructPtrType = true;
                         }
                     }
