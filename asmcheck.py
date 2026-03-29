@@ -32,6 +32,9 @@ typedef int BOOL; typedef int Bool; typedef int qboolean;
 typedef unsigned int DWORD; typedef unsigned int UINT;
 typedef float vec_t; typedef vec_t vec3_t[3]; typedef vec_t vec2_t[2];
 typedef unsigned char byte;
+typedef int OSStatus; typedef short OSErr; typedef int Boolean;
+typedef unsigned int OSType; typedef void *CursHandle;
+typedef void *WindowRef; typedef void *MenuRef; typedef void *CGrafPtr;
 #define NULL ((void*)0)
 float floorf(float); float ceilf(float); float sqrtf(float);
 float sinf(float); float cosf(float); float tanf(float);
@@ -246,12 +249,23 @@ def compile_to_asm(c_code):
         already = set(re.findall(r'(?:typedef|struct|extern)\s+\w+.*?\s+(\w+)\s*[;\{]', full))
         funcs = set(re.findall(r'\b(?:int|void|float|static)\s+(\w+)\s*\(', full))
         stubs = ''
+        # Find names used in direct assignments (A = B; where B is a bare identifier)
+        # These are function pointer assignments — declare B as void*
+        assign_rhs = set()
+        for m in re.finditer(r'^\s+\w+\s*=\s*(\w+)\s*;$', full, re.MULTILINE):
+            rhs = m.group(1)
+            if not rhs[0].isdigit() and rhs not in ('0', 'NULL', 'true', 'false'):
+                assign_rhs.add(rhs)
         for name in sorted(undeclared):
             if name in already or name in funcs: continue
             if re.search(r'\*\s*\(' + re.escape(name) + r'\)|' + re.escape(name) + r'\s*->', full):
                 stubs += f'extern void *{name};\n'
+            elif name in assign_rhs and name not in stubs_types:
+                stubs += f'extern void *{name};\n'
             elif name[0].isupper() or name.endswith('_t'):
                 stubs += f'typedef int {name};\n'
+                # Used in A = B assignment — declare as void* for function pointer compat
+                stubs += f'extern void *{name};\n'
             else:
                 stubs += f'extern int {name};\n'
         if not stubs: break
