@@ -1016,6 +1016,16 @@ private:
     // ── Write to an operand destination ─────────────────────────────
     void writeOp(cs_x86_op &op, std::unique_ptr<IRExpr> val, BasicBlock &bb, TypeRef t = NullType) {
         if (op.type == X86_OP_REG) {
+            // Mark XMM register values as float
+            x86_reg cr = canonReg(op.reg);
+            if (t == NullType && cr >= X86_REG_XMM0 && cr <= X86_REG_XMM7) {
+                // Find the float TypeRef from STABS (use the first float local's type)
+                for (auto &l : m_func->locals)
+                    if (l.typeRef != NullType) {
+                        auto *lt = m_types.resolveType(l.typeRef);
+                        if (lt && lt->kind == StabsTypeKind::Float) { t = l.typeRef; break; }
+                    }
+            }
             assignReg(op.reg, std::move(val), bb, t);
         } else if (op.type == X86_OP_MEM) {
             // Preserve byte-width stores for matching

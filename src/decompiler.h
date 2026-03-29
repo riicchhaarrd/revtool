@@ -2910,9 +2910,28 @@ private:
             if (e->op == IROp::Cast &&
                 (e->castKind == CastKind::IntToFloat || e->castKind == CastKind::FloatToInt))
                 return e->castKind == CastKind::IntToFloat ? "float" : "int";
-            if (e->op == IROp::Var && (e->name.find(".0f") != std::string::npos ||
-                                        e->name.find(".0") != std::string::npos))
-                return "float";
+            if (e->op == IROp::Var) {
+                // Float literal names
+                if (!e->name.empty() && (e->name.find(".0f") != std::string::npos ||
+                    e->name.find(".0") != std::string::npos))
+                    return "float";
+                // Check STABS type of the variable
+                for (auto &l : m_func.locals)
+                    if (l.name == e->name && l.typeRef != NullType) {
+                        auto *lt = m_types.resolveType(l.typeRef);
+                        if (lt && (lt->kind == StabsTypeKind::Float || lt->kind == StabsTypeKind::Double))
+                            return "float";
+                        std::string fmt = m_types.formatType(l.typeRef);
+                        if (fmt == "float" || fmt == "double" || fmt == "vec_t")
+                            return "float";
+                    }
+                for (auto &p : m_func.params)
+                    if (p.name == e->name && p.typeRef != NullType) {
+                        std::string fmt = m_types.formatType(p.typeRef);
+                        if (fmt.find("float") != std::string::npos || fmt.find("vec_t") != std::string::npos)
+                            return "float";
+                    }
+            }
             // Comparison results → int (boolean)
             if (e->op >= IROp::Eq && e->op <= IROp::Uge) return "int";
             // If this temp has a known struct pointer type from Field access, use it
@@ -2922,8 +2941,73 @@ private:
                     return m_types.formatType(sit->second);
             }
             // If this temp is used as a pointer (dereferenced), declare as char*
-            // (char* is compatible with pointer arithmetic and casting)
             if (m_pointerTemps.count(id)) return "int *";
+            // Check if defined by arithmetic with float operands
+            if (e->op == IROp::Mul || e->op == IROp::Add || e->op == IROp::Sub ||
+                e->op == IROp::Neg || e->op == IROp::SDiv) {
+                for (auto &k : e->kids) {
+                    if (!k) continue;
+                    // Check if operand is a known float
+                    if (k->op == IROp::Var) {
+                        // Float literal names (e.g., "1.0f", "0.5f")
+                        if (!k->name.empty() && (k->name.find('.') != std::string::npos ||
+                            k->name.back() == 'f'))
+                            return "float";
+                        // STABS locals/params with float type
+                        for (auto &l : m_func.locals)
+                            if (l.name == k->name && l.typeRef != NullType) {
+                                auto *lt = m_types.resolveType(l.typeRef);
+                                if (lt && (lt->kind == StabsTypeKind::Float ||
+                                           lt->kind == StabsTypeKind::Double))
+                                    return "float";
+                            }
+                        for (auto &p : m_func.params)
+                            if (p.name == k->name && p.typeRef != NullType) {
+                                auto *pt = m_types.resolveType(p.typeRef);
+                                if (pt && (pt->kind == StabsTypeKind::Float ||
+                                           pt->kind == StabsTypeKind::Double))
+                                    return "float";
+                            }
+                    }
+                    // Check if operand is a Temp with known float type
+                    if (k->op == IROp::Temp) {
+                        auto tit = m_func.tempTypes.find(k->tempId());
+                        if (tit != m_func.tempTypes.end() && tit->second != NullType) {
+                            auto *tt = m_types.resolveType(tit->second);
+                            if (tt && (tt->kind == StabsTypeKind::Float ||
+                                       tt->kind == StabsTypeKind::Double))
+                                return "float";
+                        }
+                        // Check the coalesced var type
+                        auto vit = m_func.tempToVar.find(k->tempId());
+                        if (vit != m_func.tempToVar.end()) {
+                            auto vtit = m_func.varTypes.find(vit->second);
+                            if (vtit != m_func.varTypes.end() && vtit->second != NullType) {
+                                std::string fmt = m_types.formatType(vtit->second);
+                                if (fmt == "float" || fmt == "double" || fmt == "vec_t")
+                                    return "float";
+                            }
+                        }
+                        // Recursive: check if the operand temp itself infers to float
+                        if (inferTempType(k->tempId()) == "float")
+                            return "float";
+                    }
+                    // Check if operand is a Call to a known float-returning function
+                    if (k->op == IROp::Call) {
+                        std::string cname = k->name;
+                        if (cname == "fabsf" || cname == "sqrtf" || cname == "fminf" ||
+                            cname == "fmaxf" || cname == "sinf" || cname == "cosf" ||
+                            cname == "floorf" || cname == "ceilf" || cname == "acosf")
+                            return "float";
+                    }
+                }
+            }
+            // Check if the defining expression is a Load or Temp copy
+            // that can be traced to a float value
+            if (e->op == IROp::Temp) {
+                // Copy from another temp — recurse
+                return inferTempType(e->tempId());
+            }
             return "int";
         }
 
