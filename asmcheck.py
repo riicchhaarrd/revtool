@@ -365,19 +365,25 @@ def compile_to_asm(c_code):
         call_args = set()  # unused — kept for compatibility
         for name in sorted(undeclared):
             if name in already or name in funcs or name in extracted: continue
+            # Use static for real globals to get direct addressing (no non_lazy_ptr).
+            # Don't use static for decompiler-generated names (vN, varN, tN, gN)
+            # which might shadow local variables.
+            is_real_global = (not re.match(r'^(v\d|var_|t\d|g_)', name) and
+                              len(name) > 2 and name[0].islower())
+            qual = 'static ' if is_real_global else ''
             if re.search(r'\*\s*\(' + re.escape(name) + r'\)|' +
                           re.escape(name) + r'\s*->|' +
                           re.escape(name) + r'\s*\[', full):
-                stubs += f'extern int *{name};\n'
+                stubs += f'{qual}int *{name};\n'
             elif name.endswith('_f'):
                 stubs += f'void {name}(void);\n'
             elif (name in assign_rhs and name not in stubs_types):
                 if name not in already:
-                    stubs += f'extern void *{name};\n'
+                    stubs += f'{qual}void *{name};\n'
             elif name[0].isupper() or name.endswith('_t'):
                 stubs += f'typedef int {name};\n'
             else:
-                stubs += f'extern int {name};\n'
+                stubs += f'{qual}int {name};\n'
         if not stubs: break
         idx = full.find(STUBS) + len(STUBS) if STUBS in full else 0
         full = full[:idx] + stubs + full[idx:]
@@ -496,6 +502,23 @@ def norm_stream(insns):
                 result.append(f'{m.group(1)} {m.group(2)}, <C>')
                 i += 2
                 continue
+        # Normalize tail call: call X; leave; ret -> call X (drop leave+ret)
+        if (i + 2 < len(insns) and
+            n.startswith('call ') and
+            norm(insns[i+1]) == 'popl %ebp' and
+            norm(insns[i+2]).startswith('ret')):
+            result.append(insns[i])  # keep the call
+            i += 3  # skip leave+ret
+            continue
+        # Normalize original tail call: leave; jmp X -> call X (jmp = tail call)
+        if (i + 1 < len(insns) and
+            n == 'popl %ebp' and
+            norm(insns[i+1]).startswith('jmp ')):
+            next_n = norm(insns[i+1])
+            # Convert jmp to call for comparison
+            result.append('call ' + next_n.split(' ', 1)[1])
+            i += 2
+            continue
         result.append(insns[i])
         i += 1
     return result
@@ -596,8 +619,10 @@ def check_function(name_or_addr, data, text_addr, text_off, verbose=True):
     orig = disasm_original(data, text_addr, text_off, func_addr)
 
     # Normalize recompiled stream (collapse non_lazy_ptr patterns)
+    # Normalize both streams
+    orig = norm_stream(orig)
     recomp = norm_stream(recomp)
-    # Normalize both streams: remove sub esp from prologue if sizes differ
+    # Remove sub esp from prologue if sizes differ
     # (compiler may add/omit stack frame based on alignment needs)
     orig = norm_prologue(orig, recomp)
     recomp = norm_prologue(recomp, orig)

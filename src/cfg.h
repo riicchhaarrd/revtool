@@ -584,12 +584,27 @@ private:
                                         trueTerminates = true;
                                 }
                                 if (convergence < 0 && trueTerminates) {
-                                    // Both paths return — emit if(cond) { true; } false;
-                                    std::vector<bool> thenVisited = visited;
-                                    ifNode->children.push_back(structureRegion(trueB, n, thenVisited));
-                                    for (int vi = 0; vi < n; ++vi) if (thenVisited[vi]) visited[vi] = true;
-                                    block->children.push_back(std::move(ifNode));
-                                    cur = falseB;
+                                    // Both paths terminate. Check if trueB is small
+                                    // (single block with few stmts = error/exit handler).
+                                    // If so, swap to preserve the original branch direction.
+                                    auto &tbb = m_func->blocks[trueB];
+                                    bool trueIsSmall = (tbb.stmts.size() <= 6 && tbb.succs.empty());
+                                    if (trueIsSmall) {
+                                        // Swap: emit if(!cond) { falseB } trueB
+                                        auto swapNode = StructNode::mkIf(last.expr.get(), true);
+                                        std::vector<bool> falseVisited = visited;
+                                        swapNode->children.push_back(structureRegion(falseB, n, falseVisited));
+                                        for (int vi = 0; vi < n; ++vi) if (falseVisited[vi]) visited[vi] = true;
+                                        block->children.push_back(std::move(swapNode));
+                                        cur = trueB;
+                                    } else {
+                                        // Keep original order: if(cond) { trueB } falseB
+                                        std::vector<bool> thenVisited = visited;
+                                        ifNode->children.push_back(structureRegion(trueB, n, thenVisited));
+                                        for (int vi = 0; vi < n; ++vi) if (thenVisited[vi]) visited[vi] = true;
+                                        block->children.push_back(std::move(ifNode));
+                                        cur = falseB;
+                                    }
                                 } else {
                                     // Emit as if/else
                                     std::vector<bool> thenVisited = visited;
