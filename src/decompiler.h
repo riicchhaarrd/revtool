@@ -1488,21 +1488,31 @@ private:
         // Copy propagation: replace temps that are simple copies of vars/other temps
         void runCopyPropagation() {
             // Pass 1: find all temps that are simple copies
+            // First, find temps assigned non-constant values (loop-updated temps)
+            std::set<int> hasNonConstAssign;
+            for (auto &bb : m_func.blocks)
+                for (auto &stmt : bb.stmts)
+                    if (stmt.kind == IRStmtKind::Assign && stmt.destTemp >= 0 &&
+                        stmt.expr && !stmt.expr->isConst())
+                        hasNonConstAssign.insert(stmt.destTemp);
+
             for (auto &bb : m_func.blocks) {
                 for (auto &stmt : bb.stmts) {
                     if (stmt.kind != IRStmtKind::Assign) continue;
                     if (!stmt.expr) continue;
-                    // NOTE: phi temps (from destroySSA) are NOT skipped here because
-                    // skipping them breaks the emitter for large functions.
                     // t = var → replace all uses of t with var
                     if (stmt.expr->op == IROp::Var) {
                         m_copyMap[stmt.destTemp] = stmt.expr->name;
                         m_copyPropagated.insert(stmt.destTemp);
                     }
                     // t = const → propagate constant
+                    // BUT skip if this temp is ALSO assigned a non-constant
+                    // (loop phi: t = 0 in preheader, t = t+stride in back-edge)
                     if (stmt.expr->op == IROp::Const) {
-                        m_constMap[stmt.destTemp] = stmt.expr->value;
-                        m_copyPropagated.insert(stmt.destTemp);
+                        if (!hasNonConstAssign.count(stmt.destTemp)) {
+                            m_constMap[stmt.destTemp] = stmt.expr->value;
+                            m_copyPropagated.insert(stmt.destTemp);
+                        }
                     }
                 }
             }

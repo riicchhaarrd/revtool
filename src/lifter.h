@@ -529,9 +529,8 @@ public:
         }
 
         // ── Pass 8: fix loop-carried register state ────────────────
-        // DISABLED: needs optimization — current O(n³) is too slow.
-        // TODO: integrate into the SSA pass or use worklist algorithm.
-        if (false) {
+        // DISABLED pending crash fix (segfault on some functions)
+        if (false && (int)func.blocks.size() <= 50 && func.nextTemp < 500) {
             // Compute dominators
             int n = (int)func.blocks.size();
             func.idom.assign(n, -1);
@@ -599,52 +598,50 @@ public:
                 }
             }
 
+            // Pre-compute dominator children for efficient subtree queries
+            std::vector<std::vector<int>> domChildren(n);
+            for (int b = 1; b < n; ++b)
+                if (func.idom[b] >= 0 && func.idom[b] < n)
+                    domChildren[func.idom[b]].push_back(b);
+
             for (auto &[headerId, backEdgeSources] : loopHeaders) {
                 auto &header = func.blocks[headerId];
-                std::set<int> loopBlocks;
-                for (int src : backEdgeSources)
-                    for (int bi = 0; bi < n; ++bi) {
-                        // Block is in loop if header dominates it and it can reach a back-edge source
-                        int r = bi;
-                        bool dominated = false;
-                        int lim = n;
-                        while (r >= 0 && lim-- > 0) {
-                            if (r == headerId) { dominated = true; break; }
-                            if (r == func.idom[r]) break;
-                            r = func.idom[r];
-                        }
-                        if (dominated) loopBlocks.insert(bi);
-                    }
 
-                // Find temps assigned in loop body by induction: t2 = t1 + const
-                std::set<int> loopDefinedTemps;
-                for (int bi : loopBlocks) {
-                    auto &lb = func.blocks[bi];
-                    for (auto &stmt : lb.stmts) {
-                        if (stmt.kind == IRStmtKind::Assign && stmt.destTemp >= 0)
-                            loopDefinedTemps.insert(stmt.destTemp);
+                // Efficiently find all blocks dominated by header (DFS on dom tree)
+                std::set<int> loopBlocks;
+                {
+                    std::vector<int> stk = {headerId};
+                    while (!stk.empty()) {
+                        int b = stk.back(); stk.pop_back();
+                        loopBlocks.insert(b);
+                        for (int c : domChildren[b]) stk.push_back(c);
                     }
                 }
 
-                for (int loopTemp : loopDefinedTemps) {
-                    int baseTemp = -1;
-                    for (int bi : loopBlocks) {
-                        auto &lb = func.blocks[bi];
-                        for (auto &stmt : lb.stmts) {
-                            if (stmt.kind != IRStmtKind::Assign || stmt.destTemp != loopTemp) continue;
-                            if (!stmt.expr) continue;
-                            if ((stmt.expr->op == IROp::Add || stmt.expr->op == IROp::Sub) &&
-                                stmt.expr->kids.size() == 2) {
-                                auto *lhs = stmt.expr->kids[0].get();
-                                auto *rhs = stmt.expr->kids[1].get();
-                                if (lhs && lhs->op == IROp::Temp && rhs && rhs->isConst())
-                                    baseTemp = lhs->tempId();
-                                else if (rhs && rhs->op == IROp::Temp && lhs && lhs->isConst())
-                                    baseTemp = rhs->tempId();
-                            }
+                // Collect induction patterns: t2 = t1 + const (in one pass)
+                // Map: baseTemp → loopTemp for each induction variable
+                std::map<int, int> inductionMap; // baseTemp → updatedTemp
+                for (int bi : loopBlocks) {
+                    auto &lb = func.blocks[bi];
+                    for (auto &stmt : lb.stmts) {
+                        if (stmt.kind != IRStmtKind::Assign || stmt.destTemp < 0) continue;
+                        if (!stmt.expr) continue;
+                        if ((stmt.expr->op == IROp::Add || stmt.expr->op == IROp::Sub) &&
+                            stmt.expr->kids.size() == 2) {
+                            auto *lhs = stmt.expr->kids[0].get();
+                            auto *rhs = stmt.expr->kids[1].get();
+                            int baseTemp = -1;
+                            if (lhs && lhs->op == IROp::Temp && rhs && rhs->isConst())
+                                baseTemp = lhs->tempId();
+                            else if (rhs && rhs->op == IROp::Temp && lhs && lhs->isConst())
+                                baseTemp = rhs->tempId();
+                            if (baseTemp >= 0)
+                                inductionMap[baseTemp] = stmt.destTemp;
                         }
                     }
-                    if (baseTemp < 0) continue;
+                }
+
+                for (auto &[baseTemp, loopTemp] : inductionMap) {
 
                     // Insert copies instead of phi (emitter doesn't handle phis from pass 8)
                     // phiTemp = baseTemp (at preheader predecessors)
