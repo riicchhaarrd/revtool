@@ -213,7 +213,49 @@ def compile_to_asm(c_code):
                 if dep not in visited and dep not in stubs_types:
                     queue.append(dep)
 
-    # Build: STUBS + extracted types (dependency-ordered) + code
+    # Extract function prototypes for key functions that return typed pointers.
+    # Only include prototypes whose return types AND param types are all defined.
+    func_protos = ''
+    lines = _load_types_header()
+    if lines:
+        in_protos = False
+        # Functions called in the code whose return value is assigned
+        assigned_calls = set()
+        for m in re.finditer(r'(\w+)\s*=\s*(\w+)\s*\(', c_code):
+            assigned_calls.add(m.group(2))
+        for line in lines:
+            if '/* Function prototypes */' in line:
+                in_protos = True
+                continue
+            if not in_protos:
+                continue
+            # Extract function name from prototype line
+            m = re.match(r'(?:const\s+)?(?:struct\s+)?(?:\w[\w\s\*]*?)\s+\*?\s*(\w+)\s*\(', line.strip())
+            if not m or m.group(1) not in assigned_calls:
+                continue
+            proto_name = m.group(1)
+            # Don't add if function is defined in the code
+            if re.search(r'\b' + re.escape(proto_name) + r'\s*\([^)]*\)\s*\{', c_code):
+                continue
+            # Only include if all types in the prototype are known
+            # (check for struct/union references that aren't extracted)
+            proto_types = re.findall(r'\b(struct|union)\s+(\w+)', line)
+            all_known = True
+            for kw, tname in proto_types:
+                if tname not in extracted and tname + '_t' not in stubs_types and tname not in stubs_types:
+                    all_known = False; break
+            if not all_known:
+                continue
+            # Skip prototypes with unknown typedefs
+            skip = False
+            for word in re.findall(r'\b(\w+_t)\b', line):
+                if word not in stubs_types and word not in extracted:
+                    skip = True; break
+            if skip:
+                continue
+            func_protos += line
+
+    # Build: STUBS + extracted types (dependency-ordered) + prototypes + code
     # Topological sort: emit dependencies before dependents
     ordered = []
     emitted_set = set()
@@ -236,7 +278,7 @@ def compile_to_asm(c_code):
     for name in extracted:
         emit_type(name)
     types_block = '\n'.join(ordered)
-    full = STUBS + '\n' + types_block + '\n' + c_code
+    full = STUBS + '\n' + types_block + '\n' + func_protos + '\n' + c_code
 
     # Try compile
     ok, stdout, stderr = _try_compile(full)
