@@ -542,7 +542,7 @@ def norm_stream(insns):
                 i += 2
                 continue
         # Collapse: movl <C>, %reg; movl val, (%reg) -> movl val, <C>
-        # (store through non_lazy_ptr / pointer indirection)
+        # (store through non_lazy_ptr)
         if (i + 1 < len(insns) and
             n.startswith('movl <C>, %') and is_nlp):
             reg = n.split(', ')[1]
