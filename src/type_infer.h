@@ -114,14 +114,21 @@ private:
             m_knownType[ra] = kb->second;
         else if (ka != m_knownType.end() && kb == m_knownType.end())
             m_knownType[ra] = ka->second;
-        // If both have types, prefer the more specific (non-int) one
+        // If both have types, prefer the more specific one
         else if (ka != m_knownType.end() && kb != m_knownType.end()) {
             auto *ta = m_types->resolveType(ka->second);
             auto *tb = m_types->resolveType(kb->second);
             if (ta && tb) {
-                // Prefer pointer/struct over plain int
-                if (ta->kind == StabsTypeKind::Int && tb->kind != StabsTypeKind::Int)
+                // Float is highest priority (SSE operations are definitively float)
+                bool aFloat = (ta->kind == StabsTypeKind::Float || ta->kind == StabsTypeKind::Double);
+                bool bFloat = (tb->kind == StabsTypeKind::Float || tb->kind == StabsTypeKind::Double);
+                if (bFloat && !aFloat)
                     m_knownType[ra] = kb->second;
+                else if (!aFloat && !bFloat) {
+                    // Prefer pointer/struct over plain int
+                    if (ta->kind == StabsTypeKind::Int && tb->kind != StabsTypeKind::Int)
+                        m_knownType[ra] = kb->second;
+                }
             }
         }
     }
@@ -133,11 +140,15 @@ private:
         if (kit == m_knownType.end()) {
             m_knownType[root] = tref;
         } else {
-            // Prefer more specific type
+            // Prefer more specific type: Float > Pointer > Struct > Int
             auto *existing = m_types->resolveType(kit->second);
             auto *candidate = m_types->resolveType(tref);
             if (existing && candidate) {
-                if (existing->kind == StabsTypeKind::Int && candidate->kind != StabsTypeKind::Int)
+                bool candFloat = (candidate->kind == StabsTypeKind::Float || candidate->kind == StabsTypeKind::Double);
+                bool exFloat = (existing->kind == StabsTypeKind::Float || existing->kind == StabsTypeKind::Double);
+                if (candFloat && !exFloat)
+                    m_knownType[root] = tref;
+                else if (existing->kind == StabsTypeKind::Int && candidate->kind != StabsTypeKind::Int)
                     m_knownType[root] = tref;
             }
         }

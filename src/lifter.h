@@ -1014,8 +1014,41 @@ private:
     }
 
     // ── Write to an operand destination ─────────────────────────────
+    // Cached float TypeRef from STABS (resolved once per function)
+    TypeRef m_floatTypeRef = NullType;
+    bool m_floatTypeResolved = false;
+
+    TypeRef getFloatTypeRef() {
+        if (!m_floatTypeResolved) {
+            m_floatTypeResolved = true;
+            // Find a float TypeRef from STABS locals/params
+            for (auto &l : m_func->locals)
+                if (l.typeRef != NullType) {
+                    std::string fmt = m_types.formatType(l.typeRef);
+                    if (fmt == "float" || fmt == "vec_t") {
+                        m_floatTypeRef = l.typeRef; break;
+                    }
+                }
+            if (m_floatTypeRef == NullType)
+                for (auto &p : m_func->params)
+                    if (p.typeRef != NullType) {
+                        std::string fmt = m_types.formatType(p.typeRef);
+                        if (fmt == "float" || fmt == "vec_t") {
+                            m_floatTypeRef = p.typeRef; break;
+                        }
+                    }
+        }
+        return m_floatTypeRef;
+    }
+
     void writeOp(cs_x86_op &op, std::unique_ptr<IRExpr> val, BasicBlock &bb, TypeRef t = NullType) {
         if (op.type == X86_OP_REG) {
+            // XMM register values are always float
+            if (t == NullType) {
+                x86_reg cr = canonReg(op.reg);
+                if (cr >= X86_REG_XMM0 && cr <= X86_REG_XMM7)
+                    t = getFloatTypeRef();
+            }
             assignReg(op.reg, std::move(val), bb, t);
         } else if (op.type == X86_OP_MEM) {
             // Preserve byte-width stores for matching
