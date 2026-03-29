@@ -373,6 +373,23 @@ private:
 
         // Load(addr) -> type is the pointee type of addr
         if (e->op == IROp::Load && !e->kids.empty()) {
+            // Special case: Load(Add(structPtr, const)) → field type
+            auto *addr = e->kids[0].get();
+            if (addr && addr->op == IROp::Add && addr->kids.size() == 2 &&
+                addr->kids[1] && addr->kids[1]->isConst()) {
+                TypeRef baseType = inferExprType(addr->kids[0].get());
+                if (baseType != NullType) {
+                    TypeRef pointee = m_types->derefPointer(baseType);
+                    if (pointee != NullType) {
+                        auto *pt = m_types->resolveType(pointee);
+                        if (pt && (pt->kind == StabsTypeKind::Struct || pt->kind == StabsTypeKind::Union)) {
+                            // Don't return the struct type — return NullType so the
+                            // temp gets a scalar type from context instead
+                            return NullType;
+                        }
+                    }
+                }
+            }
             TypeRef addrType = inferExprType(e->kids[0].get());
             if (addrType != NullType) {
                 TypeRef pointee = m_types->derefPointer(addrType);

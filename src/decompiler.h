@@ -1300,6 +1300,45 @@ private:
                     }
                     if (ttype.empty())
                         ttype = inferTempType(id);
+                    // If type is a pointer but the temp is used in multiplication,
+                    // it's actually a scalar value (not a pointer)
+                    if (ttype.find("*") != std::string::npos && ttype.find("char *") == std::string::npos) {
+                        // Collect all temps in this coalesced group
+                        std::set<int> groupTemps;
+                        if (vit != m_func.tempToVar.end()) {
+                            int vid = vit->second;
+                            for (auto &[t2, v2] : m_func.tempToVar)
+                                if (v2 == vid) groupTemps.insert(t2);
+                        }
+                        groupTemps.insert(id);
+                        bool usedInMul = false;
+                        std::function<bool(const IRExpr*)> hasMulChild;
+                        hasMulChild = [&](const IRExpr *e) -> bool {
+                            if (!e) return false;
+                            if (e->op == IROp::Mul || e->op == IROp::SDiv) return true;
+                            for (auto &k : e->kids) if (hasMulChild(k.get())) return true;
+                            return false;
+                        };
+                        for (auto &bb : m_func.blocks) {
+                            for (auto &stmt : bb.stmts) {
+                                // Check if any group temp is used as Mul operand
+                                if (stmt.expr && (stmt.expr->op == IROp::Mul ||
+                                    stmt.expr->op == IROp::SDiv))
+                                    for (auto &k : stmt.expr->kids)
+                                        if (k && k->op == IROp::Temp && groupTemps.count(k->tempId()))
+                                            usedInMul = true;
+                                // Check if any group temp is DEFINED by an expression containing Mul
+                                if (stmt.kind == IRStmtKind::Assign && groupTemps.count(stmt.destTemp))
+                                    if (hasMulChild(stmt.expr.get()))
+                                        usedInMul = true;
+                            }
+                        }
+                        if (usedInMul) {
+                            size_t star = ttype.find(" *");
+                            if (star != std::string::npos)
+                                ttype = ttype.substr(0, star);
+                        }
+                    }
                     // Override to struct pointer if temp is used with -> field access
                     if (ttype == "int" || ttype == "int *") {
                         auto sit = m_tempStructPtr.find(id);

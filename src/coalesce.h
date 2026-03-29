@@ -327,9 +327,8 @@ public:
                 if (rt && (rt->kind == StabsTypeKind::Struct || rt->kind == StabsTypeKind::Union))
                     isStructPtrType = true;
                 if (rt && rt->kind == StabsTypeKind::Pointer) {
-                    auto *pt = types.resolveType(rt->targetType);
-                    if (pt && (pt->kind == StabsTypeKind::Struct || pt->kind == StabsTypeKind::Union))
-                        isStructPtrType = true;
+                    // ANY pointer type used in multiplication is wrong
+                    isStructPtrType = true;
                 }
                 // Also check by formatted name — STABS type table conflicts can
                 // cause resolveType to return Int for what's actually a struct

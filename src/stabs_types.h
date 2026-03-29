@@ -341,12 +341,36 @@ public:
 
     // Format a field access with array subscript when the offset falls inside an array field.
     // Returns "fieldName" for exact match, "fieldName[i]" for array, "fieldName.subfield" for nested struct.
-    std::string formatFieldAccess(TypeRef ref, int byteOffset) const {
+    std::string formatFieldAccess(TypeRef ref, int byteOffset, bool debug = false) const {
         auto *t = resolveType(ref);
         if (!t || (t->kind != StabsTypeKind::Struct && t->kind != StabsTypeKind::Union))
             return "";
         int bitTarget = byteOffset * 8;
-        // Exact match first
+
+        // Check "inside larger field" FIRST — prefer array element access over
+        // overlapping field exact matches
+        for (auto &f : t->fields) {
+            if (f.name.empty() || f.name[0] == '!' || f.name[0] == '/' ||
+                f.name.find("::") != std::string::npos ||
+                (f.bitSize == 0 && f.bitOffset == 0))
+                continue;
+            if (bitTarget > f.bitOffset && bitTarget < f.bitOffset + f.bitSize) {
+                int fieldByteStart = f.bitOffset / 8;
+                int offsetInField = byteOffset - fieldByteStart;
+                auto *ft = resolveType(f.typeRef);
+                if (ft && ft->kind == StabsTypeKind::Array) {
+                    auto *elemT = resolveType(ft->targetType);
+                    int elemSize = elemT ? elemT->sizeBytes : 4;
+                    if (elemSize <= 0) elemSize = 4;
+                    int idx = offsetInField / elemSize;
+                    int subOff = offsetInField % elemSize;
+                    if (subOff == 0)
+                        return f.name + "[" + std::to_string(idx) + "]";
+                }
+            }
+        }
+
+        // Exact match
         for (auto &f : t->fields) {
             // Skip C++ artifacts (inheritance markers, methods, operators, etc.)
             if (f.name.empty() || f.name[0] == '!' || f.name[0] == '/' ||
@@ -358,6 +382,25 @@ public:
                 (f.bitSize == 0 && f.bitOffset == 0))
                 continue;
             if (f.bitOffset == bitTarget || f.bitOffset / 8 == byteOffset) {
+                // Check if this field is actually inside a larger array field
+                // (STABS may have overlapping fields for array elements)
+                for (auto &af : t->fields) {
+                    if (af.name.empty() || af.bitSize == 0) continue;
+                    auto *aft = resolveType(af.typeRef);
+                    if (aft && aft->kind == StabsTypeKind::Array &&
+                        bitTarget >= af.bitOffset && bitTarget < af.bitOffset + af.bitSize &&
+                        af.bitOffset != bitTarget) {
+                        // This offset is inside a larger array field — prefer array access
+                        auto *elemT = resolveType(aft->targetType);
+                        int elemSize = elemT ? elemT->sizeBytes : 4;
+                        if (elemSize <= 0) elemSize = 4;
+                        int elemOff = (byteOffset - af.bitOffset/8);
+                        int idx = elemOff / elemSize;
+                        int subOff = elemOff % elemSize;
+                        if (subOff == 0)
+                            return af.name + "[" + std::to_string(idx) + "]";
+                    }
+                }
                 // If this field is a struct, the code might be accessing its first sub-field.
                 // We drill down one level if the struct has a known scalar first field.
                 auto *ft = resolveType(f.typeRef);
