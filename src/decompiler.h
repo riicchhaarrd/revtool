@@ -3549,14 +3549,19 @@ private:
                 m_addrDepth++;
                 std::string addr = emitExpr(inner_e->kids[0].get());
                 m_addrDepth--;
-                return "*(unsigned char *)(" + addr + ")";
+                // Use (char*) cast for proper byte addressing when addr has pointer arithmetic
+                if (addr.find("_p + ") != std::string::npos || addr.find("_p)") != std::string::npos)
+                    return "*(unsigned char *)(" + addr + ")";
+                return "*(unsigned char *)((char *)" + addr + ")";
             }
             if ((e->castKind == CastKind::ZeroExt16 || e->castKind == CastKind::Trunc16) &&
                 inner_e->op == IROp::Load && !inner_e->kids.empty()) {
                 m_addrDepth++;
                 std::string addr = emitExpr(inner_e->kids[0].get());
                 m_addrDepth--;
-                return "*(unsigned short *)(" + addr + ")";
+                if (addr.find("_p + ") != std::string::npos || addr.find("_p)") != std::string::npos)
+                    return "*(unsigned short *)(" + addr + ")";
+                return "*(unsigned short *)((char *)" + addr + ")";
             }
             switch (e->castKind) {
             case CastKind::ZeroExt8:   return "(unsigned char)(" + inner + ")";
@@ -3564,7 +3569,12 @@ private:
             case CastKind::SignExt8:   return "(signed char)(" + inner + ")";
             case CastKind::SignExt16:  return "(short)(" + inner + ")";
             case CastKind::Trunc8:     return "(unsigned char)(" + inner + ")";
-            case CastKind::Trunc16:    return "(short)(" + inner + ")";
+            case CastKind::Trunc16:
+                // If inner is a variable (not an expression), use *(short*)&var
+                // to read the 16-bit value at the variable's address
+                if (inner_e->op == IROp::Var)
+                    return "*(short *)(&" + inner + ")";
+                return "(short)(" + inner + ")";
             case CastKind::IntToFloat: return "(double)(" + inner + ")";
             case CastKind::FloatToInt: return "(int)(" + inner + ")";
             case CastKind::BitCast:    return inner;

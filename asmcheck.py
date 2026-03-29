@@ -430,6 +430,11 @@ def norm(s):
     s = re.sub(r'^retl\b', 'ret', s)
     s = re.sub(r'^calll\b', 'call', s)
     s = re.sub(r'^leave$', 'popl %ebp', s)
+    # Normalize string ops: repe/repz and repne/repnz
+    s = re.sub(r'^repe\b', 'repz', s)
+    s = re.sub(r'^repne\b', 'repnz', s)
+    # Strip operands from cmpsb (implicit esi/edi)
+    s = re.sub(r'^(repz cmpsb).*', r'\1', s)
     # testb %Xl, %Xl -> testl %eXx, %eXx (equivalent for zero-check)
     s = re.sub(r'^testb %([a-d])l, %\1l', r'testl %e\1x, %e\1x', s)
     # movzbl N(%reg), %eXx → movl N(%reg), %eXx for comparison purposes
@@ -520,9 +525,9 @@ def norm_stream(insns):
         n = norm(insns[i])
         # Collapse: movl <C>, %reg; movl (%reg), %reg -> movl <C>, %reg
         # This is the non_lazy_ptr indirection pattern
+        is_nlp = 'non_lazy_ptr' in insns[i]
         if (i + 1 < len(insns) and
-            n.startswith('movl <C>, %') and
-            'non_lazy_ptr' in insns[i]):
+            n.startswith('movl <C>, %') and is_nlp):
             reg = n.split(', ')[1]
             next_n = norm(insns[i+1])
             # Same register: movl (%reg), %reg
@@ -537,10 +542,9 @@ def norm_stream(insns):
                 i += 2
                 continue
         # Collapse: movl <C>, %reg; movl val, (%reg) -> movl val, <C>
-        # (store through non_lazy_ptr)
+        # (store through non_lazy_ptr / pointer indirection)
         if (i + 1 < len(insns) and
-            n.startswith('movl <C>, %') and
-            'non_lazy_ptr' in insns[i]):
+            n.startswith('movl <C>, %') and is_nlp):
             reg = n.split(', ')[1]
             next_n = norm(insns[i+1])
             m = re.match(r'movl (.+), \(' + re.escape(reg) + r'\)', next_n)
@@ -550,8 +554,7 @@ def norm_stream(insns):
                 continue
         # Collapse: movl <C>, %reg; addl $N, (%reg) -> addl $N, <C>
         if (i + 1 < len(insns) and
-            n.startswith('movl <C>, %') and
-            'non_lazy_ptr' in insns[i]):
+            n.startswith('movl <C>, %') and is_nlp):
             reg = n.split(', ')[1]
             next_n = norm(insns[i+1])
             m = re.match(r'(addl|subl|orl|andl|xorl) (.+), \(' + re.escape(reg) + r'\)', next_n)
@@ -588,7 +591,29 @@ def norm_stream(insns):
             continue
         result.append(insns[i])
         i += 1
-    return result
+    # Post-pass peephole: collapse patterns in result
+    collapsed = []
+    j = 0
+    while j < len(result):
+        rn = norm(result[j])
+        # repz + cmpsb → repz cmpsb (GCC emits prefix as separate instruction)
+        if (j + 1 < len(result) and rn == 'repz' and
+            norm(result[j+1]).startswith('cmps')):
+            collapsed.append('repz ' + norm(result[j+1]))
+            j += 2
+            continue
+        # movl <C>, %reg; movl %reg, <C> → movl <C>, <C>
+        if (j + 1 < len(result) and
+            re.match(r'movl <C>, %e\w+', rn)):
+            reg = rn.split(', ')[1]
+            next_rn = norm(result[j+1])
+            if re.match(r'movl ' + re.escape(reg) + r', <C>', next_rn):
+                collapsed.append('movl <C>, <C>')
+                j += 2
+                continue
+        collapsed.append(result[j])
+        j += 1
+    return collapsed
 
 
 def get_func_addr(name):

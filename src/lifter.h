@@ -1623,9 +1623,11 @@ private:
         if (mn == "cmp" && n == 2) {
             m_flags.lhs = readOp(o[0]);
             m_flags.rhs = readOp(o[1]);
-            // Preserve byte-width for correct comparison codegen (memory operands only)
+            // Preserve sub-dword width for correct comparison codegen
             if (o[0].type == X86_OP_MEM && o[0].size == 1 && m_flags.lhs)
                 m_flags.lhs = IRExpr::mkCast(CastKind::Trunc8, std::move(m_flags.lhs));
+            if (o[0].type == X86_OP_MEM && o[0].size == 2 && m_flags.lhs)
+                m_flags.lhs = IRExpr::mkCast(CastKind::Trunc16, std::move(m_flags.lhs));
             m_flags.op = IROp::Sub;
             return;
         }
