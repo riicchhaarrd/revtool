@@ -450,6 +450,12 @@ def norm(s):
     # Register-to-base-offset stores: movl %REG, N(%base)
     s = re.sub(r'^movl %(eax|ecx|edx|esi|edi), (\d+\(%e[bsd][xip]\))',
                r'movl %<R>, \2', s)
+    # Normalize stack local offsets: -N(%ebp) → <S>(%ebp)
+    # (stack frame layout varies between compilations)
+    s = re.sub(r'-\d+\(%ebp\)', '<S>(%ebp)', s)
+    # Normalize struct field loads: movl N(%REG), %REG2 where N is small offset
+    s = re.sub(r'^movl (\d+)\(%(eax|ecx|edx|esi|edi|ebx)\), %(eax|ecx|edx|esi|edi)',
+               r'movl \1(%<R>), %<R>', s)
     # Normalize XMM register names (float register allocation varies)
     s = re.sub(r'%xmm[0-7]', '%xmm<N>', s)
     # Normalize index register in indirect calls: call *TABLE(, %REG, N)
