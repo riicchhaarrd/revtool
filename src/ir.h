@@ -306,6 +306,7 @@ struct IRFunc {
     uint32_t                 address = 0;
     TypeRef                  returnType = NullType;
     bool                     isStatic = false;
+    bool                     detectedVoid = false; // heuristic: function returns void despite STABS saying int
     std::vector<StabsTypedVar> params;
     std::vector<StabsTypedVar> locals;
     int                      sourceFileIdx = -1;

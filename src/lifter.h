@@ -804,6 +804,9 @@ private:
                 return IRExpr::mkAddrOf(IRExpr::mkFunc(fit->second));
             { std::string sn = m_mf.symbolNameAtAddress(addr);
               if (!sn.empty()) return IRExpr::mkVar(sn); }
+            // Try nearest symbol for struct field access: globalVar + offset
+            { std::string nearest = m_mf.nearestSymbolName(addr);
+              if (!nearest.empty()) return IRExpr::mkVar(nearest); }
             const Section *dSec = m_mf.sectionForAddress(addr);
             if (dSec && (dSec->segname == "__DATA" || dSec->segname == "__IMPORT")) {
                 char gn[32]; snprintf(gn, sizeof(gn), "g_%X", addr);
@@ -868,6 +871,9 @@ private:
             // Try nlist symbol table for named globals
             std::string symName = m_mf.symbolNameAtAddress(addr);
             if (!symName.empty()) return IRExpr::mkVar(symName);
+            // Try nearest symbol for base+offset access
+            { std::string nearest = m_mf.nearestSymbolName(addr);
+              if (!nearest.empty()) return IRExpr::mkVar(nearest); }
             // For addresses in data sections, use a synthetic global name
             const Section *dataSec = m_mf.sectionForAddress(addr);
             if (dataSec && (dataSec->segname == "__DATA" || dataSec->segname == "__IMPORT")) {
@@ -1487,20 +1493,21 @@ private:
                 std::string retStr = m_types.formatType(m_func->returnType);
                 bool isDefaultInt = (retStr == "int" || retStr == "Bool" || retStr == "BOOL");
                 if (isDefaultInt) {
+                    bool isVoid = false;
                     // If the block has NO statements, the function is an empty stub → void
-                    if (bb.stmts.empty()) {
-                        bb.stmts.push_back(IRStmt::mkReturn());
-                        return;
+                    if (bb.stmts.empty()) isVoid = true;
+                    else {
+                        // If the last statement is a Store/VarSet, EAX is leftover → void
+                        auto &lastStmt = bb.stmts.back();
+                        if (lastStmt.kind == IRStmtKind::Store ||
+                            lastStmt.kind == IRStmtKind::VarSet)
+                            isVoid = true;
+                        // If the last statement is a Call (void call), the function is void
+                        if (lastStmt.kind == IRStmtKind::Call)
+                            isVoid = true;
                     }
-                    // If the last statement is a Store/VarSet, EAX is leftover → void
-                    auto &lastStmt = bb.stmts.back();
-                    if (lastStmt.kind == IRStmtKind::Store ||
-                        lastStmt.kind == IRStmtKind::VarSet) {
-                        bb.stmts.push_back(IRStmt::mkReturn());
-                        return;
-                    }
-                    // If the last statement is a Call (void call), the function is void
-                    if (lastStmt.kind == IRStmtKind::Call) {
+                    if (isVoid) {
+                        m_func->detectedVoid = true;
                         bb.stmts.push_back(IRStmt::mkReturn());
                         return;
                     }

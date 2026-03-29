@@ -1153,7 +1153,9 @@ private:
 
             // Function signature
             std::string retType = "int";
-            if (m_func.returnType != NullType)
+            if (m_func.detectedVoid)
+                retType = "void";
+            else if (m_func.returnType != NullType)
                 retType = m_types.formatType(m_func.returnType);
 
             std::string qual = m_func.isStatic ? "static " : "";
