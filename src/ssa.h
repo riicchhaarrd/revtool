@@ -269,6 +269,25 @@ private:
                                 continue;
                             }
                         }
+                        // Check for induction variable: t2 = t1 + const or t2 = t1 - const
+                        // These represent the same logical register across loop iterations
+                        if (stmt.expr && (stmt.expr->op == IROp::Add || stmt.expr->op == IROp::Sub) &&
+                            stmt.expr->kids.size() == 2) {
+                            IRExpr *lhs = stmt.expr->kids[0].get();
+                            IRExpr *rhs = stmt.expr->kids[1].get();
+                            int srcTemp = -1;
+                            if (lhs && lhs->op == IROp::Temp && rhs && rhs->isConst())
+                                srcTemp = lhs->tempId();
+                            else if (rhs && rhs->op == IROp::Temp && lhs && lhs->isConst())
+                                srcTemp = rhs->tempId();
+                            if (srcTemp >= 0) {
+                                auto sit = func.tempToReg.find(srcTemp);
+                                if (sit != func.tempToReg.end()) {
+                                    func.tempToReg[stmt.destTemp] = sit->second;
+                                    continue;
+                                }
+                            }
+                        }
                         func.tempToReg[stmt.destTemp] = nextReg++;
                     }
                 }
