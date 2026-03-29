@@ -255,6 +255,31 @@ public:
             }
         }
 
+        // ── Pass 3b: detect float-returning calls by post-call FPU usage ─
+        // If the instruction after a call reads ST(0) (fstp, fst, fadd, etc.),
+        // the call returns float/double via the x87 FPU stack.
+        m_floatReturnAddrs.clear();
+        for (size_t i = 0; i + 1 < funcEndIdx; ++i) {
+            if (std::string(insn[i].mnemonic) != "call") continue;
+            std::string nextMn = insn[i+1].mnemonic;
+            // Any FPU instruction that reads ST(0) implies float return
+            if (nextMn == "fstp" || nextMn == "fst" || nextMn == "fmul" ||
+                nextMn == "fmulp" || nextMn == "fadd" || nextMn == "faddp" ||
+                nextMn == "fsub" || nextMn == "fsubp" || nextMn == "fdiv" ||
+                nextMn == "fdivp" || nextMn == "fxch" || nextMn == "fchs" ||
+                nextMn == "fcomp" || nextMn == "fcompp" || nextMn == "fucomip" ||
+                nextMn == "fucomp" || nextMn == "fucompp" || nextMn == "fild" ||
+                nextMn == "fabs") {
+                // Mark the call target address as float-returning
+                if (insn[i].detail && insn[i].detail->x86.op_count >= 1 &&
+                    insn[i].detail->x86.operands[0].type == X86_OP_IMM) {
+                    m_floatReturnAddrs.insert((uint32_t)insn[i].detail->x86.operands[0].imm);
+                }
+                // Also mark by instruction address for indirect calls
+                m_floatRetCallSites.insert(insn[i].address);
+            }
+        }
+
         // ── Pass 4: build param/local offset maps ───────────────────
         m_paramByOffset.clear();
         m_localByOffset.clear();
@@ -527,6 +552,8 @@ private:
     std::map<int, const StabsTypedVar*> m_localByOffset;
     std::map<x86_reg, const StabsTypedVar*> m_regParamRegs;  // register params (regparm)
     std::set<x86_reg> m_regParamInjected;  // which reg params we've already injected
+    std::set<uint32_t> m_floatReturnAddrs;   // call target addresses known to return float
+    std::set<uint32_t> m_floatRetCallSites;  // instruction addresses of float-returning calls
 
     // Register → temp mapping (current state)
     std::map<x86_reg, int> m_regTemps;
@@ -712,9 +739,11 @@ private:
         // String literal?
         std::string s = tryString(v);
         if (!s.empty()) return IRExpr::mkString(s);
-        // Global variable (from STABS)?
+        // Global variable address (from STABS)?
+        // An immediate that matches a global address is &global, not *global.
+        // Loading the value would be mov eax, [addr] (memory operand), not mov eax, addr (imm).
         auto *g = m_types.globalAtAddress(v);
-        if (g) return IRExpr::mkVar(g->name, g->typeRef);
+        if (g) return IRExpr::mkAddrOf(IRExpr::mkVar(g->name, g->typeRef));
         // Don't resolve function addresses here — they'd be misidentified as data.
         // Function refs are handled in the 'call' and 'lea' instruction handlers.
         return IRExpr::mkConst(imm);
@@ -997,7 +1026,7 @@ private:
         int64_t off = m_mf.fileOffsetForAddress(addr);
         if (off < 0) return "";
         const Section *sec = m_mf.sectionForAddress(addr);
-        if (!sec || (sec->sectname != "__cstring" && sec->sectname != "__const")) return "";
+        if (!sec || sec->sectname != "__cstring") return "";
         const uint8_t *p = m_mf.bytesAt(off, std::min((uint32_t)80, (uint32_t)(m_mf.size() - off)));
         if (!p) return "";
         std::string s;
@@ -1310,6 +1339,17 @@ private:
             }
             return;
         }
+        // General sbb: 64-bit subtract high word.
+        // sub lo, X; sbb hi, Y produces hi:lo = (hi:lo) - (Y:X).
+        // Emit as a simple subtract — the full 64-bit result is consumed
+        // by later patterns (push hi; push lo; fild qword [esp]).
+        if (mn == "sbb" && n == 2) {
+            auto dst = readOp(o[0]);
+            auto src = readOp(o[1]);
+            if (dst && src)
+                writeOp(o[0], IRExpr::mkBinary(IROp::Sub, std::move(dst), std::move(src)), bb);
+            return;
+        }
         // adc reg, 0 → reg = reg + CF → reg = reg + (prev_cmp < 0 unsigned)
         if (mn == "adc" && n == 2 && o[1].type == X86_OP_IMM && o[1].imm == 0) {
             if (m_flags.lhs) {
@@ -1484,12 +1524,33 @@ private:
                 // Fallback: look up by name (handles import stubs → real function)
                 if (!callee && !target.empty())
                     callee = m_mf.stabsFunctionByName(target);
-                if (callee) retType = callee->returnType;
+                if (callee) {
+                    retType = callee->returnType;
+                }
             } else {
                 // Indirect call through function pointer
-                auto tgt = readOp(o[0]);
-                if (tgt) {
-                    // Assign the function pointer to a temp, then call through it
+                if (o[0].type == X86_OP_MEM) {
+                    // Detect vtable call pattern: call [reg + offset]
+                    // where reg was loaded from [this] (i.e., vtable pointer)
+                    auto &mem = o[0].mem;
+                    if (mem.base != X86_REG_INVALID && mem.index == X86_REG_INVALID && mem.disp >= 0) {
+                        int slot = (int)mem.disp / 4;
+                        char buf[32]; snprintf(buf, sizeof(buf), "vfunc_%d", slot);
+                        target = buf;
+                    } else if (mem.base == X86_REG_INVALID && mem.index != X86_REG_INVALID) {
+                        // call [reg*4 + table_addr] — function pointer table
+                        char buf[64]; snprintf(buf, sizeof(buf), "fptable_%X",
+                            (unsigned)(uint32_t)mem.disp);
+                        target = buf;
+                    } else {
+                        auto tgt = readOp(o[0]);
+                        int fpTemp = func.newTemp();
+                        bb.stmts.push_back(IRStmt::mkAssign(fpTemp, std::move(tgt)));
+                        target = "t" + std::to_string(fpTemp);
+                    }
+                } else if (o[0].type == X86_OP_REG) {
+                    // call reg — function pointer in register
+                    auto tgt = readReg(o[0].reg);
                     int fpTemp = func.newTemp();
                     bb.stmts.push_back(IRStmt::mkAssign(fpTemp, std::move(tgt)));
                     target = "t" + std::to_string(fpTemp);
@@ -1522,6 +1583,26 @@ private:
                 if (rt && (rt->kind == StabsTypeKind::Float ||
                            rt->kind == StabsTypeKind::Double ||
                            rt->kind == StabsTypeKind::LongDouble))
+                    isFloatRet = true;
+                // Fallback: check formatted type string for float/double
+                // (handles cases where type table conflicts cause wrong kind)
+                if (!isFloatRet && !isVoid) {
+                    std::string fmtRet = m_types.formatType(retType);
+                    if (fmtRet.find("float") != std::string::npos ||
+                        fmtRet.find("double") != std::string::npos ||
+                        fmtRet == "vec_t" || fmtRet == "const vec_t")
+                        isFloatRet = true;
+                    if (fmtRet == "void") isVoid = true;
+                }
+            }
+            // Detect float return from pre-scan: if the instruction after this
+            // call reads ST(0) (fstp, fst, etc.), the call returns float.
+            if (!isFloatRet && !isVoid) {
+                if (m_floatRetCallSites.count(in.address))
+                    isFloatRet = true;
+                // Also check by target address (covers all call sites to this func)
+                if (o[0].type == X86_OP_IMM &&
+                    m_floatReturnAddrs.count((uint32_t)o[0].imm))
                     isFloatRet = true;
             }
 
@@ -1620,7 +1701,7 @@ private:
             assignReg(X86_REG_ECX, IRExpr::mkTemp(t), bb);
             return;
         }
-        if (mn == "movsb" || mn == "movsd" || mn == "movsw") {
+        if (mn == "movsb" || (mn == "movsd" && n == 0) || mn == "movsw") {
             auto dst = readReg(X86_REG_EDI);
             auto src = readReg(X86_REG_ESI);
             // *(dst) = *(src) — single element copy
@@ -2039,6 +2120,13 @@ private:
     bool liftSSE(const std::string &mn, cs_x86_op *o, int n, BasicBlock &bb, cs_insn &in) {
         // ── Scalar moves: movss, movsd ──────────────────────────────
         if ((mn == "movss" || mn == "movsd") && n == 2) {
+            // movss/movsd [esp+N], xmm → collect as call argument
+            if (o[0].type == X86_OP_MEM && o[0].mem.base == X86_REG_ESP &&
+                o[0].mem.index == X86_REG_INVALID) {
+                auto src = readSSEOp(o[1], mn == "movsd");
+                if (src) m_espArgs[(int)o[0].mem.disp] = std::move(src);
+                return true;
+            }
             auto src = readSSEOp(o[1], mn == "movsd");
             if (src) writeOp(o[0], std::move(src), bb);
             return true;

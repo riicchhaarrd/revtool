@@ -571,18 +571,39 @@ private:
                         if (trueB >= 0 && trueB < n && !visited[trueB] && trueB != falseB) {
                             if (trueB > falseB && (end < 0 || trueB >= end)) {
                                 // Forward jump: trueB is past current region.
-                                // Emit as if/else: if(cond) { trueB_block } else { falseB_to_end }
-                                std::vector<bool> thenVisited = visited;
-                                ifNode->children.push_back(structureRegion(trueB, n, thenVisited));
-                                for (int vi = 0; vi < n; ++vi) if (thenVisited[vi]) visited[vi] = true;
+                                // Check if both paths terminate (no convergence).
+                                // If so, prefer: if(cond) { trueB; return; } falseB;
+                                // This matches the original asm branch direction.
+                                bool trueTerminates = false;
+                                if (trueB >= 0 && trueB < n) {
+                                    auto &tbb = m_func->blocks[trueB];
+                                    if (!tbb.stmts.empty() && tbb.succs.empty())
+                                        trueTerminates = true;
+                                    if (!tbb.stmts.empty() &&
+                                        tbb.stmts.back().kind == IRStmtKind::Return)
+                                        trueTerminates = true;
+                                }
+                                if (convergence < 0 && trueTerminates) {
+                                    // Both paths return — emit if(cond) { true; } false;
+                                    std::vector<bool> thenVisited = visited;
+                                    ifNode->children.push_back(structureRegion(trueB, n, thenVisited));
+                                    for (int vi = 0; vi < n; ++vi) if (thenVisited[vi]) visited[vi] = true;
+                                    block->children.push_back(std::move(ifNode));
+                                    cur = falseB;
+                                } else {
+                                    // Emit as if/else
+                                    std::vector<bool> thenVisited = visited;
+                                    ifNode->children.push_back(structureRegion(trueB, n, thenVisited));
+                                    for (int vi = 0; vi < n; ++vi) if (thenVisited[vi]) visited[vi] = true;
 
-                                std::vector<bool> elseVisited = visited;
-                                auto elseBody = structureRegion(falseB, end, elseVisited);
-                                for (int vi = 0; vi < n; ++vi) if (elseVisited[vi]) visited[vi] = true;
-                                ifNode->elseNode = std::move(elseBody);
+                                    std::vector<bool> elseVisited = visited;
+                                    auto elseBody = structureRegion(falseB, end, elseVisited);
+                                    for (int vi = 0; vi < n; ++vi) if (elseVisited[vi]) visited[vi] = true;
+                                    ifNode->elseNode = std::move(elseBody);
 
-                                block->children.push_back(std::move(ifNode));
-                                cur = -1; // both paths structured
+                                    block->children.push_back(std::move(ifNode));
+                                    cur = -1; // both paths structured
+                                }
                                 continue;
                             } else {
                                 std::vector<bool> thenVisited = visited;

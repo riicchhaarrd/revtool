@@ -324,16 +324,280 @@ public:
         return clangFormat(cleanupOutput(out)); // cleanup + format
     }
 
+    // Dump all STABS types as a C header
+    static QString dumpTypes(const MachOFile &mf) {
+        auto &types = mf.typeTable();
+        QString out;
+        out += "/* Auto-generated type definitions from STABS debug info */\n";
+        out += "#pragma once\n\n";
+        out += platformTypedefs(true); // self-contained, no system headers
+        out += "\n";
+
+        // Collect ALL type refs used across all functions
+        std::set<TypeRef> allTypes;
+        for (auto &fn : mf.stabsFunctions()) {
+            if (fn.returnType != NullType) allTypes.insert(fn.returnType);
+            for (auto &p : fn.params)
+                if (p.typeRef != NullType) allTypes.insert(p.typeRef);
+            for (auto &l : fn.locals)
+                if (l.typeRef != NullType) allTypes.insert(l.typeRef);
+        }
+        // Also add all globals
+        for (auto &g : types.globals())
+            if (g.typeRef != NullType) allTypes.insert(g.typeRef);
+
+        // Names already defined in platformTypedefs — skip these in type emission
+        static const std::set<std::string> platformNames = {
+            "BOOL","Bool","qboolean","DWORD","UINT","UINT32","UINT16","UINT8",
+            "INT32","INT16","HRESULT","ULONG","LONG","BYTE","byte",
+            "GLubyte","GLenum","GLint","GLuint","GLfloat","GLsizei",
+            "HANDLE","HCURSOR","HWND","WindowRef","ControlRef",
+            "EventLoopTimerRef","EventTargetRef","TXNObject",
+            "Handle","Movie","Track","Media","CGDirectDisplayID",
+            "CGGammaValue","CFStringRef","CFURLRef","CGDisplayFadeReservationToken",
+            "CGFloat","Boolean","SInt16","SInt32","SInt64",
+            "UInt8","UInt16","UInt32","UInt64","OSErr","OSStatus","OSType",
+            "Str255","vec_t","vec2_t","vec3_t","vec4_t",
+            "fileHandle_t","r_index_t","MaterialHandle","XAnim","XAnimNotify",
+            "ContextRef","FSRef","CGPoint","CGSize","CGRect","MacRect","Point",
+            "FourCharCode","ItemCount","ByteCount","MenuItemIndex","UniChar",
+            "MenuRef","EventRef","EventQueueRef","EventHandlerRef",
+            "EventHandlerCallRef","EventLoopRef","EventHandlerUPP",
+            "EventLoopTimerUPP","AGLContext","AGLPixelFormat",
+            "RgnHandle","PicHandle","PixMapHandle","GrafPtr","CGrafPtr",
+            "BitMap","Ptr","StringPtr","TextEncoding","ScriptCode",
+            "Fixed","Fract","Float32","Float64","URefCon","RefCon",
+            "CFBundleRef","CFArrayRef","CFDictionaryRef","CFTypeRef",
+            "IOSurfaceRef","ProcessSerialNumber","GDHandle",
+            "ATSUFontFeatureType","ATSUFontFeatureSelector","ATSUStyle",
+            "ATSUTextLayout","ATSUAttributeTag","ATSUFontID",
+            "D3DTEXTUREFILTERTYPE","D3DFORMAT","D3DDEVTYPE","D3DPRIMITIVETYPE",
+            "D3DTRANSFORMSTATETYPE","D3DRENDERSTATETYPE","D3DTEXTURESTAGESTATETYPE",
+            "D3DSAMPLERSTATETYPE","D3DSTATEBLOCKTYPE","D3DMULTISAMPLE_TYPE",
+            "D3DSWAPEFFECT","D3DRESOURCETYPE",
+            "Byte","ColorSearchUPP","ColorComplementUPP","CTabHandle","ITabHandle",
+            "CSpecArray","PixPatHandle","CCrsrHandle","CIconHandle","Rect",
+            "MacRGBColor","QElemPtr","FSVolumeRefNum","StrFileName","EventKind",
+            "EventModifiers","UniCharCount","AGLDrawable","Bits16","DInfo","DXInfo",
+            "CursPtr","SFNTLookupFormatSpecificHeader",
+        };
+
+        // Emit forward declarations for all structs/unions
+        std::set<std::string> fwdDeclared;
+        for (auto ref : allTypes) {
+            auto *t = types.resolveType(ref);
+            if (!t) continue;
+            if (t->kind == StabsTypeKind::Struct || t->kind == StabsTypeKind::Union) {
+                if (t->name.empty() || t->name.find('<') != std::string::npos) continue;
+                if (fwdDeclared.count(t->name) || platformNames.count(t->name)) continue;
+                fwdDeclared.insert(t->name);
+                std::string kw = (t->kind == StabsTypeKind::Union) ? "union" : "struct";
+                out += QString::fromStdString(kw + " " + t->name + ";\n");
+            }
+        }
+        if (!fwdDeclared.empty()) out += "\n";
+
+        // Emit full type definitions (skip names already in platform typedefs)
+        {
+            std::set<TypeRef> emitted;
+            std::set<std::string> emittedNames(platformNames);
+            for (auto ref : allTypes)
+                emitTypeDefsRecursive(out, types, ref, emitted, emittedNames);
+            if (!emitted.empty()) out += "\n";
+        }
+
+        // Emit extern declarations for globals
+        std::set<std::string> globalDeclared;
+        for (auto &g : types.globals()) {
+            if (g.address == 0 || g.name.empty()) continue;
+            if (globalDeclared.count(g.name)) continue;
+            if (g.name.find('<') != std::string::npos) continue;
+            globalDeclared.insert(g.name);
+            std::string decl;
+            if (g.typeRef != NullType)
+                decl = types.formatDecl(g.typeRef, g.name);
+            else
+                decl = "int " + g.name;
+            out += "extern " + QString::fromStdString(decl) + ";\n";
+        }
+
+        // Emit function prototypes
+        out += "\n/* Function prototypes */\n";
+        std::set<std::string> protoDeclared;
+        for (auto &fn : mf.stabsFunctions()) {
+            if (fn.address == 0 || fn.name.empty()) continue;
+            std::string cname = fn.name;
+            for (auto &c : cname) { if (c == ':') c = '_'; if (c == '~') c = 'd'; }
+            if (protoDeclared.count(cname)) continue;
+            if (cname.find('<') != std::string::npos) continue;
+            protoDeclared.insert(cname);
+            std::string retStr = fn.returnType != NullType ?
+                types.formatType(fn.returnType) : "int";
+            out += QString::fromStdString(retStr + " " + cname + "(");
+            if (fn.params.empty()) {
+                out += "void";
+            } else {
+                for (size_t i = 0; i < fn.params.size(); ++i) {
+                    if (i) out += ", ";
+                    auto &p = fn.params[i];
+                    if (p.typeRef != NullType)
+                        out += QString::fromStdString(types.formatDecl(p.typeRef, p.name));
+                    else
+                        out += "int " + QString::fromStdString(p.name);
+                }
+            }
+            out += ");\n";
+        }
+
+        return out;
+    }
+
     // Platform type definitions for compilable output
-    static QString platformTypedefs() {
-        return QString(
-            "/* Platform types */\n"
-            "#include <stdint.h>\n"
-            "#include <stddef.h>\n"
-            "#include <stdarg.h>\n"
-            "#include <math.h>\n"
-            "#include <string.h>\n"
-            "#include <stdio.h>\n"
+    static QString platformTypedefs(bool selfContained = false) {
+        QString out = "/* Platform types */\n";
+        if (selfContained) {
+            // Self-contained mode: no system headers needed (for cross-compiler)
+            out += "typedef unsigned int size_t;\n"
+                   "typedef int ssize_t;\n"
+                   "typedef int ptrdiff_t;\n"
+                   "typedef int intptr_t;\n"
+                   "typedef __builtin_va_list va_list;\n"
+                   "#define NULL ((void*)0)\n"
+                   "typedef int int8_t __attribute__((mode(QI)));\n"
+                   "typedef unsigned int uint8_t __attribute__((mode(QI)));\n"
+                   "typedef int int16_t __attribute__((mode(HI)));\n"
+                   "typedef unsigned int uint16_t __attribute__((mode(HI)));\n"
+                   "typedef int int32_t __attribute__((mode(SI)));\n"
+                   "typedef unsigned int uint32_t __attribute__((mode(SI)));\n"
+                   "typedef int int64_t __attribute__((mode(DI)));\n"
+                   "typedef unsigned int uint64_t __attribute__((mode(DI)));\n";
+        } else {
+            out += "#include <stdint.h>\n"
+                   "#include <stddef.h>\n"
+                   "#include <stdarg.h>\n"
+                   "#include <math.h>\n"
+                   "#include <string.h>\n"
+                   "#include <stdio.h>\n";
+        }
+        if (selfContained) out += QString(
+            "/* C library stubs */\n"
+            "void *memset(void*,int,size_t);\n"
+            "void *memcpy(void*,const void*,size_t);\n"
+            "void *memmove(void*,const void*,size_t);\n"
+            "int memcmp(const void*,const void*,size_t);\n"
+            "size_t strlen(const char*);\n"
+            "char *strcpy(char*,const char*);\n"
+            "char *strncpy(char*,const char*,size_t);\n"
+            "char *strcat(char*,const char*);\n"
+            "int strcmp(const char*,const char*);\n"
+            "int strncmp(const char*,const char*,size_t);\n"
+            "char *strstr(const char*,const char*);\n"
+            "char *strchr(const char*,int);\n"
+            "int sprintf(char*,const char*,...);\n"
+            "int snprintf(char*,size_t,const char*,...);\n"
+            "int vsprintf(char*,const char*,va_list);\n"
+            "int vsnprintf(char*,size_t,const char*,va_list);\n"
+            "int printf(const char*,...);\n"
+            "int sscanf(const char*,const char*,...);\n"
+            "int atoi(const char*);\n"
+            "double atof(const char*);\n"
+            "void *malloc(size_t);\n"
+            "void *calloc(size_t,size_t);\n"
+            "void *realloc(void*,size_t);\n"
+            "void free(void*);\n"
+            "void exit(int);\n"
+            "int abs(int);\n"
+            "int rand(void);\n"
+            "void srand(unsigned int);\n"
+            "int setjmp(void*);\n"
+            "void longjmp(void*,int);\n"
+            "int toupper(int);\n"
+            "int tolower(int);\n"
+            "int isalpha(int);\n"
+            "int isdigit(int);\n"
+            "/* Math */\n"
+            "float floorf(float); float ceilf(float); float sqrtf(float);\n"
+            "float sinf(float); float cosf(float); float tanf(float);\n"
+            "float fabsf(float); float fminf(float,float); float fmaxf(float,float);\n"
+            "float acosf(float); float asinf(float); float atanf(float);\n"
+            "float atan2f(float,float); float fmodf(float,float); float powf(float,float);\n"
+            "float logf(float); float expf(float); float log10f(float);\n"
+            "double floor(double); double ceil(double); double sqrt(double);\n"
+            "double sin(double); double cos(double); double tan(double);\n"
+            "double fabs(double); double fmin(double,double); double fmax(double,double);\n"
+            "double acos(double); double asin(double); double atan(double);\n"
+            "double atan2(double,double); double fmod(double,double); double pow(double,double);\n"
+            "double log(double); double exp(double); double log10(double);\n");
+        out += QString(
+            "/* Carbon/Mac OS types */\n"
+            "typedef unsigned int FourCharCode;\n"
+            "typedef FourCharCode OSType;\n"
+            "typedef unsigned int ItemCount;\n"
+            "typedef unsigned int ByteCount;\n"
+            "typedef unsigned int MenuItemIndex;\n"
+            "typedef unsigned short UniChar;\n"
+            "typedef void *MenuRef;\n"
+            "typedef void *EventRef;\n"
+            "typedef void *EventQueueRef;\n"
+            "typedef void *EventHandlerRef;\n"
+            "typedef void *EventHandlerCallRef;\n"
+            "typedef void *EventLoopRef;\n"
+            "typedef void *EventHandlerUPP;\n"
+            "typedef void *EventLoopTimerUPP;\n"
+            "typedef void *AGLContext;\n"
+            "typedef void *AGLPixelFormat;\n"
+            "typedef void *RgnHandle;\n"
+            "typedef void *PicHandle;\n"
+            "typedef void *PixMapHandle;\n"
+            "typedef void *GrafPtr;\n"
+            "typedef void *CGrafPtr;\n"
+            "typedef void *BitMap;\n"
+            "typedef void *Ptr;\n"
+            "typedef void *StringPtr;\n"
+            "typedef unsigned int TextEncoding;\n"
+            "typedef int ScriptCode;\n"
+            "typedef int Fixed;\n"
+            "typedef int Fract;\n"
+            "typedef float Float32;\n"
+            "typedef double Float64;\n"
+            "typedef unsigned int URefCon;\n"
+            "typedef int RefCon;\n"
+            "typedef void *CFBundleRef;\n"
+            "typedef void *CFArrayRef;\n"
+            "typedef void *CFDictionaryRef;\n"
+            "typedef void *CFTypeRef;\n"
+            "typedef void *IOSurfaceRef;\n"
+            "typedef int ProcessSerialNumber;\n"
+            "typedef void *ATSUFontFeatureType;\n"
+            "typedef void *ATSUFontFeatureSelector;\n"
+            "typedef void *ATSUStyle;\n"
+            "typedef void *ATSUTextLayout;\n"
+            "typedef void *ATSUAttributeTag;\n"
+            "typedef unsigned int ATSUFontID;\n"
+            "typedef unsigned short GDHandle;\n"
+            "typedef unsigned char Byte;\n"
+            "typedef void *ColorSearchUPP;\n"
+            "typedef void *ColorComplementUPP;\n"
+            "typedef void *CTabHandle;\n"
+            "typedef void *ITabHandle;\n"
+            "typedef int CSpecArray;\n"
+            "typedef void *PixPatHandle;\n"
+            "typedef void *CCrsrHandle;\n"
+            "typedef void *CIconHandle;\n"
+            "typedef struct { short top, left, bottom, right; } Rect;\n"
+            "typedef struct { unsigned short red, green, blue; } MacRGBColor;\n"
+            "typedef void *QElemPtr;\n"
+            "typedef short FSVolumeRefNum;\n"
+            "typedef unsigned char StrFileName[64];\n"
+            "typedef unsigned short EventKind;\n"
+            "typedef unsigned short EventModifiers;\n"
+            "typedef unsigned int UniCharCount;\n"
+            "typedef void *AGLDrawable;\n"
+            "typedef int Bits16[16];\n"
+            "typedef void *DInfo;\n"
+            "typedef void *DXInfo;\n"
+            "typedef void *CursPtr;\n"
+            "typedef int SFNTLookupFormatSpecificHeader;\n"
             "typedef int BOOL;\n"
             "typedef int Bool;\n"
             "typedef int qboolean;\n"
@@ -373,6 +637,7 @@ public:
             "typedef void *CFURLRef;\n"
             "typedef unsigned int CGDisplayFadeReservationToken;\n"
             "typedef float CGFloat;\n"
+            "/* Game types */\n"
             "typedef int Boolean;\n"
             "typedef short SInt16;\n"
             "typedef int SInt32;\n"
@@ -383,7 +648,6 @@ public:
             "typedef unsigned long long UInt64;\n"
             "typedef short OSErr;\n"
             "typedef int OSStatus;\n"
-            "typedef unsigned int OSType;\n"
             "typedef unsigned char Str255[256];\n"
             "typedef float vec_t;\n"
             "typedef vec_t vec2_t[2];\n"
@@ -394,8 +658,6 @@ public:
             "typedef int MaterialHandle;\n"
             "typedef void *XAnim;\n"
             "typedef void *XAnimNotify;\n"
-            "typedef void *ContextRef;\n"
-            "typedef void *FSRef;\n"
             "typedef struct { float x, y; } CGPoint;\n"
             "typedef struct { float width, height; } CGSize;\n"
             "typedef struct { CGPoint origin; CGSize size; } CGRect;\n"
@@ -439,16 +701,13 @@ public:
             "int strnicmp(const char *, const char *, size_t);\n"
             "typedef int bool;\n"
             "typedef signed char SInt8;\n"
-            "typedef char *StringPtr;\n"
-            "typedef char *Ptr;\n"
+            "/* StringPtr and Ptr defined in Carbon section above */\n"
             "typedef int INT;\n"
-            "typedef int QElemPtr;\n"
+            "/* QElemPtr provided by STABS */\n"
             "typedef void *IOCompletionUPP;\n"
             "typedef struct { unsigned int lo, hi; } UTCDateTime;\n"
             "typedef struct { unsigned int signature; int id; } ControlID;\n"
             "typedef void *voidpf;\n"
-            "typedef float Float32;\n"
-            "typedef double Float64;\n"
             "typedef unsigned short WORD;\n"
             "typedef void *LPCSTR;\n"
             "typedef void *LPVOID;\n"
@@ -545,6 +804,7 @@ public:
             "typedef struct ShadowCookieGlob_s { int _[64]; } ShadowCookieGlob;\n"
             "\n"
         );
+        return out;
     }
 
     // Remove empty if blocks from output text
@@ -680,14 +940,16 @@ private:
     static void emitTypeDefs(QString &out, const StabsTypeTable &types,
                              const std::set<TypeRef> &used) {
         std::set<TypeRef> emitted;
+        std::set<std::string> emittedNames;
         for (auto ref : used) {
-            emitTypeDefsRecursive(out, types, ref, emitted);
+            emitTypeDefsRecursive(out, types, ref, emitted, emittedNames);
         }
         if (!emitted.empty()) out += "\n";
     }
 
     static void emitTypeDefsRecursive(QString &out, const StabsTypeTable &types,
-                                      TypeRef ref, std::set<TypeRef> &emitted, int depth = 0) {
+                                      TypeRef ref, std::set<TypeRef> &emitted,
+                                      std::set<std::string> &emittedNames, int depth = 0) {
         if (ref == NullType || emitted.count(ref) || depth > 30) return;
         emitted.insert(ref); // mark visited BEFORE recursing to break cycles
         auto *t = types.getType(ref);
@@ -698,13 +960,16 @@ private:
             t->kind == StabsTypeKind::Const || t->kind == StabsTypeKind::Volatile ||
             t->kind == StabsTypeKind::Array) {
             if (t->targetType != NullType)
-                emitTypeDefsRecursive(out, types, t->targetType, emitted, depth + 1);
+                emitTypeDefsRecursive(out, types, t->targetType, emitted, emittedNames, depth + 1);
             return;
         }
         if (t->kind == StabsTypeKind::Struct || t->kind == StabsTypeKind::Union) {
             if (t->name.empty()) return;
             // Skip C++ template types (not valid C)
             if (t->name.find('<') != std::string::npos) return;
+            // Skip if already emitted a struct/union with this name (cross-CU dedup)
+            if (emittedNames.count(t->name)) return;
+            emittedNames.insert(t->name);
             if (t->fields.empty()) {
                 // Struct with no STABS fields — generate int fields at known offsets
                 // to support field_X access patterns
@@ -729,14 +994,76 @@ private:
                 }
                 return;
             }
+            // Check if all field types compile without undefined types.
+            // Emit structs with unknown field types as offset-based int arrays.
+            {
+                bool allFieldsOk = true;
+                for (auto &f : t->fields) {
+                    if (f.bitSize == 0 && f.bitOffset == 0) continue;
+                    if (f.name.empty() || f.name[0] == '/' || f.name[0] == '!' ||
+                        f.name[0] == '#' || f.name[0] == '$' || f.name[0] == '~') continue;
+                    if (f.name.find("::") != std::string::npos) continue;
+                    if (f.name.find("(") != std::string::npos) continue;
+                    if (f.name.find("<") != std::string::npos) continue;
+                    // Check that the field's type resolves to something we've defined
+                    auto *ft = types.resolveType(f.typeRef);
+                    if (!ft) { allFieldsOk = false; break; }
+                    // Pointer to anything is fine (forward-declared structs ok)
+                    auto *rawFt = types.getType(f.typeRef);
+                    if (rawFt && rawFt->kind == StabsTypeKind::Pointer) continue;
+                    // Primitives are always fine
+                    if (ft->kind <= StabsTypeKind::LongDouble) continue;
+                    // Struct/union by value — must be already emitted
+                    if (ft->kind == StabsTypeKind::Struct || ft->kind == StabsTypeKind::Union) {
+                        if (!ft->name.empty() && !emittedNames.count(ft->name) &&
+                            ft->name != t->name) {
+                            allFieldsOk = false; break;
+                        }
+                    }
+                    // Enum — must be already emitted
+                    if (ft->kind == StabsTypeKind::Enum) {
+                        if (!ft->name.empty() && !emittedNames.count(ft->name)) {
+                            allFieldsOk = false; break;
+                        }
+                    }
+                    // Array — check element type
+                    if (ft->kind == StabsTypeKind::Array) {
+                        auto *elem = types.resolveType(ft->targetType);
+                        if (!elem || (elem->kind == StabsTypeKind::Struct &&
+                            !emittedNames.count(elem->name))) {
+                            allFieldsOk = false; break;
+                        }
+                    }
+                }
+                if (!allFieldsOk) {
+                    // Emit as int-padded struct with correct size for offset access
+                    std::string kw = (t->kind == StabsTypeKind::Union) ? "union" : "struct";
+                    int sz = t->sizeBytes > 0 ? t->sizeBytes : 4;
+                    if (sz > 0 && sz <= 65536) {
+                        out += QString::fromStdString(kw + " " + t->name + " {\n");
+                        int numInts = (sz + 3) / 4;
+                        for (int i = 0; i < numInts; ++i) {
+                            char fn[32]; snprintf(fn, sizeof(fn), "    int field_%X;\n", i*4);
+                            out += fn;
+                        }
+                        out += "};\n\n";
+                    } else {
+                        out += QString::fromStdString(kw + " " + t->name +
+                            " { char _opaque[" + std::to_string(sz) + "]; };\n\n");
+                    }
+                    return;
+                }
+            }
             // Emit fields' types first
             for (auto &f : t->fields)
-                emitTypeDefsRecursive(out, types, f.typeRef, emitted, depth + 1);
+                emitTypeDefsRecursive(out, types, f.typeRef, emitted, emittedNames, depth + 1);
             out += QString::fromStdString(types.formatStructDef(ref)) + ";\n\n";
             return;
         }
         if (t->kind == StabsTypeKind::Enum) {
             if (t->name.empty() || t->enumValues.empty()) return;
+            if (emittedNames.count(t->name)) return;
+            emittedNames.insert(t->name);
             out += QString::fromStdString(types.formatEnumDef(ref)) + ";\n\n";
             return;
         }

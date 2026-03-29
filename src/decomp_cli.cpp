@@ -97,6 +97,8 @@ int main(int argc, char *argv[]) {
             "  -a           Decompile all source files\n"
             "  --gcc        Pipe output through gcc to count errors\n"
             "  --ssa        Enable full SSA pass (experimental)\n"
+            "  --types      Dump all STABS types as C header\n"
+            "  --srcof <addr> Find source file index for function at address\n"
             "  -q           Quiet: suppress decompiled output (use with --gcc)\n"
         );
         return 1;
@@ -104,7 +106,8 @@ int main(int argc, char *argv[]) {
 
     const char *binPath = argv[1];
     bool doList = false, doFuncs = false, doAll = false;
-    bool doGcc = false, quiet = false;
+    bool doGcc = false, quiet = false, doTypes = false;
+    uint32_t srcOfAddr = 0;
     uint32_t funcAddr = 0;
     int srcIdx = -1;
     const char *funcName = nullptr;
@@ -115,6 +118,9 @@ int main(int argc, char *argv[]) {
         else if (strcmp(argv[i], "-a") == 0) doAll = true;
         else if (strcmp(argv[i], "--gcc") == 0) doGcc = true;
         else if (strcmp(argv[i], "--ssa") == 0) Decompiler::s_useSSA = true;
+        else if (strcmp(argv[i], "--types") == 0) doTypes = true;
+        else if (strcmp(argv[i], "--srcof") == 0 && i + 1 < argc)
+            srcOfAddr = strtoul(argv[++i], nullptr, 16);
         else if (strcmp(argv[i], "-q") == 0) quiet = true;
         else if (strcmp(argv[i], "-f") == 0 && i + 1 < argc)
             funcAddr = strtoul(argv[++i], nullptr, 16);
@@ -135,6 +141,24 @@ int main(int argc, char *argv[]) {
 
     if (doList) { listSourceFiles(mf); return 0; }
     if (doFuncs) { listFunctions(mf); return 0; }
+    if (doTypes) {
+        QString hdr = Decompiler::dumpTypes(mf);
+        printf("%s", hdr.toUtf8().constData());
+        return 0;
+    }
+    if (srcOfAddr) {
+        auto &sources = mf.stabsSourceFiles();
+        for (size_t si = 0; si < sources.size(); ++si) {
+            for (size_t fi : sources[si].functionIndices) {
+                if (mf.stabsFunctions()[fi].address == srcOfAddr) {
+                    printf("%zu\n", si);
+                    return 0;
+                }
+            }
+        }
+        fprintf(stderr, "Function at 0x%X not found in any source file\n", srcOfAddr);
+        return 1;
+    }
 
     QString output;
 
