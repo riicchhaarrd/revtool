@@ -98,12 +98,13 @@ def load_binary():
     return data, text_addr, text_off
 
 
-def disasm_original(data, text_addr, text_off, func_addr):
+def disasm_original(data, text_addr, text_off, func_addr, func_size=0):
     md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_32)
     md.syntax = capstone.CS_OPT_SYNTAX_ATT
     fo = text_off + (func_addr - text_addr)
+    size = func_size if func_size > 0 else 4096
     insns = []
-    for i in md.disasm(data[fo:fo+4096], func_addr):
+    for i in md.disasm(data[fo:fo+size], func_addr):
         insns.append(f'{i.mnemonic} {i.op_str}'.strip())
         if i.mnemonic in ('ret', 'retl'):
             break
@@ -436,6 +437,9 @@ def norm(s):
     s = re.sub(r'\$<C>', '<C>', s)
     # Normalize branch targets
     s = re.sub(r'^(j\w+) .*', r'\1 <T>', s)
+    # Normalize padding instructions (nop, hlt sequences)
+    if re.match(r'^(nop|hlt)', s):
+        s = '<PAD>'
     return s
 
 
@@ -542,6 +546,21 @@ def get_func_addr(name):
     return None, None
 
 
+_func_addrs_cache = None
+def _get_func_size(func_addr):
+    global _func_addrs_cache
+    if _func_addrs_cache is None:
+        try:
+            r = subprocess.run([DECOMP, BINARY, '-F'], capture_output=True, text=True, timeout=10)
+            _func_addrs_cache = sorted(set(int(m.group(1), 16)
+                for m in re.finditer(r'^\s+([0-9A-Fa-f]+)\s+', r.stdout, re.MULTILINE)))
+        except:
+            _func_addrs_cache = []
+    for k, a in enumerate(_func_addrs_cache):
+        if a == func_addr and k + 1 < len(_func_addrs_cache):
+            return _func_addrs_cache[k+1] - a
+    return 0
+
 def find_source_for_addr(func_addr):
     """Find which source file index contains a function at the given address."""
     r = subprocess.run([DECOMP, BINARY, '--srcof', f'{func_addr:X}'],
@@ -613,8 +632,12 @@ def check_function(name_or_addr, data, text_addr, text_off, verbose=True):
             print(f'{func_name}: no asm output (types missing?)')
         return None
 
+    # Get function size from the function list (distance to next function)
+    func_size = _get_func_size(func_addr)
+
+
     # Original disasm
-    orig = disasm_original(data, text_addr, text_off, func_addr)
+    orig = disasm_original(data, text_addr, text_off, func_addr, func_size)
 
     # Normalize recompiled stream (collapse non_lazy_ptr patterns)
     # Normalize both streams
