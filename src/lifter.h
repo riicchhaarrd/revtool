@@ -781,6 +781,7 @@ private:
     // Call argument collection
     std::map<int, std::unique_ptr<IRExpr>> m_espArgs;
     std::vector<std::unique_ptr<IRExpr>>   m_pushArgs;
+    std::unique_ptr<IRExpr>                m_fpTableIndex; // index for fptable_ calls
 
     // FPU stack: tracks temp IDs for ST0..STn (index 0 = top of stack)
     std::vector<int> m_fpuStack;
@@ -1794,9 +1795,11 @@ private:
                         target = buf;
                     } else if (mem.base == X86_REG_INVALID && mem.index != X86_REG_INVALID) {
                         // call [reg*4 + table_addr] — function pointer table
-                        char buf[64]; snprintf(buf, sizeof(buf), "fptable_%X",
-                            (unsigned)(uint32_t)mem.disp);
+                        char buf[64]; snprintf(buf, sizeof(buf), "fptable_%X_%d",
+                            (unsigned)(uint32_t)mem.disp, mem.scale);
                         target = buf;
+                        // Save index expression to prepend to args later
+                        m_fpTableIndex = readReg(mem.index);
                     } else {
                         auto tgt = readOp(o[0]);
                         int fpTemp = func.newTemp();
@@ -1826,6 +1829,11 @@ private:
             }
             m_espArgs.clear();
             m_pushArgs.clear();
+            // Prepend fptable index if present
+            if (m_fpTableIndex) {
+                args.insert(args.begin(), std::move(m_fpTableIndex));
+                m_fpTableIndex.reset();
+            }
 
             auto callExpr = IRExpr::mkCall(target, std::move(args), retType);
 
@@ -1923,7 +1931,7 @@ private:
             } else {
                 args.push_back(std::move(cnt));
             }
-            auto callExpr = IRExpr::mkCall("memcmp", std::move(args));
+            auto callExpr = IRExpr::mkCall("__builtin_memcmp", std::move(args));
             int t = func.newTemp();
             bb.stmts.push_back(IRStmt::mkAssign(t, std::move(callExpr)));
             m_flags.lhs = IRExpr::mkTemp(t);

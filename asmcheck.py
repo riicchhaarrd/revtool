@@ -452,6 +452,9 @@ def norm(s):
                r'movl %<R>, \2', s)
     # Normalize XMM register names (float register allocation varies)
     s = re.sub(r'%xmm[0-7]', '%xmm<N>', s)
+    # Normalize index register in indirect calls: call *TABLE(, %REG, N)
+    s = re.sub(r'^call \*(<C>)\(, %(eax|ecx|edx|esi|edi), (\d+)\)',
+               r'call *\1(, %<R>, \3)', s)
     # Normalize stack-offset stores: movl %REG, N(%esp) and movss ..., N(%esp)
     s = re.sub(r'^(movl|movss) %(eax|ecx|edx|esi|edi|xmm<N>), (\d+\(%esp\))',
                r'\1 %<R>, \3', s)
@@ -649,8 +652,33 @@ def check_function(name_or_addr, data, text_addr, text_off, verbose=True):
             print(f'{func_name}: decompilation failed')
         return None
 
-    # Strip #include lines and 'static' keyword from decompiled code
+    # Strip #include lines
     c_code = re.sub(r'#include\s*[<"].*?[>"]', '', c_code)
+
+    # Detect regparm calling convention from original disassembly:
+    # If function prologue saves %eax/%edx/%ecx to locals/regs (not loading from stack),
+    # the function uses register parameters.
+    use_regparm = False
+    orig_check = disasm_original(data, text_addr, text_off, func_addr,
+                                 _get_func_size(func_addr))
+    # After push/mov-esp/push/sub, check if first data instruction uses %eax as source
+    for inst in orig_check[2:8]:
+        s = inst.strip()
+        # movl %eax, %REG or movl %eax, N(%ebp) → saving register param
+        if re.match(r'movl %eax, ', s) and '%ebp)' not in s.split(',')[1]:
+            use_regparm = True
+            break
+        if re.match(r'movl %eax, -', s):
+            use_regparm = True
+            break
+        # movl N(%ebp), %REG → loading stack param → NOT regparm
+        if re.match(r'movl \d+\(%ebp\),', s):
+            break
+        if s.startswith('subl') or s.startswith('pushl'):
+            continue
+        break
+    if use_regparm:
+        c_code = re.sub(r'^(static\s+)?(\w)', r'__attribute__((regparm(3))) \2', c_code)
     # Strip 'static' to prevent inlining/removal when compiling in isolation
     c_code = re.sub(r'^static\s+', '', c_code)
 

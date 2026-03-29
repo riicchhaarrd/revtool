@@ -3209,9 +3209,36 @@ private:
 
             case IROp::Call: {
                 std::string funcName = cName(e->name);
+                // Function pointer table calls: fptable_ADDR_SCALE(index, args...)
+                // Emits: ((int(*)(void*))(((void**)TABLE)[index]))(args...)
+                // This produces: calll *TABLE(, %reg, SCALE)
+                if (e->name.compare(0, 8, "fptable_") == 0 && !e->kids.empty()) {
+                    // Parse table address and scale from name
+                    unsigned tableAddr = 0;
+                    int scale = 4;
+                    sscanf(e->name.c_str() + 8, "%X_%d", &tableAddr, &scale);
+                    std::string indexExpr = emitExpr(e->kids[0].get());
+                    // Build function pointer type with correct number of params
+                    int nargs = (int)e->kids.size() - 1; // first kid is index
+                    std::string fptype = "int(*)(";
+                    for (int p = 0; p < nargs; ++p) {
+                        if (p) fptype += ", ";
+                        fptype += "int";
+                    }
+                    fptype += ")";
+                    char buf[256];
+                    snprintf(buf, sizeof(buf),
+                        "((%s)(((void**)0x%X)[%s]))(",
+                        fptype.c_str(), tableAddr, indexExpr.c_str());
+                    result = buf;
+                    for (size_t i = 1; i < e->kids.size(); ++i) {
+                        if (i > 1) result += ", ";
+                        result += emitExpr(e->kids[i].get());
+                    }
+                    result += ")";
+                    break;
+                }
                 // Vtable calls: vfunc_N(this, ...) → indirect call through vtable
-                // Emits: ((int(*)(...))(((void**)(*(void**)THIS))[N]))(THIS, ...)
-                // This produces: movl (%reg), %eax; calll *OFFSET(%eax)
                 int vslot = -1;
                 if (e->name.compare(0, 6, "vfunc_") == 0) {
                     vslot = atoi(e->name.c_str() + 6);
