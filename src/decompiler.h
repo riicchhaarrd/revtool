@@ -2499,7 +2499,7 @@ private:
                         }
                     }
                 }
-                // (base + const) → *(int *)((char *)base + off) for pointer-like expressions
+                // (base + const) → base->field for struct pointers, else *(int*)((char*)base + off)
                 if (result.empty() && addr && addr->op == IROp::Add && addr->kids.size() == 2 &&
                     addr->kids[1]->isConst() &&
                     (int64_t)addr->kids[1]->value != 0 &&
@@ -2507,10 +2507,22 @@ private:
                     (addr->kids[0]->op == IROp::Var || addr->kids[0]->op == IROp::Temp)) {
                     std::string base = emitExpr(addr->kids[0].get());
                     int64_t off = (int64_t)addr->kids[1]->value;
-                    char buf[64];
-                    snprintf(buf, sizeof(buf), "*(int *)((char *)%s + 0x%llX)",
-                             base.c_str(), (unsigned long long)off);
-                    result = buf;
+                    // Try type-aware struct field access
+                    TypeRef baseType = exprType(addr->kids[0].get());
+                    if (baseType != NullType && m_types.isStructPointer(baseType)) {
+                        TypeRef structRef = m_types.getPointedStruct(baseType);
+                        std::string access = structRef != NullType ?
+                            m_types.formatFieldAccess(structRef, (int)off) : "";
+                        if (!access.empty()) {
+                            result = base + "->" + access;
+                        }
+                    }
+                    if (result.empty()) {
+                        char buf[64];
+                        snprintf(buf, sizeof(buf), "*(int *)((char *)%s + 0x%llX)",
+                                 base.c_str(), (unsigned long long)off);
+                        result = buf;
+                    }
                 }
                 // General Add/Sub expression → *(expr) without ugly cast
                 else if (addr && (addr->op == IROp::Add || addr->op == IROp::Sub) &&
