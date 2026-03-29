@@ -1976,12 +1976,13 @@ private:
                             break;
                         }
                     }
+                    std::string addr = emitExpr(a);
                     out += pad(indent) + QString::fromStdString(
-                        "*(" + emitExpr(a) + ") = " + val) + ";\n";
+                        "*(int *)(" + addr + ") = " + val) + ";\n";
                 } else {
-                    // Final fallback: *(expr) = val — no cast needed
+                    std::string addr = emitExpr(a);
                     out += pad(indent) + QString::fromStdString(
-                        "*(" + emitExpr(a) + ") = " + val) + ";\n";
+                        "*(int *)(" + addr + ") = " + val) + ";\n";
                 }
                 break;
             }
@@ -2372,13 +2373,13 @@ private:
                 } else {
                     result = "*(" + emitExpr(addr) + ")";
                 }
-                // If result uses *(expr) and expr isn't a pointer type, add a cast
+                // If result uses *(expr), ensure it's a valid dereference
                 if (!result.empty() && result[0] == '*' && addr) {
-                    TypeRef at = exprType(addr);
-                    if (at != NullType) {
-                        auto *rt = m_types.resolveType(at);
-                        if (rt && rt->kind != StabsTypeKind::Pointer)
-                            result = "*(int *)(" + emitExpr(addr) + ")";
+                    // Always cast plain *(var) to *(int*)(var) to avoid void* dereference
+                    // and to handle cases where the var type is unknown
+                    if (addr->op == IROp::Var || addr->op == IROp::Temp) {
+                        std::string addrStr = emitExpr(addr);
+                        result = "*(int *)(" + addrStr + ")";
                     }
                 }
                 break;
