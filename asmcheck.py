@@ -237,9 +237,14 @@ def compile_to_asm(c_code):
             # Don't add if function is defined in the code
             if re.search(r'\b' + re.escape(proto_name) + r'\s*\([^)]*\)\s*\{', c_code):
                 continue
-            # Skip known variadic functions (prototype has fewer args than calls)
+            # Skip known variadic functions
             if proto_name in ('va', 'Com_Printf', 'Com_Error', 'Com_DPrintf',
                               'Sys_Error', 'dprintf', 'Com_sprintf'):
+                continue
+            # Skip void-returning prototypes if the code assigns the return value
+            stripped = line.strip()
+            if (stripped.startswith('void ') or stripped.startswith('int void ')) and \
+               proto_name in assigned_calls:
                 continue
             # Only include if all types in the prototype are known
             # (check for struct/union references that aren't extracted)
@@ -327,17 +332,14 @@ def compile_to_asm(c_code):
             rhs = m.group(1)
             if not rhs[0].isdigit() and rhs not in ('0', 'NULL', 'true', 'false'):
                 assign_rhs.add(rhs)
-        # Detect names passed as arguments to Cmd_AddCommand/Cmd_AddServerCommand
-        # (these are function pointer arguments)
-        call_args = set()
-        for m in re.finditer(r'(?:Cmd_AddCommand|Cmd_AddServerCommand|Cmd_AddCommandInternal)\s*\([^,]+,\s*(\w+)', full):
-            call_args.add(m.group(1))
+        call_args = set()  # unused — kept for compatibility
         for name in sorted(undeclared):
             if name in already or name in funcs: continue
-            if re.search(r'\*\s*\(' + re.escape(name) + r'\)|' + re.escape(name) + r'\s*->', full):
-                stubs += f'extern void *{name};\n'
-            elif name.endswith('_f') or (name in call_args and not name[0].isdigit()
-                                         and name not in stubs_types):
+            if re.search(r'\*\s*\(' + re.escape(name) + r'\)|' +
+                          re.escape(name) + r'\s*->|' +
+                          re.escape(name) + r'\s*\[', full):
+                stubs += f'extern int *{name};\n'
+            elif name.endswith('_f'):
                 stubs += f'void {name}(void);\n'
             elif (name in assign_rhs and name not in stubs_types):
                 if name not in already:
