@@ -1315,14 +1315,16 @@ private:
             else if (jmn == "jg"  || jmn == "jnle")  cmpOp = IROp::Sgt;
             else cmpOp = IROp::Ne;
         } else if (isTest) {
-            // test with different operands: condition is (lhs & rhs) vs 0
+            // test with different operands: condition is (lhs & rhs) vs 0 (OF=0)
             auto andExpr = IRExpr::mkBinary(IROp::And, std::move(lhs), std::move(rhs));
             lhs = std::move(andExpr);
             rhs = IRExpr::mkConst(0);
-            if      (jmn == "je"  || jmn == "jz")  cmpOp = IROp::Eq;
-            else if (jmn == "jne" || jmn == "jnz") cmpOp = IROp::Ne;
-            else if (jmn == "js")                   cmpOp = IROp::Slt;
-            else if (jmn == "jns")                  cmpOp = IROp::Sge;
+            if      (jmn == "je"  || jmn == "jz")   cmpOp = IROp::Eq;
+            else if (jmn == "jne" || jmn == "jnz")  cmpOp = IROp::Ne;
+            else if (jmn == "js"  || jmn == "jl" || jmn == "jnge")  cmpOp = IROp::Slt;
+            else if (jmn == "jns" || jmn == "jge" || jmn == "jnl")  cmpOp = IROp::Sge;
+            else if (jmn == "jle" || jmn == "jng")   cmpOp = IROp::Sle;
+            else if (jmn == "jg"  || jmn == "jnle")  cmpOp = IROp::Sgt;
             else cmpOp = IROp::Ne;
         } else {
             // cmp or sub-based flags
@@ -1651,10 +1653,12 @@ private:
                 auto *callee = m_mf.stabsFunctionAt(tgt);
                 if (!callee) callee = m_mf.stabsFunctionByName(target);
                 if (callee) retType = callee->returnType;
-                // Build tail call: return target(args) — reuse current function's params
+                // Build tail call: return target(args)
+                // Use callee's param count if known; otherwise reuse caller's params
                 std::vector<std::unique_ptr<IRExpr>> args;
-                for (auto &p : func.params)
-                    args.push_back(IRExpr::mkVar(p.name, p.typeRef));
+                int nCalleeParams = callee ? (int)callee->params.size() : (int)func.params.size();
+                for (int pi = 0; pi < std::min(nCalleeParams, (int)func.params.size()); ++pi)
+                    args.push_back(IRExpr::mkVar(func.params[pi].name, func.params[pi].typeRef));
                 auto callExpr = IRExpr::mkCall(target, std::move(args), retType);
                 bb.stmts.push_back(IRStmt::mkReturn(std::move(callExpr)));
             }

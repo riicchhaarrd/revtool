@@ -3541,6 +3541,23 @@ private:
                 if (outer == CastKind::FloatToInt && inner_k == CastKind::IntToFloat)
                     return emitExpr(inner_e->kids[0].get());
             }
+            // For ZeroExt/SignExt of Load expressions, use typed pointer dereference
+            // instead of casting the loaded value. This produces movzbl/movzwl (byte/word load)
+            // instead of movl + truncation.
+            if ((e->castKind == CastKind::ZeroExt8 || e->castKind == CastKind::Trunc8) &&
+                inner_e->op == IROp::Load && !inner_e->kids.empty()) {
+                m_addrDepth++;
+                std::string addr = emitExpr(inner_e->kids[0].get());
+                m_addrDepth--;
+                return "*(unsigned char *)(" + addr + ")";
+            }
+            if ((e->castKind == CastKind::ZeroExt16 || e->castKind == CastKind::Trunc16) &&
+                inner_e->op == IROp::Load && !inner_e->kids.empty()) {
+                m_addrDepth++;
+                std::string addr = emitExpr(inner_e->kids[0].get());
+                m_addrDepth--;
+                return "*(unsigned short *)(" + addr + ")";
+            }
             switch (e->castKind) {
             case CastKind::ZeroExt8:   return "(unsigned char)(" + inner + ")";
             case CastKind::ZeroExt16:  return "(unsigned short)(" + inner + ")";
