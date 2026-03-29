@@ -1131,34 +1131,9 @@ private:
             // Copy propagation: if a temp is just assigned from a Var or another Temp,
             // propagate the source everywhere and eliminate the temp.
             runCopyPropagation();
-            // Extend constMap across coalesced groups: if temp A = 0 and temp B
-            // is in the same coalesced group as A, then B is also 0.
-            // Then re-run propagation to fold Mul(0, x) → 0 etc.
-            if (!m_constMap.empty() && !func.tempToVar.empty()) {
-                std::map<int, int64_t> groupConsts;
-                for (auto &[tid, val] : m_constMap) {
-                    auto vit = func.tempToVar.find(tid);
-                    if (vit != func.tempToVar.end())
-                        groupConsts[vit->second] = val;
-                }
-                bool added = false;
-                for (auto &[tid, vid] : func.tempToVar) {
-                    auto git = groupConsts.find(vid);
-                    if (git != groupConsts.end() && m_constMap.find(tid) == m_constMap.end()) {
-                        m_constMap[tid] = git->second;
-                        added = true;
-                    }
-                }
-                // Re-propagate if new constants were added
-                if (added) {
-                    for (auto &bb : m_func.blocks)
-                        for (auto &stmt : bb.stmts) {
-                            propagateInExpr(stmt.expr);
-                            propagateInExpr(stmt.addr);
-                            for (auto &a : stmt.args) propagateInExpr(a);
-                        }
-                }
-            }
+            // NOTE: cross-group const propagation was removed because many "= 0"
+            // values are actually loop induction variables (xor reg,reg) whose
+            // initial value is 0 but are updated in loop iterations.
             // Count temp uses for inlining decisions
             for (auto &bb : func.blocks)
                 for (auto &stmt : bb.stmts)
