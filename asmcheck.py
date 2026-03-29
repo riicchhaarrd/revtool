@@ -189,6 +189,11 @@ def compile_to_asm(c_code):
         name = m.group(1)
         if name not in stubs_types:
             refs.add(name)
+    # Also find CamelCase/uppercase type names used as pointer types: "TypeName *var"
+    for m in re.finditer(r'\b([A-Z]\w+)\s*\*\s*\w+', c_code):
+        name = m.group(1)
+        if name not in stubs_types and name not in ('NULL', 'BOOL', 'Bool', 'DWORD', 'UINT'):
+            refs.add(name)
     queue = list(refs)
     visited = set()
     while queue:
@@ -283,6 +288,11 @@ def compile_to_asm(c_code):
         for m in re.finditer(r'\b(\w+_t)\s+\*?\s*\w+', defn):
             if m.group(1) not in emitted_set:
                 emit_type(m.group(1))
+        # Also follow CamelCase type references (e.g., XModelCollSurf * field)
+        for m in re.finditer(r'\b([A-Z]\w+)\s+\*', defn):
+            dep = m.group(1)
+            if dep not in emitted_set and dep in extracted:
+                emit_type(dep)
         ordered.append(defn)
     for name in extracted:
         emit_type(name)
@@ -334,7 +344,7 @@ def compile_to_asm(c_code):
                 assign_rhs.add(rhs)
         call_args = set()  # unused — kept for compatibility
         for name in sorted(undeclared):
-            if name in already or name in funcs: continue
+            if name in already or name in funcs or name in extracted: continue
             if re.search(r'\*\s*\(' + re.escape(name) + r'\)|' +
                           re.escape(name) + r'\s*->|' +
                           re.escape(name) + r'\s*\[', full):

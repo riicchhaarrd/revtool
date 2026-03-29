@@ -1434,12 +1434,28 @@ private:
                 }
             }
 
-            // Declare any temps that leaked as raw tN names during emission
+            // Declare any temps that leaked during emission (phi temps, raw tN names)
             for (int id : m_forceDeclareTemps) {
-                std::string tname = "t" + std::to_string(id);
+                // Use coalesced name if available
+                std::string tname;
+                auto vit = m_func.tempToVar.find(id);
+                if (vit != m_func.tempToVar.end()) {
+                    if (declaredVarIds.count(vit->second)) continue;
+                    declaredVarIds.insert(vit->second);
+                    auto nit = m_func.varNames.find(vit->second);
+                    if (nit != m_func.varNames.end() && !nit->second.empty())
+                        tname = nit->second;
+                }
+                if (tname.empty())
+                    tname = "t" + std::to_string(id);
                 if (declared.count(tname)) continue;
                 declared.insert(tname);
-                out += "    " + QString::fromStdString(inferTempType(id) + " " + tname) + ";\n";
+                std::string itype = inferTempType(id);
+                // Override float type for vars with float/pointer conflict
+                if ((itype == "float" || itype == "vec_t") && vit != m_func.tempToVar.end() &&
+                    m_func.noFloatVars.count(vit->second))
+                    itype = "int";
+                out += "    " + QString::fromStdString(itype + " " + tname) + ";\n";
             }
             if (!m_forceDeclareTemps.empty()) out += "\n";
 
@@ -2404,6 +2420,8 @@ private:
                 // Phi temps: always use variable name (don't inline their definition
                 // because it's the pre-loop value; the actual value changes per iteration)
                 if (m_func.phiTemps.count(id)) {
+                    // Force-declare this temp so its name is available
+                    m_forceDeclareTemps.insert(id);
                     auto vit = m_func.tempToVar.find(id);
                     if (vit != m_func.tempToVar.end()) {
                         auto nit = m_func.varNames.find(vit->second);
