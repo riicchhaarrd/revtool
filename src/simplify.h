@@ -58,6 +58,43 @@ private:
         }
         if (constTemps.empty()) return;
 
+        // Pass 1b: find temps used in Load address computation.
+        // Propagating constants into these can cause the Load to resolve
+        // to a BSS/static value instead of the runtime value.
+        std::set<int> usedInLoadAddr;
+        for (auto &bb : func.blocks) {
+            for (auto &stmt : bb.stmts) {
+                // Scan for Load(Add(Temp(t), ...)) or Load(Temp(t))
+                auto findLoadAddrTemps = [&](const IRExpr *e) {
+                    if (!e) return;
+                    std::vector<const IRExpr*> stk = {e};
+                    while (!stk.empty()) {
+                        auto *n = stk.back(); stk.pop_back();
+                        if (n->op == IROp::Load && !n->kids.empty()) {
+                            // Mark all temps in the address expression
+                            auto *addr = n->kids[0].get();
+                            std::vector<const IRExpr*> addrStk = {addr};
+                            while (!addrStk.empty()) {
+                                auto *a = addrStk.back(); addrStk.pop_back();
+                                if (a->op == IROp::Temp)
+                                    usedInLoadAddr.insert(a->tempId());
+                                for (auto &k : a->kids) if (k) addrStk.push_back(k.get());
+                            }
+                        }
+                        for (auto &k : n->kids) if (k) stk.push_back(k.get());
+                    }
+                };
+                findLoadAddrTemps(stmt.expr.get());
+                findLoadAddrTemps(stmt.addr.get());
+                for (auto &a : stmt.args) findLoadAddrTemps(a.get());
+            }
+        }
+        // Remove Load-address temps from const propagation
+        for (int tid : usedInLoadAddr)
+            constTemps.erase(tid);
+
+        if (constTemps.empty()) return;
+
         // Pass 2: replace all Temp refs with the constant value
         for (auto &bb : func.blocks) {
             for (auto &stmt : bb.stmts) {

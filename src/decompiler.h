@@ -1444,6 +1444,7 @@ private:
         std::map<int, TypeRef> m_tempStructPtr;   // temp → struct pointer type (from Field access)
         std::set<int>         m_forceDeclareTemps; // temps that leak as raw tN and need declaration
         std::set<int>         m_inliningTemps;    // cycle guard for temp inlining in emitExpr
+        std::set<int>         m_loadAddrTemps;    // temps used in Load address expressions
 
         // Force temps with cross-block def/use to be declared (not inlined)
         void forceDeclCrossBlockTemps() {
@@ -1487,8 +1488,59 @@ private:
 
         // Copy propagation: replace temps that are simple copies of vars/other temps
         void runCopyPropagation() {
-            // Pass 1: find all temps that are simple copies
-            // First, find temps assigned non-constant values (loop-updated temps)
+            // Find temps used in Load address expressions — don't const-propagate these
+            // (propagating 0 into a Load address resolves to BSS value instead of runtime)
+            std::set<int> usedInLoadAddr;
+            for (auto &bb : m_func.blocks)
+                for (auto &stmt : bb.stmts) {
+                    auto scanLoads = [&](const IRExpr *e) {
+                        if (!e) return;
+                        std::vector<const IRExpr*> stk = {e};
+                        while (!stk.empty()) {
+                            auto *n = stk.back(); stk.pop_back();
+                            if (n->op == IROp::Load && !n->kids.empty()) {
+                                std::vector<const IRExpr*> as = {n->kids[0].get()};
+                                while (!as.empty()) {
+                                    auto *a = as.back(); as.pop_back();
+                                    if (!a) continue;
+                                    if (a->op == IROp::Temp) usedInLoadAddr.insert(a->tempId());
+                                    for (auto &k : a->kids) if (k) as.push_back(k.get());
+                                }
+                            }
+                            for (auto &k : n->kids) if (k) stk.push_back(k.get());
+                        }
+                    };
+                    scanLoads(stmt.expr.get());
+                    scanLoads(stmt.addr.get());
+                    for (auto &a : stmt.args) scanLoads(a.get());
+                }
+            // Transitively expand: if t_x is in usedInLoadAddr and t_x = op(t_y, ...),
+            // then t_y is also in usedInLoadAddr
+            {
+                bool changed = true;
+                for (int iter = 0; iter < 5 && changed; ++iter) {
+                    changed = false;
+                    for (auto &bb : m_func.blocks)
+                        for (auto &stmt : bb.stmts) {
+                            if (stmt.kind != IRStmtKind::Assign || stmt.destTemp < 0) continue;
+                            if (!usedInLoadAddr.count(stmt.destTemp)) continue;
+                            if (!stmt.expr) continue;
+                            // Mark all Temp children as load-addr temps
+                            std::vector<const IRExpr*> stk = {stmt.expr.get()};
+                            while (!stk.empty()) {
+                                auto *n = stk.back(); stk.pop_back();
+                                if (!n) continue;
+                                if (n->op == IROp::Temp && !usedInLoadAddr.count(n->tempId())) {
+                                    usedInLoadAddr.insert(n->tempId());
+                                    changed = true;
+                                }
+                                for (auto &k : n->kids) if (k) stk.push_back(k.get());
+                            }
+                        }
+                }
+            }
+            m_loadAddrTemps = usedInLoadAddr; // save for use in emitExpr
+            // Also find temps with non-constant assignments (loop-updated)
             std::set<int> hasNonConstAssign;
             for (auto &bb : m_func.blocks)
                 for (auto &stmt : bb.stmts)
@@ -1506,8 +1558,7 @@ private:
                         m_copyPropagated.insert(stmt.destTemp);
                     }
                     // t = const → propagate constant
-                    // BUT skip if this temp is ALSO assigned a non-constant
-                    // (loop phi: t = 0 in preheader, t = t+stride in back-edge)
+                    // Skip if: temp is also assigned non-constant (loop phi)
                     if (stmt.expr->op == IROp::Const) {
                         if (!hasNonConstAssign.count(stmt.destTemp)) {
                             m_constMap[stmt.destTemp] = stmt.expr->value;
