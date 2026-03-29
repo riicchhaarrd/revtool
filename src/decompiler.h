@@ -2259,7 +2259,15 @@ private:
                 }
                 break;
             }
-            case IROp::Var:    result = e->name; break;
+            case IROp::Var: {
+                // Only sanitize names that aren't numeric literals or expressions
+                std::string vn = e->name;
+                if (!vn.empty() && (isdigit(vn[0]) || vn[0] == '-' || vn[0] == '"' || vn[0] == '('))
+                    result = vn;  // numeric literal, string, or expression — emit as-is
+                else
+                    result = cName(vn);
+                break;
+            }
             case IROp::String: result = e->name; break;
             case IROp::FuncRef: result = e->name; break;
 

@@ -155,81 +155,112 @@ def extract_struct_from_header(name):
     return None
 
 
-def compile_to_asm(c_code):
-    full = STUBS + '\n' + c_code
-    # Retry loop: extract undeclared identifiers from errors, add stubs, retry
-    max_retries = 10
-    for attempt in range(max_retries):
-        with tempfile.NamedTemporaryFile(suffix='.c', mode='w', delete=False) as f:
-            f.write(full)
-            cpath = f.name
-        try:
-            r = subprocess.run([APPLE_GCC] + GCC_FLAGS + ['-S', '-o', '-', cpath],
-                               capture_output=True, text=True, timeout=30)
-        except subprocess.TimeoutExpired:
-            os.unlink(cpath)
-            return False, '', 'timeout'
+def _try_compile(code):
+    with tempfile.NamedTemporaryFile(suffix='.c', mode='w', delete=False) as f:
+        f.write(code); cpath = f.name
+    try:
+        r = subprocess.run([APPLE_GCC] + GCC_FLAGS + ['-S', '-o', '-', cpath],
+                           capture_output=True, text=True, timeout=30)
+        return r.returncode == 0, r.stdout, r.stderr
+    except subprocess.TimeoutExpired:
+        return False, '', 'timeout'
+    finally:
         os.unlink(cpath)
-        if r.returncode == 0:
-            return True, r.stdout, r.stderr
-        # Extract undeclared identifiers and add stub typedefs
-        # GCC uses various quote styles: 'x', `x', \u2018x\u2019
-        q = r"[\x60\x27\u2018]"   # open: backtick, single-quote, left-quote
-        cq = r"[\x27\u2019]"      # close: single-quote, right-quote
+
+
+def compile_to_asm(c_code):
+    # Pre-extract all struct/typedef types referenced in the code from the types header
+    extracted = {}  # name -> definition (ordered by dependency)
+    # Find struct references AND typedef names (Type_t patterns used as pointer types)
+    refs = set(re.findall(r'struct\s+(\w+)', c_code))
+    # Also find typedef names used as pointer base types: "type_t *var"
+    # Skip simple types already in STUBS (vec_t, qboolean, etc.)
+    stubs_types = set(re.findall(r'typedef\s+\S+.*?\s+(\w+)\s*[;\[]', STUBS))
+    for m in re.finditer(r'\b(\w+_t)\s*\*\s*\w+', c_code):
+        name = m.group(1)
+        if name not in stubs_types:
+            refs.add(name)
+    queue = list(refs)
+    visited = set()
+    while queue:
+        name = queue.pop(0)
+        if name in visited: continue
+        visited.add(name)
+        defn = extract_struct_from_header(name)
+        if defn:
+            # Skip structs with invalid C (vtable pointers, C++ artifacts)
+            if '$' in defn or '(*)()' in defn or '::' in defn:
+                continue
+            extracted[name] = defn
+            # Also register any struct tags defined in this block
+            for m in re.finditer(r'struct\s+(\w+)\s*\{', defn):
+                extracted.setdefault(m.group(1), defn)
+            # Extract dependencies: struct fields by value AND typedef references
+            for m in re.finditer(r'(?:struct|union)\s+(\w+)\s+\w+', defn):
+                if m.group(1) not in visited:
+                    queue.append(m.group(1))
+            for m in re.finditer(r'\b(\w+_t)\s+\*?\s*\w+', defn):
+                dep = m.group(1)
+                if dep not in visited and dep not in stubs_types:
+                    queue.append(dep)
+
+    # Build: STUBS + extracted types (dependency-ordered) + code
+    # Topological sort: emit dependencies before dependents
+    ordered = []
+    emitted_set = set()
+    def emit_type(name):
+        if name in emitted_set or name not in extracted: return
+        emitted_set.add(name)
+        defn = extracted[name]
+        # Mark ALL names defined in this block as emitted (struct tags + typedefs)
+        for m in re.finditer(r'struct\s+(\w+)\s*\{', defn):
+            emitted_set.add(m.group(1))
+        for m in re.finditer(r'typedef\s+struct\s+\w+\s+(\w+)\s*;', defn):
+            emitted_set.add(m.group(1))
+        # Emit dependencies first
+        for m in re.finditer(r'(?:struct|union)\s+(\w+)\s+\w+', defn):
+            emit_type(m.group(1))
+        for m in re.finditer(r'\b(\w+_t)\s+\*?\s*\w+', defn):
+            if m.group(1) not in emitted_set:
+                emit_type(m.group(1))
+        ordered.append(defn)
+    for name in extracted:
+        emit_type(name)
+    types_block = '\n'.join(ordered)
+    full = STUBS + '\n' + types_block + '\n' + c_code
+
+    # Try compile
+    ok, stdout, stderr = _try_compile(full)
+    if ok: return True, stdout, stderr
+
+    # Retry: add simple stubs for remaining undeclared names
+    q = r"[\x60\x27\u2018]"; cq = r"[\x27\u2019]"
+    for attempt in range(5):
         undeclared = set()
-        for m in re.finditer(q + r"(\w+)" + cq + r" undeclared", r.stderr):
-            undeclared.add(m.group(1))
-        for m in re.finditer(r"syntax error before " + q + r"(\w+)" + cq, r.stderr):
-            undeclared.add(m.group(1))
-        for m in re.finditer(r"unknown type name " + q + r"(\w+)" + cq, r.stderr):
-            undeclared.add(m.group(1))
-        # Handle conflicting types: remove the conflicting stub
-        for m in re.finditer(r"conflicting types for " + q + r"(\w+)" + cq, r.stderr):
-            cname = m.group(1)
-            # Remove the extern/typedef stub that conflicts
-            full = re.sub(r'^extern\s+\w+\s+\*?' + re.escape(cname) + r'\s*;.*\n',
-                          '', full, flags=re.MULTILINE)
-            full = re.sub(r'^void\s+' + re.escape(cname) + r'\s*\(void\)\s*;.*\n',
-                          '', full, flags=re.MULTILINE)
-            full = re.sub(r'^typedef\s+struct\s*\{[^}]*\}\s*' + re.escape(cname) + r'\s*;.*\n',
-                          '', full, flags=re.MULTILINE)
-        if not undeclared:
-            return False, r.stdout, r.stderr
-        # Check what's already defined to avoid redefinition
-        already_defined = set(re.findall(r'typedef\s+\S+.*?\s+(\w+)\s*[;\[]', full))
-        already_defined.update(re.findall(r'struct\s+(\w+)\s*\{', full))
-        # Check which names are functions defined in the code (avoid conflicting extern int)
-        func_defs = set(re.findall(r'\b(?:int|void|float|static\s+\w+)\s+(\w+)\s*\(', full))
-        stubs_extra = ''
+        for m in re.finditer(q + r"(\w+)" + cq + r" undeclared", stderr): undeclared.add(m.group(1))
+        for m in re.finditer(r"syntax error before " + q + r"(\w+)" + cq, stderr): undeclared.add(m.group(1))
+        # Remove conflicting stubs
+        for m in re.finditer(r"conflicting types for " + q + r"(\w+)" + cq, stderr):
+            full = re.sub(r'^extern\s+\w+\s+\*?' + re.escape(m.group(1)) + r'\s*;.*\n', '', full, flags=re.MULTILINE)
+        if not undeclared: break
+        already = set(re.findall(r'(?:typedef|struct|extern)\s+\w+.*?\s+(\w+)\s*[;\{]', full))
+        funcs = set(re.findall(r'\b(?:int|void|float|static)\s+(\w+)\s*\(', full))
+        stubs = ''
         for name in sorted(undeclared):
-            if name in already_defined or name in func_defs:
-                continue
-            # Try to extract real definition from generated types header
-            real_def = extract_struct_from_header(name)
-            if real_def:
-                stubs_extra += real_def + '\n'
-                already_defined.add(name)
-                continue
-            # Heuristic: types start uppercase or end with _t/_s/Ref
-            is_type = (name[0].isupper() or name.endswith('_t') or
-                       name.endswith('_s') or name.endswith('Ref'))
-            if is_type:
-                stubs_extra += f'typedef struct {{ int _[64]; }} {name};\n'
-            elif name.endswith('_f') or name.startswith('Cmd_') or name.startswith('Com_'):
-                # Likely a function — declare as void func(void)
-                stubs_extra += f'void {name}(void);\n'
-            elif not name.startswith('_'):
-                # Check if the name is used as a pointer (*name or name->)
-                if re.search(r'\*\s*\(' + re.escape(name) + r'\)|' + re.escape(name) + r'\s*->', full):
-                    stubs_extra += f'extern void *{name};\n'
-                else:
-                    stubs_extra += f'extern int {name};\n'
-        if not stubs_extra:
-            return False, r.stdout, r.stderr
-        # Insert after STUBS but before code (STUBS defines vec_t, etc. that structs need)
-        stubs_end = full.find(STUBS) + len(STUBS) if STUBS in full else 0
-        full = full[:stubs_end] + stubs_extra + full[stubs_end:]
-    return False, '', r.stderr
+            if name in already or name in funcs: continue
+            if re.search(r'\*\s*\(' + re.escape(name) + r'\)|' + re.escape(name) + r'\s*->', full):
+                stubs += f'extern void *{name};\n'
+            elif name[0].isupper() or name.endswith('_t'):
+                stubs += f'typedef int {name};\n'
+            else:
+                stubs += f'extern int {name};\n'
+        if not stubs: break
+        idx = full.find(STUBS) + len(STUBS) if STUBS in full else 0
+        full = full[:idx] + stubs + full[idx:]
+        ok, stdout, stderr = _try_compile(full)
+        if ok: return True, stdout, stderr
+
+    return False, '', stderr
 
 
 def extract_func_asm(asm_text, func_name):
