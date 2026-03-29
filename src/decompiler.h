@@ -994,6 +994,15 @@ private:
                 }
                 return;
             }
+            // Pre-emit union dependencies (small, self-contained types)
+            for (auto &f : t->fields) {
+                if (f.typeRef == NullType) continue;
+                auto *ft = types.resolveType(f.typeRef);
+                if (ft && ft->kind == StabsTypeKind::Union &&
+                    !ft->name.empty() && ft->name != t->name &&
+                    !emittedNames.count(ft->name))
+                    emitTypeDefsRecursive(out, types, f.typeRef, emitted, emittedNames, depth + 1);
+            }
             // Check if all field types compile without undefined types.
             // Emit structs with unknown field types as offset-based int arrays.
             {
@@ -1036,21 +1045,74 @@ private:
                     }
                 }
                 if (!allFieldsOk) {
-                    // Emit as int-padded struct with correct size for offset access
+                    // Emit struct with STABS field names but simplified types.
+                    // Use int/pointer for fields whose types can't be resolved.
                     std::string kw = (t->kind == StabsTypeKind::Union) ? "union" : "struct";
-                    int sz = t->sizeBytes > 0 ? t->sizeBytes : 4;
-                    if (sz > 0 && sz <= 65536) {
-                        out += QString::fromStdString(kw + " " + t->name + " {\n");
-                        int numInts = (sz + 3) / 4;
-                        for (int i = 0; i < numInts; ++i) {
-                            char fn[32]; snprintf(fn, sizeof(fn), "    int field_%X;\n", i*4);
-                            out += fn;
+                    out += QString::fromStdString(kw + " " + t->name + " {\n");
+                    int prevEnd = 0; // track offset for padding
+                    for (auto &f : t->fields) {
+                        if (f.bitSize == 0 && f.bitOffset == 0) continue;
+                        if (f.name.empty() || f.name[0] == '/' || f.name[0] == '~') continue;
+                        if (f.name.find("::") != std::string::npos) continue;
+                        if (f.name.find("(") != std::string::npos) continue;
+                        if (f.name.find("<") != std::string::npos) continue;
+                        if (f.name.find("=") != std::string::npos) continue;
+                        if (f.name[0] == '!' || f.name[0] == '#' || f.name[0] == '$') continue;
+                        if (f.name.find("operator") == 0) continue;
+                        if (f.name.find("&") != std::string::npos) continue;
+                        if (f.name.find(">") != std::string::npos) continue;
+                        int byteOff = f.bitOffset / 8;
+                        int byteSize = f.bitSize / 8;
+                        if (byteSize <= 0) byteSize = 4;
+                        // Add padding if needed
+                        if (byteOff > prevEnd) {
+                            int pad = byteOff - prevEnd;
+                            char pname[32];
+                            snprintf(pname, sizeof(pname), "    char _pad_%X[%d];\n", prevEnd, pad);
+                            out += pname;
                         }
-                        out += "};\n\n";
-                    } else {
-                        out += QString::fromStdString(kw + " " + t->name +
-                            " { char _opaque[" + std::to_string(sz) + "]; };\n\n");
+                        // Try to use the real type, fallback to int/char array
+                        std::string ftype;
+                        auto *ft = types.resolveType(f.typeRef);
+                        auto *rawFt = types.getType(f.typeRef);
+                        bool typeOk = false;
+                        if (ft) {
+                            if (ft->kind <= StabsTypeKind::LongDouble) typeOk = true;
+                            if (rawFt && rawFt->kind == StabsTypeKind::Pointer) typeOk = true;
+                            if ((ft->kind == StabsTypeKind::Struct || ft->kind == StabsTypeKind::Union)
+                                && !ft->name.empty() && emittedNames.count(ft->name)) typeOk = true;
+                            if (ft->kind == StabsTypeKind::Enum && !ft->name.empty()
+                                && emittedNames.count(ft->name)) typeOk = true;
+                            if (ft->kind == StabsTypeKind::Array) {
+                                auto *elem = types.resolveType(ft->targetType);
+                                if (elem && elem->kind <= StabsTypeKind::LongDouble) typeOk = true;
+                            }
+                        }
+                        if (typeOk) {
+                            ftype = types.formatDecl(f.typeRef, f.name);
+                        } else if (byteSize == 1) {
+                            ftype = "char " + f.name;
+                        } else if (byteSize == 2) {
+                            ftype = "short " + f.name;
+                        } else if (byteSize <= 4) {
+                            ftype = "int " + f.name;
+                        } else {
+                            char buf[64];
+                            snprintf(buf, sizeof(buf), "char %s[%d]", f.name.c_str(), byteSize);
+                            ftype = buf;
+                        }
+                        out += "    " + QString::fromStdString(ftype) + ";\n";
+                        prevEnd = byteOff + byteSize;
                     }
+                    // Pad to full size
+                    int totalSize = t->sizeBytes > 0 ? t->sizeBytes : prevEnd;
+                    if (prevEnd < totalSize) {
+                        char pname[32];
+                        snprintf(pname, sizeof(pname), "    char _pad_%X[%d];\n",
+                                 prevEnd, totalSize - prevEnd);
+                        out += pname;
+                    }
+                    out += "};\n\n";
                     return;
                 }
             }
@@ -1931,12 +1993,13 @@ private:
                             break;
                         }
                     }
+                    std::string addr = emitExpr(a);
                     out += pad(indent) + QString::fromStdString(
-                        "*(" + emitExpr(a) + ") = " + val) + ";\n";
+                        "*(int *)(" + addr + ") = " + val) + ";\n";
                 } else {
-                    // Final fallback: *(expr) = val — no cast needed
+                    std::string addr = emitExpr(a);
                     out += pad(indent) + QString::fromStdString(
-                        "*(" + emitExpr(a) + ") = " + val) + ";\n";
+                        "*(int *)(" + addr + ") = " + val) + ";\n";
                 }
                 break;
             }
@@ -2137,12 +2200,10 @@ private:
                 if (result.empty() && e->value > 0x10000) {
                     std::string sym = m_mf.symbolNameAtAddress((uint32_t)e->value);
                     if (!sym.empty()) {
-                        result = sym;
+                        result = cName(sym);
                     } else {
-                        // Check if address is base+offset into a known global (array element field)
-                        // Search for the nearest symbol below this address
                         std::string nearest = m_mf.nearestSymbolName((uint32_t)e->value);
-                        if (!nearest.empty()) result = nearest;
+                        if (!nearest.empty()) result = cName(nearest);
                     }
                 }
                 if (result.empty()) {
@@ -2214,7 +2275,15 @@ private:
                 }
                 break;
             }
-            case IROp::Var:    result = e->name; break;
+            case IROp::Var: {
+                // Only sanitize names that aren't numeric literals or expressions
+                std::string vn = e->name;
+                if (!vn.empty() && (isdigit(vn[0]) || vn[0] == '-' || vn[0] == '"' || vn[0] == '('))
+                    result = vn;  // numeric literal, string, or expression — emit as-is
+                else
+                    result = cName(vn);
+                break;
+            }
             case IROp::String: result = e->name; break;
             case IROp::FuncRef: result = e->name; break;
 
@@ -2319,13 +2388,13 @@ private:
                 } else {
                     result = "*(" + emitExpr(addr) + ")";
                 }
-                // If result uses *(expr) and expr isn't a pointer type, add a cast
+                // If result uses *(expr), ensure it's a valid dereference
                 if (!result.empty() && result[0] == '*' && addr) {
-                    TypeRef at = exprType(addr);
-                    if (at != NullType) {
-                        auto *rt = m_types.resolveType(at);
-                        if (rt && rt->kind != StabsTypeKind::Pointer)
-                            result = "*(int *)(" + emitExpr(addr) + ")";
+                    // Always cast plain *(var) to *(int*)(var) to avoid void* dereference
+                    // and to handle cases where the var type is unknown
+                    if (addr->op == IROp::Var || addr->op == IROp::Temp) {
+                        std::string addrStr = emitExpr(addr);
+                        result = "*(int *)(" + addrStr + ")";
                     }
                 }
                 break;
@@ -2677,7 +2746,9 @@ private:
                 result = cName(e->name) + "(";
                 for (size_t i = 0; i < e->kids.size(); ++i) {
                     if (i) result += ", ";
-                    result += emitExpr(e->kids[i].get());
+                    std::string arg = emitExpr(e->kids[i].get());
+                    // Sanitize any remaining non-C identifiers in arguments
+                    result += arg;
                 }
                 result += ")";
                 break;
@@ -2770,6 +2841,11 @@ private:
             // Remove & from references in names
             pos = 0;
             while ((pos = out.find("&", pos)) != std::string::npos) out.erase(pos, 1);
+            // Replace remaining non-identifier characters
+            for (auto &c : out)
+                if (!isalnum(c) && c != '_') c = '_';
+            // Remove leading digits
+            if (!out.empty() && isdigit(out[0])) out = "_" + out;
             return out;
         }
 

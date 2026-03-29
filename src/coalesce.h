@@ -6,6 +6,7 @@
 #include <set>
 #include <algorithm>
 #include <cassert>
+#include <functional>
 
 // ── Variable Coalescer ──────────────────────────────────────────────
 // Merges non-interfering temporaries into named variables.
@@ -315,6 +316,95 @@ public:
             // Generate name if none found from STABS
             if (bestName.empty()) {
                 bestName = "v" + std::to_string(varId);
+            }
+
+            // Validate type: don't apply param struct/pointer types to large groups.
+            // When many unrelated temps get coalesced, the param's type is likely wrong
+            // for the other members (e.g., float ops coalesced with struct pointer).
+            if (bestType != NullType) {
+                auto *rt = types.resolveType(bestType);
+                bool isStructPtrType = false;
+                if (rt && (rt->kind == StabsTypeKind::Struct || rt->kind == StabsTypeKind::Union))
+                    isStructPtrType = true;
+                if (rt && rt->kind == StabsTypeKind::Pointer) {
+                    auto *pt = types.resolveType(rt->targetType);
+                    if (pt && (pt->kind == StabsTypeKind::Struct || pt->kind == StabsTypeKind::Union))
+                        isStructPtrType = true;
+                }
+                // Also check by formatted name — STABS type table conflicts can
+                // cause resolveType to return Int for what's actually a struct
+                if (!isStructPtrType) {
+                    std::string fmtType = types.formatType(bestType);
+                    // Only flag as struct if the name ends with _s (struct tag convention)
+                    // or contains "State" / "struct" (common game struct names)
+                    // Exclude scalar typedefs like vec_t, qboolean, etc.
+                    static const std::set<std::string> scalarTypes = {
+                        "vec_t", "int", "float", "char", "void", "double", "short", "long",
+                        "unsigned", "qboolean", "BOOL", "Bool", "byte", "OSStatus", "OSErr",
+                        "fileHandle_t", "MaterialHandle", "r_index_t", "Boolean",
+                    };
+                    if (!fmtType.empty() && !scalarTypes.count(fmtType) &&
+                        fmtType.find("*") == std::string::npos) {
+                        // Check if it looks like a struct (has _s or State in name)
+                        if (fmtType.find("_s") != std::string::npos ||
+                            fmtType.find("State") != std::string::npos ||
+                            fmtType.find("Info") != std::string::npos) {
+                            isStructPtrType = true;
+                        }
+                    }
+                }
+                // Count how many temps in this group were assigned from this param
+                if (isStructPtrType) {
+                    // Check if any temp in this group is:
+                    // 1) Used as operand of Mul/Div, OR
+                    // 2) Defined by an expression containing Mul/Add/Sub
+                    // Structs are never multiplied or added.
+                    std::set<int> groupTids;
+                    for (int idx : members) groupTids.insert(tempList[idx]);
+                    bool usedInArith = false;
+                    for (auto &bb : func.blocks) {
+                        for (auto &stmt : bb.stmts) {
+                            // Check 1: group temp used as operand of Mul/Div
+                            std::function<bool(const IRExpr*, bool)> scan;
+                            scan = [&](const IRExpr *e, bool parentIsArith) -> bool {
+                                if (!e) return false;
+                                if (e->op == IROp::Temp && groupTids.count(e->tempId()) && parentIsArith)
+                                    return true;
+                                bool isArith = (e->op == IROp::Mul || e->op == IROp::SDiv ||
+                                                e->op == IROp::UDiv);
+                                for (auto &k : e->kids)
+                                    if (scan(k.get(), isArith)) return true;
+                                return false;
+                            };
+                            if (scan(stmt.expr.get(), false) ||
+                                scan(stmt.addr.get(), false)) { usedInArith = true; break; }
+                            for (auto &a : stmt.args)
+                                if (scan(a.get(), false)) { usedInArith = true; break; }
+                            // Check 2: group temp defined by Mul/Add/Sub expression
+                            if (stmt.kind == IRStmtKind::Assign &&
+                                groupTids.count(stmt.destTemp) && stmt.expr) {
+                                std::function<bool(const IRExpr*)> hasMul;
+                                hasMul = [&](const IRExpr *e) -> bool {
+                                    if (!e) return false;
+                                    if (e->op == IROp::Mul || e->op == IROp::SDiv) return true;
+                                    for (auto &k : e->kids)
+                                        if (hasMul(k.get())) return true;
+                                    return false;
+                                };
+                                if (hasMul(stmt.expr.get())) { usedInArith = true; break; }
+                            }
+                            if (usedInArith) break;
+                        }
+                        if (usedInArith) break;
+                    }
+                    if (usedInArith) {
+                        bestType = NullType;
+                        // Also clear tempTypes for all temps in this group
+                        // to prevent the emitter from falling back to the wrong type
+                        for (int idx : members)
+                            func.tempTypes.erase(tempList[idx]);
+                    }
+                }
             }
 
             // Record mapping for all temps in this group

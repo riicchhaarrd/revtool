@@ -32,6 +32,15 @@ typedef int BOOL; typedef int Bool; typedef int qboolean;
 typedef unsigned int DWORD; typedef unsigned int UINT;
 typedef float vec_t; typedef vec_t vec3_t[3]; typedef vec_t vec2_t[2];
 typedef unsigned char byte;
+typedef int OSStatus; typedef short OSErr; typedef int Boolean;
+typedef unsigned int OSType; typedef void *CursHandle;
+typedef void *WindowRef; typedef void *MenuRef; typedef void *CGrafPtr;
+typedef void *GDHandle; typedef void *CursPtr;
+typedef unsigned int CGDirectDisplayID;
+typedef unsigned char Str255[256];
+typedef struct { float x, y; } CGPoint;
+typedef struct { float w, h; } CGSize;
+typedef struct { CGPoint origin; CGSize size; } CGRect;
 #define NULL ((void*)0)
 float floorf(float); float ceilf(float); float sqrtf(float);
 float sinf(float); float cosf(float); float tanf(float);
@@ -100,55 +109,246 @@ def compile_to_asm_raw(c_code):
         os.unlink(cpath)
 
 
-def compile_to_asm(c_code):
-    full = STUBS + '\n' + c_code
-    # Retry loop: extract undeclared identifiers from errors, add stubs, retry
-    max_retries = 5
-    for attempt in range(max_retries):
-        with tempfile.NamedTemporaryFile(suffix='.c', mode='w', delete=False) as f:
-            f.write(full)
-            cpath = f.name
-        try:
-            r = subprocess.run([APPLE_GCC] + GCC_FLAGS + ['-S', '-o', '-', cpath],
-                               capture_output=True, text=True, timeout=30)
-        except subprocess.TimeoutExpired:
-            os.unlink(cpath)
-            return False, '', 'timeout'
-        os.unlink(cpath)
-        if r.returncode == 0:
-            return True, r.stdout, r.stderr
-        # Extract undeclared identifiers and add stub typedefs
-        # GCC uses various quote styles: 'x', `x', \u2018x\u2019
-        q = r"[\x60\x27\u2018]"   # open: backtick, single-quote, left-quote
-        cq = r"[\x27\u2019]"      # close: single-quote, right-quote
-        undeclared = set()
-        for m in re.finditer(q + r"(\w+)" + cq + r" undeclared", r.stderr):
-            undeclared.add(m.group(1))
-        for m in re.finditer(r"syntax error before " + q + r"(\w+)" + cq, r.stderr):
-            undeclared.add(m.group(1))
-        for m in re.finditer(r"unknown type name " + q + r"(\w+)" + cq, r.stderr):
-            undeclared.add(m.group(1))
-        if not undeclared:
-            return False, r.stdout, r.stderr
-        # Check what's already defined to avoid redefinition
-        already_defined = set(re.findall(r'typedef\s+\S+.*?\s+(\w+)\s*[;\[]', full))
-        already_defined.update(re.findall(r'struct\s+(\w+)\s*\{', full))
-        stubs_extra = ''
-        for name in sorted(undeclared):
-            if name in already_defined:
+_types_header_cache = None
+
+def _load_types_header():
+    global _types_header_cache
+    if _types_header_cache is None and os.path.exists(TYPES_HEADER):
+        with open(TYPES_HEADER) as f:
+            _types_header_cache = f.readlines()
+    return _types_header_cache
+
+
+def extract_struct_from_header(name):
+    """Extract a specific struct/union/enum/typedef definition from the types header."""
+    lines = _load_types_header()
+    if not lines:
+        return None
+
+    # First pass: look for full definition (struct NAME { ... };)
+    result = []
+    in_block = False
+    brace_depth = 0
+    for line in lines:
+        stripped = line.strip()
+        if not in_block:
+            if (stripped.startswith('struct ' + name + ' {') or
+                stripped.startswith('union ' + name + ' {') or
+                stripped.startswith('enum ' + name + ' {')):
+                in_block = True
+                brace_depth = stripped.count('{') - stripped.count('}')
+                result.append(line)
+                if brace_depth <= 0:
+                    return ''.join(result)
                 continue
-            # Heuristic: types start uppercase or end with _t/_s/Ref
-            is_type = (name[0].isupper() or name.endswith('_t') or
-                       name.endswith('_s') or name.endswith('Ref'))
-            if is_type:
-                stubs_extra += f'typedef struct {{ int _[64]; }} {name};\n'
+        else:
+            result.append(line)
+            brace_depth += line.count('{') - line.count('}')
+            if brace_depth <= 0:
+                return ''.join(result)
+
+    # Second pass: look for typedef
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith('typedef ') and stripped.endswith(';'):
+            if f' {name};' in stripped or f' {name}[' in stripped:
+                result = line
+                # If it's typedef struct X name, also extract struct X
+                m = re.match(r'typedef\s+struct\s+(\w+)\s+' + re.escape(name), stripped)
+                if m:
+                    struct_def = extract_struct_from_header(m.group(1))
+                    if struct_def:
+                        result = struct_def + '\n' + result
+                return result
+
+    return None
+
+
+def _try_compile(code):
+    with tempfile.NamedTemporaryFile(suffix='.c', mode='w', delete=False) as f:
+        f.write(code); cpath = f.name
+    try:
+        r = subprocess.run([APPLE_GCC] + GCC_FLAGS + ['-S', '-o', '-', cpath],
+                           capture_output=True, text=True, timeout=30)
+        return r.returncode == 0, r.stdout, r.stderr
+    except subprocess.TimeoutExpired:
+        return False, '', 'timeout'
+    finally:
+        os.unlink(cpath)
+
+
+def compile_to_asm(c_code):
+    # Pre-extract all struct/typedef types referenced in the code from the types header
+    extracted = {}  # name -> definition (ordered by dependency)
+    # Find struct references AND typedef names (Type_t patterns used as pointer types)
+    refs = set(re.findall(r'(?:struct|union)\s+(\w+)', c_code))
+    # Also find typedef names used as pointer base types: "type_t *var"
+    # Skip simple types already in STUBS (vec_t, qboolean, etc.)
+    stubs_types = set(re.findall(r'typedef\s+\S+.*?\s+(\w+)\s*[;\[]', STUBS))
+    for m in re.finditer(r'\b(\w+_t)\s*\*\s*\w+', c_code):
+        name = m.group(1)
+        if name not in stubs_types:
+            refs.add(name)
+    queue = list(refs)
+    visited = set()
+    while queue:
+        name = queue.pop(0)
+        if name in visited: continue
+        visited.add(name)
+        defn = extract_struct_from_header(name)
+        if defn:
+            # Skip structs with invalid C (vtable pointers, C++ artifacts)
+            if '$' in defn or '(*)()' in defn or '::' in defn:
+                continue
+            extracted[name] = defn
+            # Also register any struct tags defined in this block
+            for m in re.finditer(r'struct\s+(\w+)\s*\{', defn):
+                extracted.setdefault(m.group(1), defn)
+            # Extract dependencies: struct fields by value AND typedef references
+            for m in re.finditer(r'(?:struct|union)\s+(\w+)\s+\w+', defn):
+                if m.group(1) not in visited:
+                    queue.append(m.group(1))
+            for m in re.finditer(r'\b(\w+_t)\s+\*?\s*\w+', defn):
+                dep = m.group(1)
+                if dep not in visited and dep not in stubs_types:
+                    queue.append(dep)
+
+    # Extract function prototypes for key functions that return typed pointers.
+    # Only include prototypes whose return types AND param types are all defined.
+    func_protos = ''
+    lines = _load_types_header()
+    if lines:
+        in_protos = False
+        # Functions called in the code whose return value is assigned
+        assigned_calls = set()
+        for m in re.finditer(r'(\w+)\s*=\s*(\w+)\s*\(', c_code):
+            assigned_calls.add(m.group(2))
+        for line in lines:
+            if '/* Function prototypes */' in line:
+                in_protos = True
+                continue
+            if not in_protos:
+                continue
+            # Extract function name from prototype line
+            m = re.match(r'(?:const\s+)?(?:struct\s+)?(?:\w[\w\s\*]*?)\s+\*?\s*(\w+)\s*\(', line.strip())
+            if not m or m.group(1) not in assigned_calls:
+                continue
+            proto_name = m.group(1)
+            # Don't add if function is defined in the code
+            if re.search(r'\b' + re.escape(proto_name) + r'\s*\([^)]*\)\s*\{', c_code):
+                continue
+            # Only include if all types in the prototype are known
+            # (check for struct/union references that aren't extracted)
+            proto_types = re.findall(r'\b(struct|union)\s+(\w+)', line)
+            all_known = True
+            for kw, tname in proto_types:
+                if tname not in extracted and tname + '_t' not in stubs_types and tname not in stubs_types:
+                    all_known = False; break
+            if not all_known:
+                continue
+            # Skip prototypes with unknown typedefs
+            skip = False
+            for word in re.findall(r'\b(\w+_t)\b', line):
+                if word not in stubs_types and word not in extracted:
+                    skip = True; break
+            if skip:
+                continue
+            func_protos += line
+
+    # Build: STUBS + extracted types (dependency-ordered) + prototypes + code
+    # Topological sort: emit dependencies before dependents
+    ordered = []
+    emitted_set = set()
+    def emit_type(name):
+        if name in emitted_set or name not in extracted: return
+        emitted_set.add(name)
+        defn = extracted[name]
+        # Mark ALL names defined in this block as emitted (struct tags + typedefs)
+        for m in re.finditer(r'struct\s+(\w+)\s*\{', defn):
+            emitted_set.add(m.group(1))
+        for m in re.finditer(r'typedef\s+struct\s+\w+\s+(\w+)\s*;', defn):
+            emitted_set.add(m.group(1))
+        # Emit dependencies first
+        for m in re.finditer(r'(?:struct|union)\s+(\w+)\s+\w+', defn):
+            emit_type(m.group(1))
+        for m in re.finditer(r'\b(\w+_t)\s+\*?\s*\w+', defn):
+            if m.group(1) not in emitted_set:
+                emit_type(m.group(1))
+        ordered.append(defn)
+    for name in extracted:
+        emit_type(name)
+    types_block = '\n'.join(ordered)
+    full = STUBS + '\n' + types_block + '\n' + func_protos + '\n' + c_code
+
+    # Try compile
+    ok, stdout, stderr = _try_compile(full)
+    if ok: return True, stdout, stderr
+
+    # Retry: add simple stubs for remaining undeclared names
+    q = r"[\x60\x27\u2018]"; cq = r"[\x27\u2019]"
+    for attempt in range(5):
+        undeclared = set()
+        for m in re.finditer(q + r"(\w+)" + cq + r" undeclared", stderr): undeclared.add(m.group(1))
+        for m in re.finditer(r"syntax error before " + q + r"(\w+)" + cq, stderr): undeclared.add(m.group(1))
+        # Remove conflicting stubs
+        for m in re.finditer(r"conflicting types for " + q + r"(\w+)" + cq, stderr):
+            cname = re.escape(m.group(1))
+            full = re.sub(r'^extern\s+\w+\s+\*?' + cname + r'\s*;.*\n', '', full, flags=re.MULTILINE)
+            full = re.sub(r'^void\s+' + cname + r'\s*\(void\)\s*;.*\n', '', full, flags=re.MULTILINE)
+            full = re.sub(r'^typedef\s+int\s+' + cname + r'\s*;.*\n', '', full, flags=re.MULTILINE)
+        # Also handle "redefinition of 'struct X'" — remove the duplicate
+        for m in re.finditer(r"redefinition of " + q + r"struct\s+(\w+)" + cq, stderr):
+            cname = re.escape(m.group(1))
+            # Remove the SECOND definition (keep the first from pre-extraction)
+            # Find all occurrences and remove all but the first
+            pattern = r'struct ' + cname + r' \{[^}]*\};\n'
+            matches = list(re.finditer(pattern, full))
+            if len(matches) > 1:
+                # Remove from the end to preserve indices
+                for match in reversed(matches[1:]):
+                    full = full[:match.start()] + full[match.end():]
+        for m in re.finditer(r"redeclared as different kind of symbol.*\n.*previous declaration of " + q + r"(\w+)" + cq, stderr):
+            cname = re.escape(m.group(1))
+            full = re.sub(r'^extern\s+\w+\s+\*?' + cname + r'\s*;.*\n', '', full, flags=re.MULTILINE)
+            full = re.sub(r'^void\s+' + cname + r'\s*\(void\)\s*;.*\n', '', full, flags=re.MULTILINE)
+            full = re.sub(r'^typedef\s+int\s+' + cname + r'\s*;.*\n', '', full, flags=re.MULTILINE)
+        if not undeclared: break
+        already = set(re.findall(r'(?:typedef|struct|union|extern|enum)\s+\w+.*?\s+(\w+)\s*[;\{]', full))
+        funcs = set(re.findall(r'\b(?:int|void|float|static)\s+(\w+)\s*\(', full))
+        stubs = ''
+        # Find names used in direct assignments (A = B; where B is a bare identifier)
+        # These are function pointer assignments — declare B as void*
+        assign_rhs = set()
+        for m in re.finditer(r'^\s+\w+\s*=\s*(\w+)\s*;$', full, re.MULTILINE):
+            rhs = m.group(1)
+            if not rhs[0].isdigit() and rhs not in ('0', 'NULL', 'true', 'false'):
+                assign_rhs.add(rhs)
+        # Detect names passed as arguments to Cmd_AddCommand/Cmd_AddServerCommand
+        # (these are function pointer arguments)
+        call_args = set()
+        for m in re.finditer(r'(?:Cmd_AddCommand|Cmd_AddServerCommand|Cmd_AddCommandInternal)\s*\([^,]+,\s*(\w+)', full):
+            call_args.add(m.group(1))
+        for name in sorted(undeclared):
+            if name in already or name in funcs: continue
+            if re.search(r'\*\s*\(' + re.escape(name) + r'\)|' + re.escape(name) + r'\s*->', full):
+                stubs += f'extern void *{name};\n'
+            elif name.endswith('_f') or (name in call_args and not name[0].isdigit()
+                                         and name not in stubs_types):
+                stubs += f'void {name}(void);\n'
+            elif (name in assign_rhs and name not in stubs_types):
+                if name not in already:
+                    stubs += f'extern void *{name};\n'
+            elif name[0].isupper() or name.endswith('_t'):
+                stubs += f'typedef int {name};\n'
             else:
-                # Variable or function — declare as extern int
-                stubs_extra += f'extern int {name};\n'
-        if not stubs_extra:
-            return False, r.stdout, r.stderr
-        full = stubs_extra + full
-    return False, '', r.stderr
+                stubs += f'extern int {name};\n'
+        if not stubs: break
+        idx = full.find(STUBS) + len(STUBS) if STUBS in full else 0
+        full = full[:idx] + stubs + full[idx:]
+        ok, stdout, stderr = _try_compile(full)
+        if ok: return True, stdout, stderr
+
+    return False, '', stderr
 
 
 def extract_func_asm(asm_text, func_name):
@@ -319,16 +519,15 @@ def check_function(name_or_addr, data, text_addr, text_off, verbose=True):
     # Try 1: compile the single function with stubs
     ok, asm_text, errors = compile_to_asm(c_code)
 
-    # Try 2: if that fails, decompile the whole source file (has full type defs)
-    if not ok:
-        src_idx = find_source_for_addr(func_addr)
-        if src_idx is not None:
-            r2 = subprocess.run([DECOMP, BINARY, '-s', str(src_idx)],
-                                capture_output=True, text=True, timeout=60)
-            if r2.stdout.strip():
-                src_code = re.sub(r'#include\s*[<"].*?[>"]', '', r2.stdout)
-                # Source file has its own type defs — compile WITHOUT stubs
-                ok, asm_text, errors = compile_to_asm_raw(src_code)
+    # Try 2: source file fallback (disabled — source files have too many Carbon deps)
+    # if not ok:
+    #     src_idx = find_source_for_addr(func_addr)
+    #     if src_idx is not None:
+    #         r2 = subprocess.run([DECOMP, BINARY, '-s', str(src_idx)],
+    #                             capture_output=True, text=True, timeout=60)
+    #         if r2.stdout.strip():
+    #             src_code = re.sub(r'#include\s*[<"].*?[>"]', '', r2.stdout)
+    #             ok, asm_text, errors = compile_to_asm_raw(src_code)
     if not ok:
         if verbose:
             err_lines = [l for l in errors.split('\n') if ': error:' in l][:5]
