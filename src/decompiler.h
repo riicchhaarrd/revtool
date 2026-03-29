@@ -927,10 +927,11 @@ public:
         }
         // Fix array element references: msg_OFFSET_ = 0 → msg[OFFSET] = 0
         {
-            // Find char arrays: "char NAME[SIZE]"
+            // Find byte/char arrays: "char/byte NAME[SIZE]"
+            for (auto &arrType : {"char ", "byte "}) {
             int pos = 0;
-            while ((pos = cleaned.indexOf("char ", pos)) != -1) {
-                int nameStart = pos + 5;
+            while ((pos = cleaned.indexOf(arrType, pos)) != -1) {
+                int nameStart = pos + (int)strlen(arrType);
                 int bracket = cleaned.indexOf('[', nameStart);
                 int semi = cleaned.indexOf(';', nameStart);
                 if (bracket > nameStart && bracket < semi) {
@@ -949,7 +950,7 @@ public:
                                 while (numEnd < cleaned.size() && cleaned[numEnd].isDigit()) numEnd++;
                                 if (numEnd > numStart && numEnd < cleaned.size() && cleaned[numEnd] == '_') {
                                     int offset = cleaned.mid(numStart, numEnd - numStart).toInt();
-                                    if (offset > 0 && offset < arrSize) {
+                                    if (offset >= 0 && offset < arrSize) {
                                         QString oldPat = cleaned.mid(sp, numEnd + 1 - sp);
                                         QString newPat = arrName + "[" + QString::number(offset) + "]";
                                         cleaned.replace(sp, oldPat.size(), newPat);
@@ -966,6 +967,7 @@ public:
                 }
                 pos = nameStart;
             }
+            } // for arrType
         }
         QStringList lines = cleaned.split('\n');
         // Pass 1: Remove empty if blocks
@@ -3171,14 +3173,34 @@ private:
             }
 
             case IROp::Call: {
-                result = cName(e->name) + "(";
-                for (size_t i = 0; i < e->kids.size(); ++i) {
-                    if (i) result += ", ";
-                    std::string arg = emitExpr(e->kids[i].get());
-                    // Sanitize any remaining non-C identifiers in arguments
-                    result += arg;
+                std::string funcName = cName(e->name);
+                // Vtable calls: vfunc_N(this, ...) → indirect call through vtable
+                // Emits: ((int(*)(...))(((void**)(*(void**)THIS))[N]))(THIS, ...)
+                // This produces: movl (%reg), %eax; calll *OFFSET(%eax)
+                int vslot = -1;
+                if (e->name.compare(0, 6, "vfunc_") == 0) {
+                    vslot = atoi(e->name.c_str() + 6);
                 }
-                result += ")";
+                if (vslot >= 0 && !e->kids.empty()) {
+                    std::string thisArg = emitExpr(e->kids[0].get());
+                    char buf[128];
+                    snprintf(buf, sizeof(buf),
+                        "((int(*)(void*))(((void**)(*(void**)%s))[%d]))(",
+                        thisArg.c_str(), vslot);
+                    result = buf;
+                    for (size_t i = 0; i < e->kids.size(); ++i) {
+                        if (i) result += ", ";
+                        result += emitExpr(e->kids[i].get());
+                    }
+                    result += ")";
+                } else {
+                    result = funcName + "(";
+                    for (size_t i = 0; i < e->kids.size(); ++i) {
+                        if (i) result += ", ";
+                        result += emitExpr(e->kids[i].get());
+                    }
+                    result += ")";
+                }
                 break;
             }
 

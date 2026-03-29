@@ -486,7 +486,8 @@ def norm_prologue(insns, other):
     return result
 
 
-_callee_save_pats = [r'pushl %e[bsd][ix]', r'popl %e[bsd][ix]', r'addl \$\d+, %esp']
+_callee_save_pats = [r'pushl %e[bsd][ix]', r'popl %e[bsd][ix]',
+                     r'addl \$\d+, %esp', r'subl \$\d+, %esp']
 
 def strip_callee_save(stream, other_stream):
     """Strip callee-save push/pop/addl that exist in one stream but not the other."""
@@ -516,8 +517,15 @@ def norm_stream(insns):
             'non_lazy_ptr' in insns[i]):
             reg = n.split(', ')[1]
             next_n = norm(insns[i+1])
+            # Same register: movl (%reg), %reg
             if next_n == f'movl ({reg}), {reg}':
                 result.append(n)
+                i += 2
+                continue
+            # Different register: movl (%reg), %reg2 → movl <C>, %reg2
+            m = re.match(r'movl \(' + re.escape(reg) + r'\), (%\w+)', next_n)
+            if m:
+                result.append(f'movl <C>, {m.group(1)}')
                 i += 2
                 continue
         # Collapse: movl <C>, %reg; movl val, (%reg) -> movl val, <C>
@@ -543,7 +551,16 @@ def norm_stream(insns):
                 result.append(f'{m.group(1)} {m.group(2)}, <C>')
                 i += 2
                 continue
-        # (epilogue addl normalization removed — caused misalignment in perfect functions)
+        # Collapse: movl <C>, %reg; movl %reg, <C> → movl <C>, <C>
+        # (store-through-register for function pointers / globals)
+        if (i + 1 < len(insns) and
+            re.match(r'movl <C>, %e\w+', n)):
+            reg = n.split(', ')[1]
+            next_n = norm(insns[i+1])
+            if re.match(r'movl ' + re.escape(reg) + r', <C>', next_n):
+                result.append('movl <C>, <C>')
+                i += 2
+                continue
         # Normalize tail call: call X; leave; ret -> call X (drop leave+ret)
         if (i + 2 < len(insns) and
             n.startswith('call ') and
