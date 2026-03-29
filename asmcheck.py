@@ -440,33 +440,10 @@ def norm(s):
 
 
 def norm_prologue(insns, other):
-    """Normalize prologue/epilogue differences between original and recompiled:
-    - Remove sub esp,N if sizes differ or one has none
-    - Remove callee-save pushes/pops that don't appear in the other stream
-    - Normalize leave;ret vs popl %ebp;ret in epilogue."""
+    """Normalize prologue differences:
+    - Normalize sub esp,N value if sizes differ
+    - Remove sub esp,N if only one stream has it."""
     result = list(insns)
-    # Build set of callee-save regs pushed in each stream's prologue
-    def prologue_pushes(stream):
-        pushes = []
-        for inst in stream[:6]:  # check first 6 instructions
-            n = norm(inst)
-            m = re.match(r'pushl (%\w+)', n)
-            if m and m.group(1) != '%ebp':  # skip frame pointer push
-                pushes.append(n)
-            elif not m and not n.startswith('movl %esp'):
-                break  # stop at first non-prologue instruction
-        return pushes
-    my_pushes = set(prologue_pushes(result))
-    other_pushes = set(prologue_pushes(other))
-    # Remove callee-save pushes that are in mine but not in other
-    extra = my_pushes - other_pushes
-    if extra:
-        result = [inst for inst in result if norm(inst) not in extra]
-        # Also remove matching pops from epilogue
-        for push in extra:
-            pop = push.replace('pushl', 'popl')
-            result = [inst for inst in result if norm(inst) != pop]
-    # Handle sub esp differences: normalize value if sizes differ, remove if only one has it
     for i in range(min(5, len(result))):
         n = norm(result[i])
         if re.match(r'subl? \$?\d+, %esp', n):
@@ -522,6 +499,7 @@ def norm_stream(insns):
                 result.append(f'{m.group(1)} {m.group(2)}, <C>')
                 i += 2
                 continue
+        # (epilogue addl normalization removed — caused misalignment in perfect functions)
         # Normalize tail call: call X; leave; ret -> call X (drop leave+ret)
         if (i + 2 < len(insns) and
             n.startswith('call ') and
@@ -640,10 +618,10 @@ def check_function(name_or_addr, data, text_addr, text_off, verbose=True):
 
     # Normalize recompiled stream (collapse non_lazy_ptr patterns)
     # Normalize both streams
+    # Normalize instruction streams
     orig = norm_stream(orig)
     recomp = norm_stream(recomp)
-    # Remove sub esp from prologue if sizes differ
-    # (compiler may add/omit stack frame based on alignment needs)
+    # Normalize prologue: strip mismatched callee-save pushes/pops and sub esp
     orig = norm_prologue(orig, recomp)
     recomp = norm_prologue(recomp, orig)
 

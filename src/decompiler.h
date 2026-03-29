@@ -888,6 +888,27 @@ public:
             }
             pass1.append(lines[i]);
         }
+        // Pass 1b: Strip trailing "return;" at end of void functions
+        // Only strip at outermost scope (brace depth 0), not inside if/while blocks
+        {
+            bool isVoid = false;
+            for (auto &l : pass1) {
+                if (l.trimmed().startsWith("void ") && l.contains("(")) { isVoid = true; break; }
+                if (l.trimmed() == "{") break;
+            }
+            if (isVoid) {
+                // Find and remove "return;" only when it's the last statement
+                // before the closing "}" of the function (at brace depth 1→0)
+                for (int i = pass1.size() - 1; i >= 0; --i) {
+                    QString trimmed = pass1[i].trimmed();
+                    if (trimmed == "}") continue;
+                    if (trimmed == "return;") {
+                        pass1.removeAt(i);
+                    }
+                    break; // only check the last non-} line
+                }
+            }
+        }
         // Pass 2: Remove unused variable declarations
         // Scan forward through the entire remaining function body for references
         QStringList pass2;
