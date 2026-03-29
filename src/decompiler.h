@@ -863,6 +863,52 @@ public:
                 pos += 2;
             }
         }
+        // Optimize global struct access: when (char *)GLOBAL is used multiple times,
+        // introduce a local pointer to force register-based access (matching original asm)
+        {
+            // Count occurrences of (char *)NAME + 0x patterns
+            std::map<QString, int> globalCounts;
+            QString marker = "(char *)";
+            int pos = 0;
+            while ((pos = cleaned.indexOf(marker, pos)) != -1) {
+                int nameStart = pos + marker.size();
+                // Skip whitespace
+                while (nameStart < cleaned.size() && cleaned[nameStart] == ' ') nameStart++;
+                int nameEnd = nameStart;
+                while (nameEnd < cleaned.size() && (cleaned[nameEnd].isLetterOrNumber() || cleaned[nameEnd] == '_'))
+                    nameEnd++;
+                if (nameEnd > nameStart) {
+                    QString gname = cleaned.mid(nameStart, nameEnd - nameStart);
+                    // Check followed by " + 0x"
+                    int afterName = nameEnd;
+                    while (afterName < cleaned.size() && cleaned[afterName] == ' ') afterName++;
+                    if (afterName < cleaned.size() && cleaned[afterName] == '+') {
+                        // Only count real globals (not locals)
+                        // Only real globals, not decompiler-generated locals (vN, varN, tN)
+                        bool isDecompLocal = (gname[0] == 'v' && gname.size() >= 2 && gname[1].isDigit()) ||
+                                             gname.startsWith("var_") || gname.startsWith("t");
+                        if (gname.size() >= 2 && gname[0].isLower() && !isDecompLocal) {
+                            globalCounts[gname]++;
+                        }
+                    }
+                }
+                pos = nameStart;
+            }
+            for (auto &[gname, count] : globalCounts) {
+                if (count < 3) continue;
+                QString ptrName = "_" + gname + "_p";
+                int bracePos = cleaned.indexOf('{');
+                if (bracePos >= 0) {
+                    int insertPos = cleaned.indexOf('\n', bracePos) + 1;
+                    cleaned.insert(insertPos, "    char *" + ptrName + " = (char *)" + gname + ";\n");
+                }
+                cleaned.replace("(char *)" + gname + " ", ptrName + " ");
+                cleaned.replace("(char *)" + gname + ")", ptrName + ")");
+                // Also replace *(type*)(GLOBAL) patterns to use the pointer
+                cleaned.replace("*(int *)(" + gname + ")", "*(int *)(" + ptrName + ")");
+                cleaned.replace("*(char *)(" + gname + ")", "*(char *)(" + ptrName + ")");
+            }
+        }
         // Remove redundant double casts: (type)((type)(x)) → (type)(x)
         {
             int pos = 0;
