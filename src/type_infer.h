@@ -171,9 +171,32 @@ private:
             if (exprT != NullType)
                 setType(stmt.destTemp, exprT);
 
-            // t = otherTemp -> same type (union)
+            // t = otherTemp -> propagate type (but don't unite if struct/union
+            // to avoid spreading struct types to unrelated temps)
             if (stmt.expr->op == IROp::Temp) {
-                unite(stmt.destTemp, stmt.expr->tempId());
+                int srcTemp = stmt.expr->tempId();
+                TypeRef srcType = NullType;
+                auto sit = m_knownType.find(find(srcTemp));
+                if (sit != m_knownType.end()) srcType = sit->second;
+                bool isStructType = false;
+                if (srcType != NullType) {
+                    auto *st = m_types->resolveType(srcType);
+                    isStructType = st && (st->kind == StabsTypeKind::Struct ||
+                                          st->kind == StabsTypeKind::Union);
+                    // Also check formatted name for cross-CU conflicts
+                    if (!isStructType) {
+                        std::string fmt = m_types->formatType(srcType);
+                        if (fmt.find("State") != std::string::npos ||
+                            fmt.find("_s") != std::string::npos)
+                            isStructType = true;
+                    }
+                }
+                if (isStructType) {
+                    // Only set type, don't merge — prevents struct type spreading
+                    if (exprT == NullType) setType(stmt.destTemp, srcType);
+                } else {
+                    unite(stmt.destTemp, srcTemp);
+                }
             }
 
             // Assign from Call: propagate return type and match arg types
@@ -360,6 +383,23 @@ private:
                 if (e->op == IROp::Add && isPointerType(rhsT)) return rhsT;
             }
 
+            // For Mul/Div, never propagate struct/union types (arithmetic = scalar)
+            if (e->op == IROp::Mul || e->op == IROp::SDiv || e->op == IROp::UDiv ||
+                e->op == IROp::SMod || e->op == IROp::UMod) {
+                auto check = [&](TypeRef t) -> bool {
+                    if (t == NullType) return false;
+                    auto *rt = m_types->resolveType(t);
+                    if (rt && (rt->kind == StabsTypeKind::Struct ||
+                               rt->kind == StabsTypeKind::Union ||
+                               rt->kind == StabsTypeKind::Pointer))
+                        return true;
+                    // Check formatted name for cross-CU conflicts
+                    std::string fmt = m_types->formatType(t);
+                    return fmt.find("State") != std::string::npos;
+                };
+                if (check(lhsT)) lhsT = NullType;
+                if (check(rhsT)) rhsT = NullType;
+            }
             // Otherwise propagate non-null types
             if (lhsT != NullType) return lhsT;
             if (rhsT != NullType) return rhsT;
