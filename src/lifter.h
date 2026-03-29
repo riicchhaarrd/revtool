@@ -102,6 +102,7 @@ public:
 
         // ── Pass 1: find all branch targets → basic block boundaries ─
         std::set<uint32_t> blockStarts;
+        std::set<uint32_t> loopHeaderAddrs; // targets of unconditional forward jumps
         blockStarts.insert(funcAddr);
         for (size_t i = 0; i < funcEndIdx; ++i) {
             auto &in = insn[i];
@@ -116,7 +117,13 @@ public:
                 uint32_t target = (uint32_t)in.detail->x86.operands[0].imm;
                 if (target >= funcAddr && target < funcAddr + codeLen)
                     blockStarts.insert(target);
-                // Instruction after a branch is also a block start
+                // Detect loop headers: unconditional forward jumps that skip
+                // an increment block (jmp header pattern in while/for loops)
+                {
+                    std::string jmn = in.mnemonic;
+                    if (jmn == "jmp" && target > in.address)
+                        loopHeaderAddrs.insert(target);
+                }
                 if (i + 1 < funcEndIdx)
                     blockStarts.insert(insn[i + 1].address);
             }
@@ -365,7 +372,41 @@ public:
             auto &in = insn[i];
             // Check if this starts a new block
             auto bit = addrToBlock.find(in.address);
-            if (bit != addrToBlock.end()) curBlock = bit->second;
+            if (bit != addrToBlock.end()) {
+                int prevBlock = curBlock;
+                curBlock = bit->second;
+                // At loop header blocks, clear register state so loop-body reads
+                // create fresh temps instead of using pre-loop values.
+                // Detect: block has MULTIPLE predecessors (one from before the loop,
+                // one from the loop back-edge). A block with multiple predecessors
+                // that isn't the entry block is potentially a loop header.
+                if (curBlock > 0 && loopHeaderAddrs.count(in.address)) {
+                    // At loop headers, assign registers from a Var reference
+                    // (not from the pre-loop temp) so the emitter doesn't
+                    // const-propagate the initial value.
+                    // The var name "loop_REG" acts as a placeholder that
+                    // the pass 8 phi copy will replace with the correct value.
+                    auto &hdr = func.blocks[curBlock];
+                    static const x86_reg gpRegs[] = {
+                        X86_REG_EAX, X86_REG_EBX, X86_REG_ECX,
+                        X86_REG_EDX, X86_REG_ESI, X86_REG_EDI
+                    };
+                    for (x86_reg reg : gpRegs) {
+                        auto it = m_regTemps.find(reg);
+                        if (it != m_regTemps.end()) {
+                            int oldTemp = it->second;
+                            int newTemp = func.newTemp(func.tempType(oldTemp));
+                            func.phiTemps.insert(newTemp);
+                            // Assign from old temp — gives a definition for the emitter.
+                            // Pass 8 will later add the back-edge copy.
+                            hdr.stmts.push_back(IRStmt::mkAssign(newTemp,
+                                IRExpr::mkTemp(oldTemp, func.tempType(oldTemp)),
+                                func.tempType(oldTemp)));
+                            m_regTemps[reg] = newTemp;
+                        }
+                    }
+                }
+            }
 
             // Skip prologue instructions
             if (i < m_prologueEnd) continue;

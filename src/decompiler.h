@@ -1553,9 +1553,21 @@ private:
                     if (stmt.kind != IRStmtKind::Assign) continue;
                     if (!stmt.expr) continue;
                     // t = var → replace all uses of t with var
-                    if (stmt.expr->op == IROp::Var) {
+                    // BUT skip phi temps (they have loop-updated values too)
+                    if (stmt.expr->op == IROp::Var &&
+                        !m_func.phiTemps.count(stmt.destTemp)) {
                         m_copyMap[stmt.destTemp] = stmt.expr->name;
                         m_copyPropagated.insert(stmt.destTemp);
+                    }
+                    // t = otherTemp → propagate temp name (but not phi temps)
+                    if (stmt.expr->op == IROp::Temp &&
+                        !m_func.phiTemps.count(stmt.destTemp)) {
+                        int srcId = stmt.expr->tempId();
+                        auto sit = m_copyMap.find(srcId);
+                        if (sit != m_copyMap.end()) {
+                            m_copyMap[stmt.destTemp] = sit->second;
+                            m_copyPropagated.insert(stmt.destTemp);
+                        }
                     }
                     // t = const → propagate constant
                     // Skip if: temp is also assigned non-constant (loop phi)
@@ -2350,6 +2362,17 @@ private:
                         return m_func.varNames[vit->second];
                     return "t" + std::to_string(id);
                 }
+                // Phi temps: always use variable name (don't inline their definition
+                // because it's the pre-loop value; the actual value changes per iteration)
+                if (m_func.phiTemps.count(id)) {
+                    auto vit = m_func.tempToVar.find(id);
+                    if (vit != m_func.tempToVar.end()) {
+                        auto nit = m_func.varNames.find(vit->second);
+                        if (nit != m_func.varNames.end())
+                            return nit->second;
+                    }
+                    return tempName(id);
+                }
                 // Inline temps used only once
                 if (m_tempUseCount[id] <= 1) {
                     auto it = m_tempDef.find(id);
@@ -2359,7 +2382,15 @@ private:
                         m_inliningTemps.erase(id);
                         if (!inlined.empty()) return inlined;
                     }
-                    // Inlining failed — emit 0 as safe fallback
+                    // Inlining failed — emit variable name if available, else 0
+                    {
+                        auto vit = m_func.tempToVar.find(id);
+                        if (vit != m_func.tempToVar.end()) {
+                            auto nit = m_func.varNames.find(vit->second);
+                            if (nit != m_func.varNames.end())
+                                return nit->second;
+                        }
+                    }
                     return "0";
                 }
                 // Also inline temps used exactly twice (1 def + 1 use) when def is simple
