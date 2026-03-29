@@ -102,6 +102,7 @@ public:
 
         // ── Pass 1: find all branch targets → basic block boundaries ─
         std::set<uint32_t> blockStarts;
+        std::set<uint32_t> loopHeaderAddrs; // targets of unconditional forward jumps
         blockStarts.insert(funcAddr);
         for (size_t i = 0; i < funcEndIdx; ++i) {
             auto &in = insn[i];
@@ -116,7 +117,13 @@ public:
                 uint32_t target = (uint32_t)in.detail->x86.operands[0].imm;
                 if (target >= funcAddr && target < funcAddr + codeLen)
                     blockStarts.insert(target);
-                // Instruction after a branch is also a block start
+                // Detect loop headers: unconditional forward jumps that skip
+                // an increment block (jmp header pattern in while/for loops)
+                {
+                    std::string jmn = in.mnemonic;
+                    if (jmn == "jmp" && target > in.address)
+                        loopHeaderAddrs.insert(target);
+                }
                 if (i + 1 < funcEndIdx)
                     blockStarts.insert(insn[i + 1].address);
             }
@@ -365,7 +372,41 @@ public:
             auto &in = insn[i];
             // Check if this starts a new block
             auto bit = addrToBlock.find(in.address);
-            if (bit != addrToBlock.end()) curBlock = bit->second;
+            if (bit != addrToBlock.end()) {
+                int prevBlock = curBlock;
+                curBlock = bit->second;
+                // At loop header blocks, clear register state so loop-body reads
+                // create fresh temps instead of using pre-loop values.
+                // Detect: block has MULTIPLE predecessors (one from before the loop,
+                // one from the loop back-edge). A block with multiple predecessors
+                // that isn't the entry block is potentially a loop header.
+                if (curBlock > 0 && loopHeaderAddrs.count(in.address)) {
+                    // At loop headers, assign registers from a Var reference
+                    // (not from the pre-loop temp) so the emitter doesn't
+                    // const-propagate the initial value.
+                    // The var name "loop_REG" acts as a placeholder that
+                    // the pass 8 phi copy will replace with the correct value.
+                    auto &hdr = func.blocks[curBlock];
+                    static const x86_reg gpRegs[] = {
+                        X86_REG_EAX, X86_REG_EBX, X86_REG_ECX,
+                        X86_REG_EDX, X86_REG_ESI, X86_REG_EDI
+                    };
+                    for (x86_reg reg : gpRegs) {
+                        auto it = m_regTemps.find(reg);
+                        if (it != m_regTemps.end()) {
+                            int oldTemp = it->second;
+                            int newTemp = func.newTemp(func.tempType(oldTemp));
+                            func.phiTemps.insert(newTemp);
+                            // Assign from old temp — gives a definition for the emitter.
+                            // Pass 8 will later add the back-edge copy.
+                            hdr.stmts.push_back(IRStmt::mkAssign(newTemp,
+                                IRExpr::mkTemp(oldTemp, func.tempType(oldTemp)),
+                                func.tempType(oldTemp)));
+                            m_regTemps[reg] = newTemp;
+                        }
+                    }
+                }
+            }
 
             // Skip prologue instructions
             if (i < m_prologueEnd) continue;
@@ -524,6 +565,178 @@ public:
                 if (bb.id + 1 < (int)func.blocks.size()) {
                     bb.succs.push_back(bb.id + 1);
                     func.blocks[bb.id + 1].preds.push_back(bb.id);
+                }
+            }
+        }
+
+        // ── Pass 8: fix loop-carried register state ────────────────
+        if ((int)func.blocks.size() >= 3) {
+            // Compute dominators
+            int n = (int)func.blocks.size();
+            func.idom.assign(n, -1);
+            func.idom[0] = 0;
+            if (n > 1) {
+                std::vector<int> rpo;
+                std::vector<int> rpoNum(n, -1);
+                {
+                    std::vector<bool> vis(n, false);
+                    std::vector<int> po;
+                    std::vector<std::pair<int,int>> stk = {{0, 0}};
+                    vis[0] = true;
+                    while (!stk.empty()) {
+                        auto &[nd, ci] = stk.back();
+                        auto &sc = func.blocks[nd].succs;
+                        if (ci < (int)sc.size()) {
+                            int s = sc[ci++];
+                            if (s >= 0 && s < n && !vis[s]) { vis[s] = true; stk.push_back({s, 0}); }
+                        } else { po.push_back(nd); stk.pop_back(); }
+                    }
+                    rpo.resize(po.size());
+                    for (int i = 0; i < (int)po.size(); ++i) {
+                        rpo[po.size()-1-i] = po[i];
+                        rpoNum[po[i]] = (int)po.size()-1-i;
+                    }
+                }
+                auto intersect = [&](int b1, int b2) -> int {
+                    while (b1 != b2) {
+                        while (rpoNum[b1] > rpoNum[b2]) b1 = func.idom[b1];
+                        while (rpoNum[b2] > rpoNum[b1]) b2 = func.idom[b2];
+                    }
+                    return b1;
+                };
+                bool changed = true;
+                for (int iter = 0; iter < n && changed; ++iter) {
+                    changed = false;
+                    for (int idx = 1; idx < (int)rpo.size(); ++idx) {
+                        int b = rpo[idx];
+                        int newIdom = -1;
+                        for (int p : func.blocks[b].preds) {
+                            if (p < 0 || p >= n || func.idom[p] == -1) continue;
+                            newIdom = (newIdom == -1) ? p : intersect(newIdom, p);
+                        }
+                        if (newIdom == -1) newIdom = 0;
+                        if (func.idom[b] != newIdom) { func.idom[b] = newIdom; changed = true; }
+                    }
+                }
+            }
+
+            // Detect back edges: B→H where H dominates B
+            std::map<int, std::set<int>> loopHeaders;
+            for (auto &bb : func.blocks) {
+                for (int succ : bb.succs) {
+                    if (succ < 0 || succ >= n) continue;
+                    int runner = bb.id;
+                    bool dominates = false;
+                    int limit = n;
+                    while (runner >= 0 && limit-- > 0) {
+                        if (runner == succ) { dominates = true; break; }
+                        if (runner == func.idom[runner]) break;
+                        runner = func.idom[runner];
+                    }
+                    if (dominates)
+                        loopHeaders[succ].insert(bb.id);
+                }
+            }
+
+            // Pre-compute dominator children for efficient subtree queries
+            std::vector<std::vector<int>> domChildren(n);
+            for (int b = 1; b < n; ++b)
+                if (func.idom[b] >= 0 && func.idom[b] < n)
+                    domChildren[func.idom[b]].push_back(b);
+
+            for (auto &[headerId, backEdgeSources] : loopHeaders) {
+                auto &header = func.blocks[headerId];
+
+                // Efficiently find all blocks dominated by header (DFS on dom tree)
+                std::set<int> loopBlocks;
+                {
+                    std::vector<int> stk = {headerId};
+                    while (!stk.empty()) {
+                        int b = stk.back(); stk.pop_back();
+                        loopBlocks.insert(b);
+                        for (int c : domChildren[b]) stk.push_back(c);
+                    }
+                }
+
+                // Collect induction patterns: t2 = t1 + const (in one pass)
+                // Map: baseTemp → loopTemp for each induction variable
+                std::map<int, int> inductionMap; // baseTemp → updatedTemp
+                for (int bi : loopBlocks) {
+                    auto &lb = func.blocks[bi];
+                    for (auto &stmt : lb.stmts) {
+                        if (stmt.kind != IRStmtKind::Assign || stmt.destTemp < 0) continue;
+                        if (!stmt.expr) continue;
+                        if ((stmt.expr->op == IROp::Add || stmt.expr->op == IROp::Sub) &&
+                            stmt.expr->kids.size() == 2) {
+                            auto *lhs = stmt.expr->kids[0].get();
+                            auto *rhs = stmt.expr->kids[1].get();
+                            int baseTemp = -1;
+                            if (lhs && lhs->op == IROp::Temp && rhs && rhs->isConst())
+                                baseTemp = lhs->tempId();
+                            else if (rhs && rhs->op == IROp::Temp && lhs && lhs->isConst())
+                                baseTemp = rhs->tempId();
+                            if (baseTemp >= 0)
+                                inductionMap[baseTemp] = stmt.destTemp;
+                        }
+                    }
+                }
+
+                // Limit: only process a few induction variables per loop
+                // to avoid cascading replacements and performance issues
+                int inductionCount = 0;
+                for (auto &[baseTemp, loopTemp] : inductionMap) {
+                    if (inductionCount++ >= 5) break; // limit per loop
+
+                    // Sanity: skip if baseTemp == loopTemp (no actual induction)
+                    if (baseTemp == loopTemp) continue;
+                    // Skip if baseTemp is already a phi temp from a previous iteration
+                    if (baseTemp >= func.nextTemp - 20) continue;
+
+                    int phiTemp = func.newTemp(func.tempType(baseTemp));
+                    func.phiTemps.insert(phiTemp); // mark as phi for copy-prop skip
+                    bool hasSources = false;
+                    for (int pred : header.preds) {
+                        if (pred < 0 || pred >= n) continue;
+                        auto &predBlock = func.blocks[pred];
+                        int srcTemp = backEdgeSources.count(pred) ? loopTemp : baseTemp;
+                        // Insert copy before the terminal statement
+                        auto copy = IRStmt::mkAssign(phiTemp,
+                            IRExpr::mkTemp(srcTemp, func.tempType(srcTemp)),
+                            func.tempType(srcTemp));
+                        if (!predBlock.stmts.empty()) {
+                            auto k = predBlock.stmts.back().kind;
+                            if (k == IRStmtKind::Branch || k == IRStmtKind::Jump ||
+                                k == IRStmtKind::Switch || k == IRStmtKind::Return)
+                                predBlock.stmts.insert(predBlock.stmts.end() - 1, std::move(copy));
+                            else
+                                predBlock.stmts.push_back(std::move(copy));
+                        } else {
+                            predBlock.stmts.push_back(std::move(copy));
+                        }
+                        hasSources = true;
+                    }
+                    if (!hasSources) continue;
+
+                    // Replace baseTemp → phiTemp in all loop blocks
+                    for (int bi : loopBlocks) {
+                        auto &lb = func.blocks[bi];
+                        for (auto &stmt : lb.stmts) {
+                            if (stmt.kind == IRStmtKind::Phi) continue;
+                            auto replTemp = [&](std::unique_ptr<IRExpr> &e) {
+                                if (!e) return;
+                                std::vector<IRExpr*> stk = {e.get()};
+                                while (!stk.empty()) {
+                                    auto *nd = stk.back(); stk.pop_back();
+                                    if (nd->op == IROp::Temp && nd->tempId() == baseTemp)
+                                        nd->value = phiTemp;
+                                    for (auto &k : nd->kids) if (k) stk.push_back(k.get());
+                                }
+                            };
+                            replTemp(stmt.expr);
+                            replTemp(stmt.addr);
+                            for (auto &a : stmt.args) replTemp(a);
+                        }
+                    }
                 }
             }
         }
@@ -901,7 +1114,7 @@ private:
     }
 
     // Write to a memory destination
-    void writeMem(x86_op_mem &m, std::unique_ptr<IRExpr> val, BasicBlock &bb) {
+    void writeMem(x86_op_mem &m, std::unique_ptr<IRExpr> val, BasicBlock &bb, int storeSize = 4) {
         // EBP-relative
         if (m.base == X86_REG_EBP && m.index == X86_REG_INVALID) {
             int d = (int)m.disp;
@@ -993,7 +1206,7 @@ private:
         // General store
         auto addr = readMem_addr(m);
         if (addr)
-            bb.stmts.push_back(IRStmt::mkStore(std::move(addr), std::move(val)));
+            bb.stmts.push_back(IRStmt::mkStore(std::move(addr), std::move(val), storeSize));
     }
 
     // Get the address expression for a memory operand (without loading)
@@ -1056,7 +1269,7 @@ private:
                 val = IRExpr::mkCast(CastKind::Trunc8, std::move(val));
             else if (op.size == 2)
                 val = IRExpr::mkCast(CastKind::Trunc16, std::move(val));
-            writeMem(op.mem, std::move(val), bb);
+            writeMem(op.mem, std::move(val), bb, op.size);
         }
     }
 
@@ -1091,12 +1304,14 @@ private:
         IROp cmpOp;
         if (isTest && lhs->op == rhs->op && lhs->op == IROp::Temp &&
             lhs->value == rhs->value) {
-            // test reg, reg → flags based on reg value
+            // test reg, reg → flags based on reg value (OF=0 after test)
             rhs = IRExpr::mkConst(0);
-            if      (jmn == "je"  || jmn == "jz")  cmpOp = IROp::Eq;
-            else if (jmn == "jne" || jmn == "jnz") cmpOp = IROp::Ne;
-            else if (jmn == "js")                   cmpOp = IROp::Slt;
-            else if (jmn == "jns")                  cmpOp = IROp::Sge;
+            if      (jmn == "je"  || jmn == "jz")   cmpOp = IROp::Eq;
+            else if (jmn == "jne" || jmn == "jnz")  cmpOp = IROp::Ne;
+            else if (jmn == "js"  || jmn == "jl" || jmn == "jnge")  cmpOp = IROp::Slt;
+            else if (jmn == "jns" || jmn == "jge" || jmn == "jnl")  cmpOp = IROp::Sge;
+            else if (jmn == "jle" || jmn == "jng")   cmpOp = IROp::Sle;
+            else if (jmn == "jg"  || jmn == "jnle")  cmpOp = IROp::Sgt;
             else cmpOp = IROp::Ne;
         } else if (isTest) {
             // test with different operands: condition is (lhs & rhs) vs 0

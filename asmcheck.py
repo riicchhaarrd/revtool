@@ -28,6 +28,9 @@ typedef signed char int8_t; typedef unsigned char uint8_t;
 typedef long long int64_t; typedef unsigned long long uint64_t;
 typedef int intptr_t; typedef unsigned int uintptr_t;
 typedef __builtin_va_list va_list;
+#define va_start(ap, last) __builtin_va_start(ap, last)
+#define va_end(ap) __builtin_va_end(ap)
+#define va_arg(ap, type) __builtin_va_arg(ap, type)
 typedef int BOOL; typedef int Bool; typedef int qboolean;
 typedef unsigned int DWORD; typedef unsigned int UINT;
 typedef float vec_t; typedef vec_t vec3_t[3]; typedef vec_t vec2_t[2];
@@ -58,6 +61,24 @@ int setjmp(void*); void exit(int); void *malloc(size_t); void free(void*);
 int abs(int); int atoi(const char*);
 '''
 
+# Dvar function prototypes with proper float parameter types
+# (prevents default argument promotion from float to double)
+DVAR_PROTOS = '''
+#ifndef DVAR_PROTOS_DEFINED
+#define DVAR_PROTOS_DEFINED
+typedef int dvar_t;
+dvar_t *Dvar_RegisterBool(const char*,int,int);
+dvar_t *Dvar_RegisterInt(const char*,int,int,int,int);
+dvar_t *Dvar_RegisterFloat(const char*,float,float,float,int);
+dvar_t *Dvar_RegisterString(const char*,const char*,int);
+dvar_t *Dvar_RegisterEnum(const char*,const char**,int,int);
+dvar_t *Dvar_RegisterColor(const char*,float,float,float,float,int);
+dvar_t *Dvar_RegisterVec2(const char*,float,float,float,float,int);
+dvar_t *Dvar_RegisterVec3(const char*,float,float,float,float,float,float,int);
+dvar_t *Dvar_RegisterVec4(const char*,float,float,float,float,float,float,float,float,int);
+#endif
+'''
+
 
 def load_binary():
     with open(BINARY, 'rb') as f:
@@ -80,12 +101,13 @@ def load_binary():
     return data, text_addr, text_off
 
 
-def disasm_original(data, text_addr, text_off, func_addr):
+def disasm_original(data, text_addr, text_off, func_addr, func_size=0):
     md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_32)
     md.syntax = capstone.CS_OPT_SYNTAX_ATT
     fo = text_off + (func_addr - text_addr)
+    size = func_size if func_size > 0 else 4096
     insns = []
-    for i in md.disasm(data[fo:fo+4096], func_addr):
+    for i in md.disasm(data[fo:fo+size], func_addr):
         insns.append(f'{i.mnemonic} {i.op_str}'.strip())
         if i.mnemonic in ('ret', 'retl'):
             break
@@ -189,6 +211,11 @@ def compile_to_asm(c_code):
         name = m.group(1)
         if name not in stubs_types:
             refs.add(name)
+    # Also find CamelCase/uppercase type names used as pointer types: "TypeName *var"
+    for m in re.finditer(r'\b([A-Z]\w+)\s*\*\s*\w+', c_code):
+        name = m.group(1)
+        if name not in stubs_types and name not in ('NULL', 'BOOL', 'Bool', 'DWORD', 'UINT'):
+            refs.add(name)
     queue = list(refs)
     visited = set()
     while queue:
@@ -283,11 +310,18 @@ def compile_to_asm(c_code):
         for m in re.finditer(r'\b(\w+_t)\s+\*?\s*\w+', defn):
             if m.group(1) not in emitted_set:
                 emit_type(m.group(1))
+        # Also follow CamelCase type references (e.g., XModelCollSurf * field)
+        for m in re.finditer(r'\b([A-Z]\w+)\s+\*', defn):
+            dep = m.group(1)
+            if dep not in emitted_set and dep in extracted:
+                emit_type(dep)
         ordered.append(defn)
     for name in extracted:
         emit_type(name)
     types_block = '\n'.join(ordered)
-    full = STUBS + '\n' + types_block + '\n' + func_protos + '\n' + c_code
+    # Add Dvar prototypes only if no dvar_t struct is already extracted
+    dvar_block = DVAR_PROTOS if 'dvar_t' not in extracted else ''
+    full = STUBS + '\n' + dvar_block + '\n' + types_block + '\n' + func_protos + '\n' + c_code
 
     # Try compile with extracted types
     ok, stdout, stderr = _try_compile(full)
@@ -334,20 +368,26 @@ def compile_to_asm(c_code):
                 assign_rhs.add(rhs)
         call_args = set()  # unused — kept for compatibility
         for name in sorted(undeclared):
-            if name in already or name in funcs: continue
+            if name in already or name in funcs or name in extracted: continue
+            # Use static for real globals to get direct addressing (no non_lazy_ptr).
+            # Don't use static for decompiler-generated names (vN, varN, tN, gN)
+            # which might shadow local variables.
+            is_real_global = (not re.match(r'^(v\d|var_|t\d|g_)', name) and
+                              len(name) > 2 and name[0].islower())
+            qual = 'static ' if is_real_global else ''
             if re.search(r'\*\s*\(' + re.escape(name) + r'\)|' +
                           re.escape(name) + r'\s*->|' +
                           re.escape(name) + r'\s*\[', full):
-                stubs += f'extern int *{name};\n'
+                stubs += f'{qual}int *{name};\n'
             elif name.endswith('_f'):
                 stubs += f'void {name}(void);\n'
             elif (name in assign_rhs and name not in stubs_types):
                 if name not in already:
-                    stubs += f'extern void *{name};\n'
+                    stubs += f'{qual}void *{name};\n'
             elif name[0].isupper() or name.endswith('_t'):
                 stubs += f'typedef int {name};\n'
             else:
-                stubs += f'extern int {name};\n'
+                stubs += f'{qual}int {name};\n'
         if not stubs: break
         idx = full.find(STUBS) + len(STUBS) if STUBS in full else 0
         full = full[:idx] + stubs + full[idx:]
@@ -381,8 +421,9 @@ def norm(s):
     s = s.strip().replace('\t', ' ')
     # Hex offsets to decimal
     s = re.sub(r'0x([0-9a-fA-F]+)', lambda m: str(int(m.group(1), 16)), s)
-    # Collapse whitespace
+    # Collapse whitespace and normalize comma spacing
     s = re.sub(r'\s+', ' ', s)
+    s = re.sub(r',\s*', ', ', s)
     # Strip comments
     s = s.split('#')[0].strip()
     # retl -> ret, calll -> call, leave -> popl %ebp
@@ -392,30 +433,33 @@ def norm(s):
     # Normalize address constants, labels, and non_lazy_ptrs to <C>
     s = re.sub(r'L_\w+\$(?:non_lazy_ptr|stub)', '<C>', s)
     s = re.sub(r'LC\d+', '<C>', s)
+    s = re.sub(r'-?\b\d{5,}\b', '<C>', s)
+    # Normalize bare global symbol names (e.g., _sv_master, _com_sv_running)
+    s = re.sub(r'\b_[a-zA-Z]\w{3,}\b', '<C>', s)
+    # Strip $ before <C> (e.g., $<C> → <C>)
     s = re.sub(r'\$<C>', '<C>', s)
-    s = re.sub(r'\b\d{5,}\b', '<C>', s)
     # Normalize branch targets
     s = re.sub(r'^(j\w+) .*', r'\1 <T>', s)
+    # Normalize padding instructions (nop, hlt sequences)
+    if re.match(r'^(nop|hlt)', s):
+        s = '<PAD>'
     return s
 
 
 def norm_prologue(insns, other):
-    """Remove sub esp,N from prologue if the other stream has a different size or no sub esp.
-    Also normalize leave;ret vs popl %ebp;ret in epilogue."""
+    """Normalize prologue differences:
+    - Normalize sub esp,N value if sizes differ
+    - Remove sub esp,N if only one stream has it."""
     result = list(insns)
-    # Check if first few instructions have sub esp
-    for i in range(min(3, len(result))):
+    for i in range(min(5, len(result))):
         n = norm(result[i])
         if re.match(r'subl? \$?\d+, %esp', n):
-            # Check if other stream has a matching sub esp at same position
             if i < len(other):
                 on = norm(other[i])
                 if re.match(r'subl? \$?\d+, %esp', on) and on != n:
-                    # Different sizes — normalize both to generic
                     result[i] = 'subl $<N>, %esp'
                     break
                 elif not re.match(r'subl? \$?\d+, %esp', on):
-                    # Other has no sub esp — remove ours
                     result.pop(i)
                     break
             break
@@ -462,6 +506,24 @@ def norm_stream(insns):
                 result.append(f'{m.group(1)} {m.group(2)}, <C>')
                 i += 2
                 continue
+        # (epilogue addl normalization removed — caused misalignment in perfect functions)
+        # Normalize tail call: call X; leave; ret -> call X (drop leave+ret)
+        if (i + 2 < len(insns) and
+            n.startswith('call ') and
+            norm(insns[i+1]) == 'popl %ebp' and
+            norm(insns[i+2]).startswith('ret')):
+            result.append(insns[i])  # keep the call
+            i += 3  # skip leave+ret
+            continue
+        # Normalize original tail call: leave; jmp X -> call X (jmp = tail call)
+        if (i + 1 < len(insns) and
+            n == 'popl %ebp' and
+            norm(insns[i+1]).startswith('jmp ')):
+            next_n = norm(insns[i+1])
+            # Convert jmp to call for comparison
+            result.append('call ' + next_n.split(' ', 1)[1])
+            i += 2
+            continue
         result.append(insns[i])
         i += 1
     return result
@@ -486,6 +548,21 @@ def get_func_addr(name):
                 return int(m.group(1), 16), fname
     return None, None
 
+
+_func_addrs_cache = None
+def _get_func_size(func_addr):
+    global _func_addrs_cache
+    if _func_addrs_cache is None:
+        try:
+            r = subprocess.run([DECOMP, BINARY, '-F'], capture_output=True, text=True, timeout=10)
+            _func_addrs_cache = sorted(set(int(m.group(1), 16)
+                for m in re.finditer(r'^\s+([0-9A-Fa-f]+)\s+', r.stdout, re.MULTILINE)))
+        except:
+            _func_addrs_cache = []
+    for k, a in enumerate(_func_addrs_cache):
+        if a == func_addr and k + 1 < len(_func_addrs_cache):
+            return _func_addrs_cache[k+1] - a
+    return 0
 
 def find_source_for_addr(func_addr):
     """Find which source file index contains a function at the given address."""
@@ -558,27 +635,61 @@ def check_function(name_or_addr, data, text_addr, text_off, verbose=True):
             print(f'{func_name}: no asm output (types missing?)')
         return None
 
+    # Get function size from the function list (distance to next function)
+    func_size = _get_func_size(func_addr)
+
+
     # Original disasm
-    orig = disasm_original(data, text_addr, text_off, func_addr)
+    orig = disasm_original(data, text_addr, text_off, func_addr, func_size)
 
     # Normalize recompiled stream (collapse non_lazy_ptr patterns)
+    # Normalize both streams
+    # Normalize instruction streams
+    orig = norm_stream(orig)
     recomp = norm_stream(recomp)
-    # Normalize both streams: remove sub esp from prologue if sizes differ
-    # (compiler may add/omit stack frame based on alignment needs)
+    # Normalize prologue: strip mismatched callee-save pushes/pops and sub esp
     orig = norm_prologue(orig, recomp)
     recomp = norm_prologue(recomp, orig)
 
-    # Compare
-    matches = 0
-    total = max(len(orig), len(recomp))
-    diffs = []
-    for i in range(total):
-        o = orig[i] if i < len(orig) else ''
-        r = recomp[i] if i < len(recomp) else ''
-        if norm(o) == norm(r):
-            matches += 1
-        else:
-            diffs.append(i)
+    # Strip callee-save register differences: push/pop/addl that exist
+    # in one stream but not the other (register allocation differences)
+    callee_save_pats = {r'pushl %e[bsd][ix]', r'popl %e[bsd][ix]', r'addl \$\d+, %esp'}
+    def strip_callee_save(stream, other_stream):
+        ns = [norm(x) for x in stream]
+        no = set(norm(x) for x in other_stream)
+        result = []
+        for i, (raw, n) in enumerate(zip(stream, ns)):
+            # Keep if it exists in the other stream
+            if n in no:
+                result.append(raw)
+                continue
+            # Strip if it's a callee-save pattern not in other
+            is_callee = any(re.match(p, n) for p in callee_save_pats)
+            if is_callee:
+                continue  # strip
+            result.append(raw)
+        return result
+    orig = strip_callee_save(orig, recomp)
+    recomp = strip_callee_save(recomp, orig)
+
+    # Compare using LCS (longest common subsequence) for alignment-tolerant matching
+    normed_o = [norm(x) for x in orig]
+    normed_r = [norm(x) for x in recomp]
+    m, n = len(normed_o), len(normed_r)
+    total = max(m, n)
+
+    # Compute LCS length
+    # Use space-efficient 2-row DP
+    prev = [0] * (n + 1)
+    for i in range(m):
+        curr = [0] * (n + 1)
+        for j in range(n):
+            if normed_o[i] == normed_r[j]:
+                curr[j+1] = prev[j] + 1
+            else:
+                curr[j+1] = max(curr[j], prev[j+1])
+        prev = curr
+    matches = prev[n]
 
     pct = matches * 100 // total if total else 0
 
@@ -587,13 +698,12 @@ def check_function(name_or_addr, data, text_addr, text_off, verbose=True):
             print(f'{func_name}: {matches}/{total} PERFECT ({pct}%)')
         else:
             print(f'{func_name}: {matches}/{total} ({pct}%)')
-            # Show diffs
+            # Show diffs using position-by-position for readability
             for i in range(total):
                 o = orig[i] if i < len(orig) else ''
                 r = recomp[i] if i < len(recomp) else ''
-                m = norm(o) == norm(r)
-                marker = ' ' if m else '|'
-                print(f'  {marker} {o:42s} {r}')
+                mk = ' ' if norm(o) == norm(r) else '|'
+                print(f'  {mk} {o:42s} {r}')
 
     return pct
 

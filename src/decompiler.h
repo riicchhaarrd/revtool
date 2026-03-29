@@ -814,7 +814,8 @@ public:
         // &0->field_X → 0xX
         cleaned.replace("&0->field_", "0x__F");
         cleaned.replace("&(0)->field_", "0x__F");
-        // &VAR->field_1 → (VAR + 1) — general case for non-pointer bases
+        // &VAR->field_HEX → (VAR + 0xHEX) — only for synthetic field_XX names
+        // Real field names (resolved from type info) are preserved as &VAR->realName
         {
             // Use a simple scan for &WORD->field_HEX patterns
             int pos = 0;
@@ -831,12 +832,28 @@ public:
                     while (hexEnd < cleaned.size() && QString("0123456789ABCDEFabcdef").contains(cleaned[hexEnd]))
                         ++hexEnd;
                     if (hexEnd > hexStart) {
-                        QString varName = cleaned.mid(start, nameEnd - start);
-                        QString hexOff = cleaned.mid(hexStart, hexEnd - hexStart);
-                        QString replacement = "(" + varName + " + 0x" + hexOff + ")";
-                        cleaned.replace(pos, hexEnd - pos, replacement);
-                        pos += replacement.size();
-                        continue;
+                        // Check this is purely hex (a synthetic field_XX name, not a real name
+                        // like "field_type" that happens to start with "field_")
+                        QString hexPart = cleaned.mid(hexStart, hexEnd - hexStart);
+                        bool allHex = true;
+                        for (int i = 0; i < hexPart.size(); ++i) {
+                            QChar c = hexPart[i];
+                            if (!((c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f'))) {
+                                allHex = false; break;
+                            }
+                        }
+                        // Only convert synthetic field_XX names (all hex chars, followed by
+                        // non-alpha — not a suffix of a real field name)
+                        bool isSynthetic = allHex && (hexEnd >= cleaned.size() ||
+                            !cleaned[hexEnd].isLetterOrNumber());
+                        if (isSynthetic) {
+                            QString varName = cleaned.mid(start, nameEnd - start);
+                            QString hexOff = cleaned.mid(hexStart, hexEnd - hexStart);
+                            QString replacement = "(" + varName + " + 0x" + hexOff + ")";
+                            cleaned.replace(pos, hexEnd - pos, replacement);
+                            pos += replacement.size();
+                            continue;
+                        }
                     }
                 }
                 ++pos;
@@ -848,6 +865,110 @@ public:
             while ((pos = cleaned.indexOf("0x__F", pos)) != -1) {
                 cleaned.remove(pos + 2, 3); // remove "__F"
                 pos += 2;
+            }
+        }
+        // Fix variadic functions: detect va_list usage and fix signature + va_start
+        {
+            bool hasVaList = cleaned.contains("va_list ");
+            bool hasVsnprintf = cleaned.contains("vsnprintf") || cleaned.contains("vsprintf");
+            if (hasVaList && hasVsnprintf) {
+                // Add ... to function signature if not present
+                int sigEnd = cleaned.indexOf(")");
+                if (sigEnd > 0 && !cleaned.left(sigEnd).contains("...")) {
+                    cleaned.insert(sigEnd, ", ...");
+                }
+                // Find the last named parameter
+                QString lastParam;
+                {
+                    int ps = cleaned.indexOf('(');
+                    int pe = cleaned.indexOf(", ...)");
+                    if (pe < 0) pe = cleaned.indexOf(')');
+                    if (ps > 0 && pe > ps) {
+                        QString params = cleaned.mid(ps + 1, pe - ps - 1);
+                        QStringList parts = params.split(',');
+                        if (!parts.isEmpty()) {
+                            QStringList words = parts.last().trimmed().split(' ');
+                            if (!words.isEmpty()) {
+                                lastParam = words.last().remove('*');
+                            }
+                        }
+                    }
+                }
+                // Replace va_list init with va_start
+                if (!lastParam.isEmpty()) {
+                    // Capture the temp name: "vN = &arg_1" → tempName = "vN"
+                    int argPos = cleaned.indexOf("= &arg_1;");
+                    QString vaTempName;
+                    if (argPos >= 0) {
+                        int lineStart = cleaned.lastIndexOf('\n', argPos) + 1;
+                        QString line = cleaned.mid(lineStart, argPos - lineStart).trimmed();
+                        vaTempName = line; // "vN"
+                        // Find end of next line (argptr = vN;)
+                        int nextLine = cleaned.indexOf('\n', argPos);
+                        int lineEnd = cleaned.indexOf(';', nextLine);
+                        if (lineEnd > nextLine) {
+                            cleaned.replace(lineStart, lineEnd - lineStart + 1,
+                                "    va_start(argptr, " + lastParam + ");");
+                        }
+                    }
+                    // Replace remaining references to the temp with argptr
+                    if (!vaTempName.isEmpty()) {
+                        cleaned.replace(", " + vaTempName + ")", ", argptr)");
+                        cleaned.replace("(" + vaTempName + ",", "(argptr,");
+                    }
+                }
+                // Remove unused declarations
+                QStringList cl = cleaned.split('\n');
+                QStringList cl2;
+                for (auto &l : cl) {
+                    QString t = l.trimmed();
+                    if (t.startsWith("va_list v") && t.endsWith(";")) continue;
+                    if (t == "int arg_1;") continue;
+                    cl2.append(l);
+                }
+                cleaned = cl2.join('\n');
+            }
+        }
+        // Fix array element references: msg_OFFSET_ = 0 → msg[OFFSET] = 0
+        {
+            // Find char arrays: "char NAME[SIZE]"
+            int pos = 0;
+            while ((pos = cleaned.indexOf("char ", pos)) != -1) {
+                int nameStart = pos + 5;
+                int bracket = cleaned.indexOf('[', nameStart);
+                int semi = cleaned.indexOf(';', nameStart);
+                if (bracket > nameStart && bracket < semi) {
+                    QString arrName = cleaned.mid(nameStart, bracket - nameStart).trimmed();
+                    int closeBracket = cleaned.indexOf(']', bracket);
+                    if (closeBracket > bracket) {
+                        int arrSize = cleaned.mid(bracket + 1, closeBracket - bracket - 1).toInt();
+                        // Replace arrName_OFFSET_ with arrName[OFFSET]
+                        if (arrSize > 0 && !arrName.isEmpty()) {
+                            // Search for pattern: arrName_DIGITS_ =
+                            QString prefix = arrName + "_";
+                            int sp = 0;
+                            while ((sp = cleaned.indexOf(prefix, sp)) != -1) {
+                                int numStart = sp + prefix.size();
+                                int numEnd = numStart;
+                                while (numEnd < cleaned.size() && cleaned[numEnd].isDigit()) numEnd++;
+                                if (numEnd > numStart && numEnd < cleaned.size() && cleaned[numEnd] == '_') {
+                                    int offset = cleaned.mid(numStart, numEnd - numStart).toInt();
+                                    if (offset > 0 && offset < arrSize) {
+                                        QString oldPat = cleaned.mid(sp, numEnd + 1 - sp);
+                                        QString newPat = arrName + "[" + QString::number(offset) + "]";
+                                        cleaned.replace(sp, oldPat.size(), newPat);
+                                        // Also remove synthetic declaration
+                                        QString synthDecl = "\n    int " + oldPat + ";\n";
+                                        cleaned.replace(synthDecl, "\n");
+                                        continue;
+                                    }
+                                }
+                                sp = numEnd;
+                            }
+                        }
+                    }
+                }
+                pos = nameStart;
             }
         }
         QStringList lines = cleaned.split('\n');
@@ -874,6 +995,27 @@ public:
                 i += 2; continue;
             }
             pass1.append(lines[i]);
+        }
+        // Pass 1b: Strip trailing "return;" at end of void functions
+        // Only strip at outermost scope (brace depth 0), not inside if/while blocks
+        {
+            bool isVoid = false;
+            for (auto &l : pass1) {
+                if (l.trimmed().startsWith("void ") && l.contains("(")) { isVoid = true; break; }
+                if (l.trimmed() == "{") break;
+            }
+            if (isVoid) {
+                // Find and remove "return;" only when it's the last statement
+                // before the closing "}" of the function (at brace depth 1→0)
+                for (int i = pass1.size() - 1; i >= 0; --i) {
+                    QString trimmed = pass1[i].trimmed();
+                    if (trimmed == "}") continue;
+                    if (trimmed == "return;") {
+                        pass1.removeAt(i);
+                    }
+                    break; // only check the last non-} line
+                }
+            }
         }
         // Pass 2: Remove unused variable declarations
         // Scan forward through the entire remaining function body for references
@@ -1382,7 +1524,12 @@ private:
                     if (declaredVarIds.count(vit->second)) continue;
                     declaredVarIds.insert(vit->second);
                 }
-                out += "    " + QString::fromStdString(inferTempType(id) + " " + tname) + ";\n";
+                std::string itype = inferTempType(id);
+                // Override float type for vars with float/pointer conflict
+                if ((itype == "float" || itype == "vec_t") && vit != m_func.tempToVar.end() &&
+                    m_func.noFloatVars.count(vit->second))
+                    itype = "int";
+                out += "    " + QString::fromStdString(itype + " " + tname) + ";\n";
                 declared.insert(tname);
             }
             // Declare synthetic stack variables (var_XX, arg_XX) not covered by STABS
@@ -1420,12 +1567,28 @@ private:
                 }
             }
 
-            // Declare any temps that leaked as raw tN names during emission
+            // Declare any temps that leaked during emission (phi temps, raw tN names)
             for (int id : m_forceDeclareTemps) {
-                std::string tname = "t" + std::to_string(id);
+                // Use coalesced name if available
+                std::string tname;
+                auto vit = m_func.tempToVar.find(id);
+                if (vit != m_func.tempToVar.end()) {
+                    if (declaredVarIds.count(vit->second)) continue;
+                    declaredVarIds.insert(vit->second);
+                    auto nit = m_func.varNames.find(vit->second);
+                    if (nit != m_func.varNames.end() && !nit->second.empty())
+                        tname = nit->second;
+                }
+                if (tname.empty())
+                    tname = "t" + std::to_string(id);
                 if (declared.count(tname)) continue;
                 declared.insert(tname);
-                out += "    " + QString::fromStdString(inferTempType(id) + " " + tname) + ";\n";
+                std::string itype = inferTempType(id);
+                // Override float type for vars with float/pointer conflict
+                if ((itype == "float" || itype == "vec_t") && vit != m_func.tempToVar.end() &&
+                    m_func.noFloatVars.count(vit->second))
+                    itype = "int";
+                out += "    " + QString::fromStdString(itype + " " + tname) + ";\n";
             }
             if (!m_forceDeclareTemps.empty()) out += "\n";
 
@@ -1452,6 +1615,8 @@ private:
         std::map<int, TypeRef> m_tempStructPtr;   // temp → struct pointer type (from Field access)
         std::set<int>         m_forceDeclareTemps; // temps that leak as raw tN and need declaration
         std::set<int>         m_inliningTemps;    // cycle guard for temp inlining in emitExpr
+        int                   m_addrDepth = 0;     // >0 when emitting Load/Store address sub-exprs
+        std::set<int>         m_loadAddrTemps;    // temps used in Load address expressions
 
         // Force temps with cross-block def/use to be declared (not inlined)
         void forceDeclCrossBlockTemps() {
@@ -1495,27 +1660,105 @@ private:
 
         // Copy propagation: replace temps that are simple copies of vars/other temps
         void runCopyPropagation() {
-            // Pass 1: find all temps that are simple copies
+            // Find temps used in Load address expressions — don't const-propagate these
+            // (propagating 0 into a Load address resolves to BSS value instead of runtime)
+            std::set<int> usedInLoadAddr;
+            for (auto &bb : m_func.blocks)
+                for (auto &stmt : bb.stmts) {
+                    auto scanLoads = [&](const IRExpr *e) {
+                        if (!e) return;
+                        std::vector<const IRExpr*> stk = {e};
+                        while (!stk.empty()) {
+                            auto *n = stk.back(); stk.pop_back();
+                            if (n->op == IROp::Load && !n->kids.empty()) {
+                                std::vector<const IRExpr*> as = {n->kids[0].get()};
+                                while (!as.empty()) {
+                                    auto *a = as.back(); as.pop_back();
+                                    if (!a) continue;
+                                    if (a->op == IROp::Temp) usedInLoadAddr.insert(a->tempId());
+                                    for (auto &k : a->kids) if (k) as.push_back(k.get());
+                                }
+                            }
+                            for (auto &k : n->kids) if (k) stk.push_back(k.get());
+                        }
+                    };
+                    scanLoads(stmt.expr.get());
+                    scanLoads(stmt.addr.get());
+                    for (auto &a : stmt.args) scanLoads(a.get());
+                }
+            // Transitively expand: if t_x is in usedInLoadAddr and t_x = op(t_y, ...),
+            // then t_y is also in usedInLoadAddr
+            {
+                bool changed = true;
+                for (int iter = 0; iter < 5 && changed; ++iter) {
+                    changed = false;
+                    for (auto &bb : m_func.blocks)
+                        for (auto &stmt : bb.stmts) {
+                            if (stmt.kind != IRStmtKind::Assign || stmt.destTemp < 0) continue;
+                            if (!usedInLoadAddr.count(stmt.destTemp)) continue;
+                            if (!stmt.expr) continue;
+                            // Mark all Temp children as load-addr temps
+                            std::vector<const IRExpr*> stk = {stmt.expr.get()};
+                            while (!stk.empty()) {
+                                auto *n = stk.back(); stk.pop_back();
+                                if (!n) continue;
+                                if (n->op == IROp::Temp && !usedInLoadAddr.count(n->tempId())) {
+                                    usedInLoadAddr.insert(n->tempId());
+                                    changed = true;
+                                }
+                                for (auto &k : n->kids) if (k) stk.push_back(k.get());
+                            }
+                        }
+                }
+            }
+            m_loadAddrTemps = usedInLoadAddr; // save for use in emitExpr
+            // Also find temps with non-constant assignments (loop-updated)
+            std::set<int> hasNonConstAssign;
+            for (auto &bb : m_func.blocks)
+                for (auto &stmt : bb.stmts)
+                    if (stmt.kind == IRStmtKind::Assign && stmt.destTemp >= 0 &&
+                        stmt.expr && !stmt.expr->isConst())
+                        hasNonConstAssign.insert(stmt.destTemp);
+
             for (auto &bb : m_func.blocks) {
                 for (auto &stmt : bb.stmts) {
                     if (stmt.kind != IRStmtKind::Assign) continue;
                     if (!stmt.expr) continue;
                     // t = var → replace all uses of t with var
-                    if (stmt.expr->op == IROp::Var) {
+                    // BUT skip phi temps (they have loop-updated values too)
+                    if (stmt.expr->op == IROp::Var &&
+                        !m_func.phiTemps.count(stmt.destTemp)) {
                         m_copyMap[stmt.destTemp] = stmt.expr->name;
                         m_copyPropagated.insert(stmt.destTemp);
                     }
+                    // t = otherTemp → propagate temp name (but not phi temps)
+                    if (stmt.expr->op == IROp::Temp &&
+                        !m_func.phiTemps.count(stmt.destTemp)) {
+                        int srcId = stmt.expr->tempId();
+                        auto sit = m_copyMap.find(srcId);
+                        if (sit != m_copyMap.end()) {
+                            m_copyMap[stmt.destTemp] = sit->second;
+                            m_copyPropagated.insert(stmt.destTemp);
+                        }
+                    }
                     // t = const → propagate constant
+                    // Skip if: temp is also assigned non-constant (loop phi)
                     if (stmt.expr->op == IROp::Const) {
-                        m_constMap[stmt.destTemp] = stmt.expr->value;
-                        m_copyPropagated.insert(stmt.destTemp);
+                        if (!hasNonConstAssign.count(stmt.destTemp)) {
+                            m_constMap[stmt.destTemp] = stmt.expr->value;
+                            m_copyPropagated.insert(stmt.destTemp);
+                        }
                     }
                 }
             }
             // Pass 2: rewrite all Temp refs in all expressions
+            // Skip phi temp assignments (don't const-prop inside their definitions)
             if (!m_copyMap.empty() || !m_constMap.empty()) {
                 for (auto &bb : m_func.blocks)
                     for (auto &stmt : bb.stmts) {
+                        if (stmt.kind == IRStmtKind::Assign &&
+                            m_func.phiTemps.count(stmt.destTemp))
+                            continue; // preserve phi temp definitions
                         propagateInExpr(stmt.expr);
                         propagateInExpr(stmt.addr);
                         for (auto &a : stmt.args) propagateInExpr(a);
@@ -1758,6 +2001,25 @@ private:
                     for (auto &child : node->children) emitNode(out, child.get(), indent);
                     break;
                 }
+                // When the condition was negated by the structurer (the if-body
+                // corresponds to the original's fall-through/likely path),
+                // add __builtin_expect to preserve the original branch direction.
+                // Only for simple conditions (pointer != 0, func() != 0, etc.)
+                // to avoid changing complex control flow unnecessarily.
+                if (node->negated && !hasElse && !condTrue && !condFalse) {
+                    // Only add for simple integer zero-check conditions
+                    // (not float comparisons like "x == 0.0f")
+                    bool isSimpleZeroCheck = false;
+                    for (auto &sfx : {" != 0", " == 0", " > 0", " <= 0"}) {
+                        size_t len = strlen(sfx);
+                        if (cond.size() >= len &&
+                            cond.compare(cond.size() - len, len, sfx) == 0) {
+                            isSimpleZeroCheck = true; break;
+                        }
+                    }
+                    if (isSimpleZeroCheck)
+                        cond = "__builtin_expect(" + cond + ", 1)";
+                }
                 out += pad(indent) + "if (" + QString::fromStdString(cond) + ") {\n";
                 for (auto &child : node->children)
                     emitNode(out, child.get(), indent + 1);
@@ -1928,6 +2190,10 @@ private:
                 std::string val = stmt.expr ? emitExpr(stmt.expr.get()) : "0";
                 if (!stmt.addr) break;
                 auto *a = stmt.addr.get();
+                struct AddrGuard { int &d; AddrGuard(int &d):d(d){d++;} ~AddrGuard(){d--;} } _ag(m_addrDepth);
+                std::string storeCast = "int";
+                if (stmt.storeSize == 1) storeCast = "char";
+                else if (stmt.storeSize == 2) storeCast = "short";
                 // Field expression → base->field = val
                 if (a->op == IROp::Field) {
                     out += pad(indent) + QString::fromStdString(emitExpr(a) + " = " + val) + ";\n";
@@ -1985,10 +2251,23 @@ private:
                         }
                     }
                     if (!usedArrayNotation) {
-                        char buf[128];
-                        snprintf(buf, sizeof(buf), "*(int *)((char *)%s + 0x%X) = %s",
-                                 base.c_str(), (unsigned)off, val.c_str());
-                        out += pad(indent) + QString::fromStdString(buf) + ";\n";
+                        // Try type-aware struct field access
+                        TypeRef stBaseType = exprType(a->kids[0].get());
+                        std::string access;
+                        if (stBaseType != NullType && m_types.isStructPointer(stBaseType)) {
+                            TypeRef structRef = m_types.getPointedStruct(stBaseType);
+                            if (structRef != NullType)
+                                access = m_types.formatFieldAccess(structRef, off);
+                        }
+                        if (!access.empty()) {
+                            out += pad(indent) + QString::fromStdString(
+                                base + "->" + access + " = " + val) + ";\n";
+                        } else {
+                            char buf[128];
+                            snprintf(buf, sizeof(buf), "*(%s *)((char *)%s + 0x%X) = %s",
+                                     storeCast.c_str(), base.c_str(), (unsigned)off, val.c_str());
+                            out += pad(indent) + QString::fromStdString(buf) + ";\n";
+                        }
                     }
                 }
                 // Add(base, Mul(idx, scale)) or Add(Mul(idx, scale), base) → base[idx] = val
@@ -2015,7 +2294,7 @@ private:
                         std::string bs = emitExpr(storeBase);
                         std::string is = emitExpr(storeIdx);
                         out += pad(indent) + QString::fromStdString(
-                            "*(int *)((char *)" + bs + " + " + is + " * " + std::to_string(storeScale) + ") = " + val) + ";\n";
+                            "*(" + storeCast + " *)((char *)" + bs + " + " + is + " * " + std::to_string(storeScale) + ") = " + val) + ";\n";
                     }
                     // handled — skip remaining else-ifs
                 }
@@ -2054,11 +2333,11 @@ private:
                     }
                     std::string addr = emitExpr(a);
                     out += pad(indent) + QString::fromStdString(
-                        "*(int *)(" + addr + ") = " + val) + ";\n";
+                        "*(" + storeCast + " *)(" + addr + ") = " + val) + ";\n";
                 } else {
                     std::string addr = emitExpr(a);
                     out += pad(indent) + QString::fromStdString(
-                        "*(int *)(" + addr + ") = " + val) + ";\n";
+                        "*(" + storeCast + " *)(" + addr + ") = " + val) + ";\n";
                 }
                 break;
             }
@@ -2261,7 +2540,7 @@ private:
                 result = tryFloatConst((uint32_t)e->value);
                 // Check for FourCC constants (4 printable ASCII bytes)
                 if (result.empty()) result = tryFourCC((uint32_t)e->value);
-                // Try to resolve large constants as global variable addresses
+                // Try to resolve large constants as global variable/function addresses
                 if (result.empty() && e->value > 0x10000) {
                     std::string sym = m_mf.symbolNameAtAddress((uint32_t)e->value);
                     if (!sym.empty()) {
@@ -2269,6 +2548,17 @@ private:
                     } else {
                         std::string nearest = m_mf.nearestSymbolName((uint32_t)e->value);
                         if (!nearest.empty()) result = cName(nearest);
+                    }
+                    // Data symbols need & (address-of) since the constant IS
+                    // the address, not the value at the address.
+                    // Exception: inside Load/Store address expressions, the constant
+                    // is already being used as an address — no & needed.
+                    // Function symbols don't need & (function names decay to pointers).
+                    if (!result.empty() && m_addrDepth == 0) {
+                        auto *sec = m_mf.sectionForAddress((uint32_t)e->value);
+                        bool isData = sec && sec->segname != "__TEXT";
+                        if (isData)
+                            result = "&" + result;
                     }
                 }
                 if (result.empty()) {
@@ -2295,6 +2585,19 @@ private:
                         return m_func.varNames[vit->second];
                     return "t" + std::to_string(id);
                 }
+                // Phi temps: always use variable name (don't inline their definition
+                // because it's the pre-loop value; the actual value changes per iteration)
+                if (m_func.phiTemps.count(id)) {
+                    // Force-declare this temp so its name is available
+                    m_forceDeclareTemps.insert(id);
+                    auto vit = m_func.tempToVar.find(id);
+                    if (vit != m_func.tempToVar.end()) {
+                        auto nit = m_func.varNames.find(vit->second);
+                        if (nit != m_func.varNames.end())
+                            return nit->second;
+                    }
+                    return tempName(id);
+                }
                 // Inline temps used only once
                 if (m_tempUseCount[id] <= 1) {
                     auto it = m_tempDef.find(id);
@@ -2304,7 +2607,15 @@ private:
                         m_inliningTemps.erase(id);
                         if (!inlined.empty()) return inlined;
                     }
-                    // Inlining failed — emit 0 as safe fallback
+                    // Inlining failed — emit variable name if available, else 0
+                    {
+                        auto vit = m_func.tempToVar.find(id);
+                        if (vit != m_func.tempToVar.end()) {
+                            auto nit = m_func.varNames.find(vit->second);
+                            if (nit != m_func.varNames.end())
+                                return nit->second;
+                        }
+                    }
                     return "0";
                 }
                 // Also inline temps used exactly twice (1 def + 1 use) when def is simple
@@ -2357,6 +2668,7 @@ private:
 
             case IROp::Load: {
                 auto *addr = e->kids[0].get();
+                m_addrDepth++;
                 // (base + index*scale + const) → base->array_NN[index] pattern
                 if (addr && addr->op == IROp::Add && addr->kids.size() == 2 &&
                     addr->kids[1]->isConst() && addr->kids[1]->value > 0 &&
@@ -2409,18 +2721,30 @@ private:
                         }
                     }
                 }
-                // (base + const) → *(int *)((char *)base + off) for pointer-like expressions
-                else if (addr && addr->op == IROp::Add && addr->kids.size() == 2 &&
+                // (base + const) → base->field for struct pointers, else *(int*)((char*)base + off)
+                if (result.empty() && addr && addr->op == IROp::Add && addr->kids.size() == 2 &&
                     addr->kids[1]->isConst() &&
                     (int64_t)addr->kids[1]->value != 0 &&
                     std::abs((int64_t)addr->kids[1]->value) < 0x10000 &&
                     (addr->kids[0]->op == IROp::Var || addr->kids[0]->op == IROp::Temp)) {
                     std::string base = emitExpr(addr->kids[0].get());
                     int64_t off = (int64_t)addr->kids[1]->value;
-                    char buf[64];
-                    snprintf(buf, sizeof(buf), "*(int *)((char *)%s + 0x%llX)",
-                             base.c_str(), (unsigned long long)off);
-                    result = buf;
+                    // Try type-aware struct field access
+                    TypeRef baseType = exprType(addr->kids[0].get());
+                    if (baseType != NullType && m_types.isStructPointer(baseType)) {
+                        TypeRef structRef = m_types.getPointedStruct(baseType);
+                        std::string access = structRef != NullType ?
+                            m_types.formatFieldAccess(structRef, (int)off) : "";
+                        if (!access.empty()) {
+                            result = base + "->" + access;
+                        }
+                    }
+                    if (result.empty()) {
+                        char buf[64];
+                        snprintf(buf, sizeof(buf), "*(int *)((char *)%s + 0x%llX)",
+                                 base.c_str(), (unsigned long long)off);
+                        result = buf;
+                    }
                 }
                 // General Add/Sub expression → *(expr) without ugly cast
                 else if (addr && (addr->op == IROp::Add || addr->op == IROp::Sub) &&
@@ -2465,6 +2789,7 @@ private:
                         result = "*(int *)(" + addrStr + ")";
                     }
                 }
+                m_addrDepth--;
                 break;
             }
 
@@ -2743,8 +3068,20 @@ private:
                     // (not an arithmetic expression like -(v16 * 2))
                     if (!lhs.empty() && (isalpha(lhs[0]) || lhs[0] == '_')) {
                         int off = (int)e->kids[1]->value;
-                        char fname[32]; snprintf(fname, sizeof(fname), "field_%X", (unsigned)off);
-                        result = "&" + lhs + "->" + fname;
+                        // Try type-aware field name
+                        TypeRef baseType = exprType(e->kids[0].get());
+                        std::string access;
+                        if (baseType != NullType && m_types.isStructPointer(baseType)) {
+                            TypeRef structRef = m_types.getPointedStruct(baseType);
+                            if (structRef != NullType)
+                                access = m_types.formatFieldAccess(structRef, off);
+                        }
+                        if (!access.empty())
+                            result = "&" + lhs + "->" + access;
+                        else {
+                            char fname[32]; snprintf(fname, sizeof(fname), "field_%X", (unsigned)off);
+                            result = "&" + lhs + "->" + fname;
+                        }
                         break;
                     }
                 }
@@ -2888,8 +3225,9 @@ private:
             return "t" + std::to_string(id);
         }
 
-        // Infer temp type from its defining expression
-        std::string inferTempType(int id) {
+        // Infer temp type from its defining expression (with cycle detection)
+        std::string inferTempType(int id, int depth = 0) {
+            if (depth > 10) return "int"; // depth limit to prevent infinite recursion
             auto it = m_tempDef.find(id);
             if (it == m_tempDef.end() || !it->second) return "int";
             auto *e = it->second;
@@ -3000,7 +3338,7 @@ private:
                             }
                         }
                         // Recursive: check if the operand temp itself infers to float
-                        if (inferTempType(k->tempId()) == "float")
+                        if (inferTempType(k->tempId(), depth + 1) == "float")
                             return "float";
                     }
                     // Check if operand is a Call to a known float-returning function
@@ -3017,7 +3355,7 @@ private:
             // that can be traced to a float value
             if (e->op == IROp::Temp) {
                 // Copy from another temp — recurse
-                return inferTempType(e->tempId());
+                return inferTempType(e->tempId(), depth + 1);
             }
             return "int";
         }
