@@ -1028,21 +1028,74 @@ private:
                     }
                 }
                 if (!allFieldsOk) {
-                    // Emit as int-padded struct with correct size for offset access
+                    // Emit struct with STABS field names but simplified types.
+                    // Use int/pointer for fields whose types can't be resolved.
                     std::string kw = (t->kind == StabsTypeKind::Union) ? "union" : "struct";
-                    int sz = t->sizeBytes > 0 ? t->sizeBytes : 4;
-                    if (sz > 0 && sz <= 65536) {
-                        out += QString::fromStdString(kw + " " + t->name + " {\n");
-                        int numInts = (sz + 3) / 4;
-                        for (int i = 0; i < numInts; ++i) {
-                            char fn[32]; snprintf(fn, sizeof(fn), "    int field_%X;\n", i*4);
-                            out += fn;
+                    out += QString::fromStdString(kw + " " + t->name + " {\n");
+                    int prevEnd = 0; // track offset for padding
+                    for (auto &f : t->fields) {
+                        if (f.bitSize == 0 && f.bitOffset == 0) continue;
+                        if (f.name.empty() || f.name[0] == '/' || f.name[0] == '~') continue;
+                        if (f.name.find("::") != std::string::npos) continue;
+                        if (f.name.find("(") != std::string::npos) continue;
+                        if (f.name.find("<") != std::string::npos) continue;
+                        if (f.name.find("=") != std::string::npos) continue;
+                        if (f.name[0] == '!' || f.name[0] == '#' || f.name[0] == '$') continue;
+                        if (f.name.find("operator") == 0) continue;
+                        if (f.name.find("&") != std::string::npos) continue;
+                        if (f.name.find(">") != std::string::npos) continue;
+                        int byteOff = f.bitOffset / 8;
+                        int byteSize = f.bitSize / 8;
+                        if (byteSize <= 0) byteSize = 4;
+                        // Add padding if needed
+                        if (byteOff > prevEnd) {
+                            int pad = byteOff - prevEnd;
+                            char pname[32];
+                            snprintf(pname, sizeof(pname), "    char _pad_%X[%d];\n", prevEnd, pad);
+                            out += pname;
                         }
-                        out += "};\n\n";
-                    } else {
-                        out += QString::fromStdString(kw + " " + t->name +
-                            " { char _opaque[" + std::to_string(sz) + "]; };\n\n");
+                        // Try to use the real type, fallback to int/char array
+                        std::string ftype;
+                        auto *ft = types.resolveType(f.typeRef);
+                        auto *rawFt = types.getType(f.typeRef);
+                        bool typeOk = false;
+                        if (ft) {
+                            if (ft->kind <= StabsTypeKind::LongDouble) typeOk = true;
+                            if (rawFt && rawFt->kind == StabsTypeKind::Pointer) typeOk = true;
+                            if ((ft->kind == StabsTypeKind::Struct || ft->kind == StabsTypeKind::Union)
+                                && !ft->name.empty() && emittedNames.count(ft->name)) typeOk = true;
+                            if (ft->kind == StabsTypeKind::Enum && !ft->name.empty()
+                                && emittedNames.count(ft->name)) typeOk = true;
+                            if (ft->kind == StabsTypeKind::Array) {
+                                auto *elem = types.resolveType(ft->targetType);
+                                if (elem && elem->kind <= StabsTypeKind::LongDouble) typeOk = true;
+                            }
+                        }
+                        if (typeOk) {
+                            ftype = types.formatDecl(f.typeRef, f.name);
+                        } else if (byteSize == 1) {
+                            ftype = "char " + f.name;
+                        } else if (byteSize == 2) {
+                            ftype = "short " + f.name;
+                        } else if (byteSize <= 4) {
+                            ftype = "int " + f.name;
+                        } else {
+                            char buf[64];
+                            snprintf(buf, sizeof(buf), "char %s[%d]", f.name.c_str(), byteSize);
+                            ftype = buf;
+                        }
+                        out += "    " + QString::fromStdString(ftype) + ";\n";
+                        prevEnd = byteOff + byteSize;
                     }
+                    // Pad to full size
+                    int totalSize = t->sizeBytes > 0 ? t->sizeBytes : prevEnd;
+                    if (prevEnd < totalSize) {
+                        char pname[32];
+                        snprintf(pname, sizeof(pname), "    char _pad_%X[%d];\n",
+                                 prevEnd, totalSize - prevEnd);
+                        out += pname;
+                    }
+                    out += "};\n\n";
                     return;
                 }
             }
@@ -2762,6 +2815,11 @@ private:
             // Remove & from references in names
             pos = 0;
             while ((pos = out.find("&", pos)) != std::string::npos) out.erase(pos, 1);
+            // Replace remaining non-identifier characters
+            for (auto &c : out)
+                if (!isalnum(c) && c != '_') c = '_';
+            // Remove leading digits
+            if (!out.empty() && isdigit(out[0])) out = "_" + out;
             return out;
         }
 

@@ -100,10 +100,65 @@ def compile_to_asm_raw(c_code):
         os.unlink(cpath)
 
 
+_types_header_cache = None
+
+def _load_types_header():
+    global _types_header_cache
+    if _types_header_cache is None and os.path.exists(TYPES_HEADER):
+        with open(TYPES_HEADER) as f:
+            _types_header_cache = f.readlines()
+    return _types_header_cache
+
+
+def extract_struct_from_header(name):
+    """Extract a specific struct/union/enum/typedef definition from the types header."""
+    lines = _load_types_header()
+    if not lines:
+        return None
+
+    # First pass: look for full definition (struct NAME { ... };)
+    result = []
+    in_block = False
+    brace_depth = 0
+    for line in lines:
+        stripped = line.strip()
+        if not in_block:
+            if (stripped.startswith('struct ' + name + ' {') or
+                stripped.startswith('union ' + name + ' {') or
+                stripped.startswith('enum ' + name + ' {')):
+                in_block = True
+                brace_depth = stripped.count('{') - stripped.count('}')
+                result.append(line)
+                if brace_depth <= 0:
+                    return ''.join(result)
+                continue
+        else:
+            result.append(line)
+            brace_depth += line.count('{') - line.count('}')
+            if brace_depth <= 0:
+                return ''.join(result)
+
+    # Second pass: look for typedef
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith('typedef ') and stripped.endswith(';'):
+            if f' {name};' in stripped or f' {name}[' in stripped:
+                result = line
+                # If it's typedef struct X name, also extract struct X
+                m = re.match(r'typedef\s+struct\s+(\w+)\s+' + re.escape(name), stripped)
+                if m:
+                    struct_def = extract_struct_from_header(m.group(1))
+                    if struct_def:
+                        result = struct_def + '\n' + result
+                return result
+
+    return None
+
+
 def compile_to_asm(c_code):
     full = STUBS + '\n' + c_code
     # Retry loop: extract undeclared identifiers from errors, add stubs, retry
-    max_retries = 5
+    max_retries = 10
     for attempt in range(max_retries):
         with tempfile.NamedTemporaryFile(suffix='.c', mode='w', delete=False) as f:
             f.write(full)
@@ -128,26 +183,52 @@ def compile_to_asm(c_code):
             undeclared.add(m.group(1))
         for m in re.finditer(r"unknown type name " + q + r"(\w+)" + cq, r.stderr):
             undeclared.add(m.group(1))
+        # Handle conflicting types: remove the conflicting stub
+        for m in re.finditer(r"conflicting types for " + q + r"(\w+)" + cq, r.stderr):
+            cname = m.group(1)
+            # Remove the extern/typedef stub that conflicts
+            full = re.sub(r'^extern\s+\w+\s+\*?' + re.escape(cname) + r'\s*;.*\n',
+                          '', full, flags=re.MULTILINE)
+            full = re.sub(r'^void\s+' + re.escape(cname) + r'\s*\(void\)\s*;.*\n',
+                          '', full, flags=re.MULTILINE)
+            full = re.sub(r'^typedef\s+struct\s*\{[^}]*\}\s*' + re.escape(cname) + r'\s*;.*\n',
+                          '', full, flags=re.MULTILINE)
         if not undeclared:
             return False, r.stdout, r.stderr
         # Check what's already defined to avoid redefinition
         already_defined = set(re.findall(r'typedef\s+\S+.*?\s+(\w+)\s*[;\[]', full))
         already_defined.update(re.findall(r'struct\s+(\w+)\s*\{', full))
+        # Check which names are functions defined in the code (avoid conflicting extern int)
+        func_defs = set(re.findall(r'\b(?:int|void|float|static\s+\w+)\s+(\w+)\s*\(', full))
         stubs_extra = ''
         for name in sorted(undeclared):
-            if name in already_defined:
+            if name in already_defined or name in func_defs:
+                continue
+            # Try to extract real definition from generated types header
+            real_def = extract_struct_from_header(name)
+            if real_def:
+                stubs_extra += real_def + '\n'
+                already_defined.add(name)
                 continue
             # Heuristic: types start uppercase or end with _t/_s/Ref
             is_type = (name[0].isupper() or name.endswith('_t') or
                        name.endswith('_s') or name.endswith('Ref'))
             if is_type:
                 stubs_extra += f'typedef struct {{ int _[64]; }} {name};\n'
-            else:
-                # Variable or function — declare as extern int
-                stubs_extra += f'extern int {name};\n'
+            elif name.endswith('_f') or name.startswith('Cmd_') or name.startswith('Com_'):
+                # Likely a function — declare as void func(void)
+                stubs_extra += f'void {name}(void);\n'
+            elif not name.startswith('_'):
+                # Check if the name is used as a pointer (*name or name->)
+                if re.search(r'\*\s*\(' + re.escape(name) + r'\)|' + re.escape(name) + r'\s*->', full):
+                    stubs_extra += f'extern void *{name};\n'
+                else:
+                    stubs_extra += f'extern int {name};\n'
         if not stubs_extra:
             return False, r.stdout, r.stderr
-        full = stubs_extra + full
+        # Insert after STUBS but before code (STUBS defines vec_t, etc. that structs need)
+        stubs_end = full.find(STUBS) + len(STUBS) if STUBS in full else 0
+        full = full[:stubs_end] + stubs_extra + full[stubs_end:]
     return False, '', r.stderr
 
 
@@ -319,16 +400,15 @@ def check_function(name_or_addr, data, text_addr, text_off, verbose=True):
     # Try 1: compile the single function with stubs
     ok, asm_text, errors = compile_to_asm(c_code)
 
-    # Try 2: if that fails, decompile the whole source file (has full type defs)
-    if not ok:
-        src_idx = find_source_for_addr(func_addr)
-        if src_idx is not None:
-            r2 = subprocess.run([DECOMP, BINARY, '-s', str(src_idx)],
-                                capture_output=True, text=True, timeout=60)
-            if r2.stdout.strip():
-                src_code = re.sub(r'#include\s*[<"].*?[>"]', '', r2.stdout)
-                # Source file has its own type defs — compile WITHOUT stubs
-                ok, asm_text, errors = compile_to_asm_raw(src_code)
+    # Try 2: source file fallback (disabled — source files have too many Carbon deps)
+    # if not ok:
+    #     src_idx = find_source_for_addr(func_addr)
+    #     if src_idx is not None:
+    #         r2 = subprocess.run([DECOMP, BINARY, '-s', str(src_idx)],
+    #                             capture_output=True, text=True, timeout=60)
+    #         if r2.stdout.strip():
+    #             src_code = re.sub(r'#include\s*[<"].*?[>"]', '', r2.stdout)
+    #             ok, asm_text, errors = compile_to_asm_raw(src_code)
     if not ok:
         if verbose:
             err_lines = [l for l in errors.split('\n') if ': error:' in l][:5]
