@@ -2500,7 +2500,7 @@ private:
                     }
                 }
                 // (base + const) → *(int *)((char *)base + off) for pointer-like expressions
-                else if (addr && addr->op == IROp::Add && addr->kids.size() == 2 &&
+                if (result.empty() && addr && addr->op == IROp::Add && addr->kids.size() == 2 &&
                     addr->kids[1]->isConst() &&
                     (int64_t)addr->kids[1]->value != 0 &&
                     std::abs((int64_t)addr->kids[1]->value) < 0x10000 &&
