@@ -863,6 +863,31 @@ public:
                 pos += 2;
             }
         }
+        // Remove redundant double casts: (type)((type)(x)) → (type)(x)
+        {
+            int pos = 0;
+            while ((pos = cleaned.indexOf("((unsigned char)(", pos)) != -1) {
+                // Check if preceded by "(unsigned char)"
+                int outer = cleaned.lastIndexOf("(unsigned char)", pos);
+                if (outer >= 0 && outer + 15 == pos) {
+                    // Remove the outer cast: "(unsigned char)((unsigned char)(x))" → "(unsigned char)(x)"
+                    cleaned.remove(outer, 16); // remove "(unsigned char)("
+                    // Find matching close paren
+                    int depth = 1;
+                    int cp = outer;
+                    while (cp < cleaned.size() && depth > 0) {
+                        if (cleaned[cp] == '(') depth++;
+                        if (cleaned[cp] == ')') depth--;
+                        cp++;
+                    }
+                    if (cp > 0 && cp <= cleaned.size()) {
+                        cleaned.remove(cp - 1, 1); // remove extra close paren
+                    }
+                    continue;
+                }
+                pos += 1;
+            }
+        }
         // Fix variadic functions: detect va_list usage and fix signature + va_start
         {
             bool hasVaList = cleaned.contains("va_list ");
@@ -973,6 +998,16 @@ public:
         // Pass 1: Remove empty if blocks
         QStringList pass1;
         for (int i = 0; i < lines.size(); ++i) {
+            // Remove self-assignments: "x = x;"
+            {
+                QString t = lines[i].trimmed();
+                if (t.endsWith(';') && t.contains(" = ")) {
+                    int eq = t.indexOf(" = ");
+                    QString lhs = t.left(eq).trimmed();
+                    QString rhs = t.mid(eq + 3).chopped(1).trimmed(); // remove trailing ;
+                    if (lhs == rhs && !lhs.isEmpty()) continue;
+                }
+            }
             if (i + 1 < lines.size() &&
                 lines[i].trimmed().startsWith("if (") &&
                 lines[i].trimmed().endsWith("{") &&

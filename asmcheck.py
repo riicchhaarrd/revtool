@@ -443,12 +443,11 @@ def norm(s):
     s = re.sub(r'\b_[a-zA-Z]\w{3,}\b', '<C>', s)
     # Strip $ before <C> (e.g., $<C> → <C>)
     s = re.sub(r'\$<C>', '<C>', s)
-    # Normalize register choice in parameter loads only
-    # (register allocation is compiler-dependent, not semantic)
+    # Normalize register choice in parameter loads and stores
     # Parameter loads: movl N(%ebp), %REG → movl N(%ebp), %<R>
     s = re.sub(r'^movl (\d+\(%ebp\)), %(eax|ecx|edx|esi|edi)',
                r'movl \1, %<R>', s)
-    # Register-to-base-offset stores: movl %REG, N(%ebx/esi/edi)
+    # Register-to-base-offset stores: movl %REG, N(%base)
     s = re.sub(r'^movl %(eax|ecx|edx|esi|edi), (\d+\(%e[bsd][xip]\))',
                r'movl %<R>, \2', s)
     # Normalize XMM register names (float register allocation varies)
