@@ -1302,7 +1302,7 @@ private:
                         ttype = inferTempType(id);
                     // If type is a pointer but the temp is used in multiplication,
                     // it's actually a scalar value (not a pointer)
-                    if (ttype.find("*") != std::string::npos && ttype.find("char *") == std::string::npos) {
+                    if (ttype.find("*") != std::string::npos && ttype.find("char *") == std::string::npos && ttype.find("const") == std::string::npos) {
                         // Collect all temps in this coalesced group
                         std::set<int> groupTemps;
                         if (vit != m_func.tempToVar.end()) {
@@ -1312,11 +1312,17 @@ private:
                         }
                         groupTemps.insert(id);
                         bool usedInMul = false;
-                        std::function<bool(const IRExpr*)> hasMulChild;
-                        hasMulChild = [&](const IRExpr *e) -> bool {
-                            if (!e) return false;
+                        std::function<bool(const IRExpr*, int)> hasMulChild;
+                        hasMulChild = [&](const IRExpr *e, int depth) -> bool {
+                            if (!e || depth > 5) return false;
                             if (e->op == IROp::Mul || e->op == IROp::SDiv) return true;
-                            for (auto &k : e->kids) if (hasMulChild(k.get())) return true;
+                            // Follow through Temp definitions
+                            if (e->op == IROp::Temp) {
+                                auto dit = m_tempDef.find(e->tempId());
+                                if (dit != m_tempDef.end() && dit->second)
+                                    return hasMulChild(dit->second, depth + 1);
+                            }
+                            for (auto &k : e->kids) if (hasMulChild(k.get(), depth + 1)) return true;
                             return false;
                         };
                         for (auto &bb : m_func.blocks) {
@@ -1329,7 +1335,7 @@ private:
                                             usedInMul = true;
                                 // Check if any group temp is DEFINED by an expression containing Mul
                                 if (stmt.kind == IRStmtKind::Assign && groupTemps.count(stmt.destTemp))
-                                    if (hasMulChild(stmt.expr.get()))
+                                    if (hasMulChild(stmt.expr.get(), 0))
                                         usedInMul = true;
                             }
                         }
@@ -2325,9 +2331,12 @@ private:
                 // Only sanitize names that aren't numeric literals or expressions
                 std::string vn = e->name;
                 if (!vn.empty() && (isdigit(vn[0]) || vn[0] == '-' || vn[0] == '"' || vn[0] == '('))
-                    result = vn;  // numeric literal, string, or expression — emit as-is
+                    result = vn;
                 else
                     result = cName(vn);
+                // Don't add [0] here — array-typed Vars used in expressions are
+                // handled by the caller (Store/Load/VarSet) or by context.
+                // Adding [0] unconditionally breaks synthetic stack vars.
                 break;
             }
             case IROp::String: result = e->name; break;
@@ -2844,10 +2853,24 @@ private:
             if (e->typeRef != NullType) {
                 auto *rt = m_types.resolveType(e->typeRef);
                 // For array types assigned to temps, use pointer to element type
-                // (arrays decay to pointers when assigned in C)
-                if (rt && rt->kind == StabsTypeKind::Array)
+                // UNLESS the temp is defined by arithmetic (Mul/Add/Sub → scalar result)
+                if (rt && rt->kind == StabsTypeKind::Array) {
+                    if (e->op == IROp::Mul || e->op == IROp::Add || e->op == IROp::Sub ||
+                        e->op == IROp::SDiv || e->op == IROp::Neg)
+                        return m_types.formatType(rt->targetType);  // element type, no pointer
                     return m_types.formatType(rt->targetType) + " *";
-                return m_types.formatType(e->typeRef);
+                }
+                // Don't propagate struct/union/pointer types through arithmetic
+                if (rt && (rt->kind == StabsTypeKind::Struct || rt->kind == StabsTypeKind::Union))
+                    return "int";
+                std::string fmt = m_types.formatType(e->typeRef);
+                if (fmt.find("*") != std::string::npos &&
+                    (e->op == IROp::Mul || e->op == IROp::Add || e->op == IROp::Sub)) {
+                    // Pointer type from arithmetic → strip pointer
+                    size_t star = fmt.find(" *");
+                    if (star != std::string::npos) fmt = fmt.substr(0, star);
+                }
+                return fmt;
             }
             // Float operations → float
             if (e->op == IROp::Const && !tryFloatConst((uint32_t)e->value).empty()) return "float";
