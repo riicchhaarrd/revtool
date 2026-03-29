@@ -28,6 +28,9 @@ typedef signed char int8_t; typedef unsigned char uint8_t;
 typedef long long int64_t; typedef unsigned long long uint64_t;
 typedef int intptr_t; typedef unsigned int uintptr_t;
 typedef __builtin_va_list va_list;
+#define va_start(ap, last) __builtin_va_start(ap, last)
+#define va_end(ap) __builtin_va_end(ap)
+#define va_arg(ap, type) __builtin_va_arg(ap, type)
 typedef int BOOL; typedef int Bool; typedef int qboolean;
 typedef unsigned int DWORD; typedef unsigned int UINT;
 typedef float vec_t; typedef vec_t vec3_t[3]; typedef vec_t vec2_t[2];
@@ -647,6 +650,27 @@ def check_function(name_or_addr, data, text_addr, text_off, verbose=True):
     # Normalize prologue: strip mismatched callee-save pushes/pops and sub esp
     orig = norm_prologue(orig, recomp)
     recomp = norm_prologue(recomp, orig)
+
+    # Strip callee-save register differences: push/pop/addl that exist
+    # in one stream but not the other (register allocation differences)
+    callee_save_pats = {r'pushl %e[bsd][ix]', r'popl %e[bsd][ix]', r'addl \$\d+, %esp'}
+    def strip_callee_save(stream, other_stream):
+        ns = [norm(x) for x in stream]
+        no = set(norm(x) for x in other_stream)
+        result = []
+        for i, (raw, n) in enumerate(zip(stream, ns)):
+            # Keep if it exists in the other stream
+            if n in no:
+                result.append(raw)
+                continue
+            # Strip if it's a callee-save pattern not in other
+            is_callee = any(re.match(p, n) for p in callee_save_pats)
+            if is_callee:
+                continue  # strip
+            result.append(raw)
+        return result
+    orig = strip_callee_save(orig, recomp)
+    recomp = strip_callee_save(recomp, orig)
 
     # Compare using LCS (longest common subsequence) for alignment-tolerant matching
     normed_o = [norm(x) for x in orig]

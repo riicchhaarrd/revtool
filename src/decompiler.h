@@ -863,6 +863,110 @@ public:
                 pos += 2;
             }
         }
+        // Fix variadic functions: detect va_list usage and fix signature + va_start
+        {
+            bool hasVaList = cleaned.contains("va_list ");
+            bool hasVsnprintf = cleaned.contains("vsnprintf") || cleaned.contains("vsprintf");
+            if (hasVaList && hasVsnprintf) {
+                // Add ... to function signature if not present
+                int sigEnd = cleaned.indexOf(")");
+                if (sigEnd > 0 && !cleaned.left(sigEnd).contains("...")) {
+                    cleaned.insert(sigEnd, ", ...");
+                }
+                // Find the last named parameter
+                QString lastParam;
+                {
+                    int ps = cleaned.indexOf('(');
+                    int pe = cleaned.indexOf(", ...)");
+                    if (pe < 0) pe = cleaned.indexOf(')');
+                    if (ps > 0 && pe > ps) {
+                        QString params = cleaned.mid(ps + 1, pe - ps - 1);
+                        QStringList parts = params.split(',');
+                        if (!parts.isEmpty()) {
+                            QStringList words = parts.last().trimmed().split(' ');
+                            if (!words.isEmpty()) {
+                                lastParam = words.last().remove('*');
+                            }
+                        }
+                    }
+                }
+                // Replace va_list init with va_start
+                if (!lastParam.isEmpty()) {
+                    // Capture the temp name: "vN = &arg_1" → tempName = "vN"
+                    int argPos = cleaned.indexOf("= &arg_1;");
+                    QString vaTempName;
+                    if (argPos >= 0) {
+                        int lineStart = cleaned.lastIndexOf('\n', argPos) + 1;
+                        QString line = cleaned.mid(lineStart, argPos - lineStart).trimmed();
+                        vaTempName = line; // "vN"
+                        // Find end of next line (argptr = vN;)
+                        int nextLine = cleaned.indexOf('\n', argPos);
+                        int lineEnd = cleaned.indexOf(';', nextLine);
+                        if (lineEnd > nextLine) {
+                            cleaned.replace(lineStart, lineEnd - lineStart + 1,
+                                "    va_start(argptr, " + lastParam + ");");
+                        }
+                    }
+                    // Replace remaining references to the temp with argptr
+                    if (!vaTempName.isEmpty()) {
+                        cleaned.replace(", " + vaTempName + ")", ", argptr)");
+                        cleaned.replace("(" + vaTempName + ",", "(argptr,");
+                    }
+                }
+                // Remove unused declarations
+                QStringList cl = cleaned.split('\n');
+                QStringList cl2;
+                for (auto &l : cl) {
+                    QString t = l.trimmed();
+                    if (t.startsWith("va_list v") && t.endsWith(";")) continue;
+                    if (t == "int arg_1;") continue;
+                    cl2.append(l);
+                }
+                cleaned = cl2.join('\n');
+            }
+        }
+        // Fix array element references: msg_OFFSET_ = 0 → msg[OFFSET] = 0
+        {
+            // Find char arrays: "char NAME[SIZE]"
+            int pos = 0;
+            while ((pos = cleaned.indexOf("char ", pos)) != -1) {
+                int nameStart = pos + 5;
+                int bracket = cleaned.indexOf('[', nameStart);
+                int semi = cleaned.indexOf(';', nameStart);
+                if (bracket > nameStart && bracket < semi) {
+                    QString arrName = cleaned.mid(nameStart, bracket - nameStart).trimmed();
+                    int closeBracket = cleaned.indexOf(']', bracket);
+                    if (closeBracket > bracket) {
+                        int arrSize = cleaned.mid(bracket + 1, closeBracket - bracket - 1).toInt();
+                        // Replace arrName_OFFSET_ with arrName[OFFSET]
+                        if (arrSize > 0 && !arrName.isEmpty()) {
+                            // Search for pattern: arrName_DIGITS_ =
+                            QString prefix = arrName + "_";
+                            int sp = 0;
+                            while ((sp = cleaned.indexOf(prefix, sp)) != -1) {
+                                int numStart = sp + prefix.size();
+                                int numEnd = numStart;
+                                while (numEnd < cleaned.size() && cleaned[numEnd].isDigit()) numEnd++;
+                                if (numEnd > numStart && numEnd < cleaned.size() && cleaned[numEnd] == '_') {
+                                    int offset = cleaned.mid(numStart, numEnd - numStart).toInt();
+                                    if (offset > 0 && offset < arrSize) {
+                                        QString oldPat = cleaned.mid(sp, numEnd + 1 - sp);
+                                        QString newPat = arrName + "[" + QString::number(offset) + "]";
+                                        cleaned.replace(sp, oldPat.size(), newPat);
+                                        // Also remove synthetic declaration
+                                        QString synthDecl = "\n    int " + oldPat + ";\n";
+                                        cleaned.replace(synthDecl, "\n");
+                                        continue;
+                                    }
+                                }
+                                sp = numEnd;
+                            }
+                        }
+                    }
+                }
+                pos = nameStart;
+            }
+        }
         QStringList lines = cleaned.split('\n');
         // Pass 1: Remove empty if blocks
         QStringList pass1;
