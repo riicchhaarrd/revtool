@@ -2037,6 +2037,9 @@ private:
                 std::string val = stmt.expr ? emitExpr(stmt.expr.get()) : "0";
                 if (!stmt.addr) break;
                 auto *a = stmt.addr.get();
+                std::string storeCast = "int";
+                if (stmt.storeSize == 1) storeCast = "char";
+                else if (stmt.storeSize == 2) storeCast = "short";
                 // Field expression → base->field = val
                 if (a->op == IROp::Field) {
                     out += pad(indent) + QString::fromStdString(emitExpr(a) + " = " + val) + ";\n";
@@ -2107,8 +2110,8 @@ private:
                                 base + "->" + access + " = " + val) + ";\n";
                         } else {
                             char buf[128];
-                            snprintf(buf, sizeof(buf), "*(int *)((char *)%s + 0x%X) = %s",
-                                     base.c_str(), (unsigned)off, val.c_str());
+                            snprintf(buf, sizeof(buf), "*(%s *)((char *)%s + 0x%X) = %s",
+                                     storeCast.c_str(), base.c_str(), (unsigned)off, val.c_str());
                             out += pad(indent) + QString::fromStdString(buf) + ";\n";
                         }
                     }
@@ -2137,7 +2140,7 @@ private:
                         std::string bs = emitExpr(storeBase);
                         std::string is = emitExpr(storeIdx);
                         out += pad(indent) + QString::fromStdString(
-                            "*(int *)((char *)" + bs + " + " + is + " * " + std::to_string(storeScale) + ") = " + val) + ";\n";
+                            "*(" + storeCast + " *)((char *)" + bs + " + " + is + " * " + std::to_string(storeScale) + ") = " + val) + ";\n";
                     }
                     // handled — skip remaining else-ifs
                 }
@@ -2176,11 +2179,11 @@ private:
                     }
                     std::string addr = emitExpr(a);
                     out += pad(indent) + QString::fromStdString(
-                        "*(int *)(" + addr + ") = " + val) + ";\n";
+                        "*(" + storeCast + " *)(" + addr + ") = " + val) + ";\n";
                 } else {
                     std::string addr = emitExpr(a);
                     out += pad(indent) + QString::fromStdString(
-                        "*(int *)(" + addr + ") = " + val) + ";\n";
+                        "*(" + storeCast + " *)(" + addr + ") = " + val) + ";\n";
                 }
                 break;
             }

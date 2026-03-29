@@ -58,6 +58,24 @@ int setjmp(void*); void exit(int); void *malloc(size_t); void free(void*);
 int abs(int); int atoi(const char*);
 '''
 
+# Dvar function prototypes with proper float parameter types
+# (prevents default argument promotion from float to double)
+DVAR_PROTOS = '''
+#ifndef DVAR_PROTOS_DEFINED
+#define DVAR_PROTOS_DEFINED
+typedef int dvar_t;
+dvar_t *Dvar_RegisterBool(const char*,int,int);
+dvar_t *Dvar_RegisterInt(const char*,int,int,int,int);
+dvar_t *Dvar_RegisterFloat(const char*,float,float,float,int);
+dvar_t *Dvar_RegisterString(const char*,const char*,int);
+dvar_t *Dvar_RegisterEnum(const char*,const char**,int,int);
+dvar_t *Dvar_RegisterColor(const char*,float,float,float,float,int);
+dvar_t *Dvar_RegisterVec2(const char*,float,float,float,float,int);
+dvar_t *Dvar_RegisterVec3(const char*,float,float,float,float,float,float,int);
+dvar_t *Dvar_RegisterVec4(const char*,float,float,float,float,float,float,float,float,int);
+#endif
+'''
+
 
 def load_binary():
     with open(BINARY, 'rb') as f:
@@ -297,7 +315,9 @@ def compile_to_asm(c_code):
     for name in extracted:
         emit_type(name)
     types_block = '\n'.join(ordered)
-    full = STUBS + '\n' + types_block + '\n' + func_protos + '\n' + c_code
+    # Add Dvar prototypes only if no dvar_t struct is already extracted
+    dvar_block = DVAR_PROTOS if 'dvar_t' not in extracted else ''
+    full = STUBS + '\n' + dvar_block + '\n' + types_block + '\n' + func_protos + '\n' + c_code
 
     # Try compile with extracted types
     ok, stdout, stderr = _try_compile(full)
@@ -391,8 +411,9 @@ def norm(s):
     s = s.strip().replace('\t', ' ')
     # Hex offsets to decimal
     s = re.sub(r'0x([0-9a-fA-F]+)', lambda m: str(int(m.group(1), 16)), s)
-    # Collapse whitespace
+    # Collapse whitespace and normalize comma spacing
     s = re.sub(r'\s+', ' ', s)
+    s = re.sub(r',\s*', ', ', s)
     # Strip comments
     s = s.split('#')[0].strip()
     # retl -> ret, calll -> call, leave -> popl %ebp
@@ -402,8 +423,11 @@ def norm(s):
     # Normalize address constants, labels, and non_lazy_ptrs to <C>
     s = re.sub(r'L_\w+\$(?:non_lazy_ptr|stub)', '<C>', s)
     s = re.sub(r'LC\d+', '<C>', s)
+    s = re.sub(r'-?\b\d{5,}\b', '<C>', s)
+    # Normalize bare global symbol names (e.g., _sv_master, _com_sv_running)
+    s = re.sub(r'\b_[a-zA-Z]\w{3,}\b', '<C>', s)
+    # Strip $ before <C> (e.g., $<C> → <C>)
     s = re.sub(r'\$<C>', '<C>', s)
-    s = re.sub(r'\b\d{5,}\b', '<C>', s)
     # Normalize branch targets
     s = re.sub(r'^(j\w+) .*', r'\1 <T>', s)
     return s

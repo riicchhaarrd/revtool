@@ -228,9 +228,10 @@ struct IRStmt {
         s.destTemp = temp; s.expr = std::move(rhs); s.destType = t;
         return s;
     }
-    static IRStmt mkStore(std::unique_ptr<IRExpr> address, std::unique_ptr<IRExpr> val) {
+    int storeSize = 4; // for Store: memory access size in bytes (1, 2, 4)
+    static IRStmt mkStore(std::unique_ptr<IRExpr> address, std::unique_ptr<IRExpr> val, int size = 4) {
         IRStmt s; s.kind = IRStmtKind::Store;
-        s.addr = std::move(address); s.expr = std::move(val);
+        s.addr = std::move(address); s.expr = std::move(val); s.storeSize = size;
         return s;
     }
     static IRStmt mkVarSet(const std::string &name, std::unique_ptr<IRExpr> val, TypeRef t = NullType) {

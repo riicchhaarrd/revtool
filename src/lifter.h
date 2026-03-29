@@ -1114,7 +1114,7 @@ private:
     }
 
     // Write to a memory destination
-    void writeMem(x86_op_mem &m, std::unique_ptr<IRExpr> val, BasicBlock &bb) {
+    void writeMem(x86_op_mem &m, std::unique_ptr<IRExpr> val, BasicBlock &bb, int storeSize = 4) {
         // EBP-relative
         if (m.base == X86_REG_EBP && m.index == X86_REG_INVALID) {
             int d = (int)m.disp;
@@ -1206,7 +1206,7 @@ private:
         // General store
         auto addr = readMem_addr(m);
         if (addr)
-            bb.stmts.push_back(IRStmt::mkStore(std::move(addr), std::move(val)));
+            bb.stmts.push_back(IRStmt::mkStore(std::move(addr), std::move(val), storeSize));
     }
 
     // Get the address expression for a memory operand (without loading)
@@ -1269,7 +1269,7 @@ private:
                 val = IRExpr::mkCast(CastKind::Trunc8, std::move(val));
             else if (op.size == 2)
                 val = IRExpr::mkCast(CastKind::Trunc16, std::move(val));
-            writeMem(op.mem, std::move(val), bb);
+            writeMem(op.mem, std::move(val), bb, op.size);
         }
     }
 
