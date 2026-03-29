@@ -1580,9 +1580,13 @@ private:
                 }
             }
             // Pass 2: rewrite all Temp refs in all expressions
+            // Skip phi temp assignments (don't const-prop inside their definitions)
             if (!m_copyMap.empty() || !m_constMap.empty()) {
                 for (auto &bb : m_func.blocks)
                     for (auto &stmt : bb.stmts) {
+                        if (stmt.kind == IRStmtKind::Assign &&
+                            m_func.phiTemps.count(stmt.destTemp))
+                            continue; // preserve phi temp definitions
                         propagateInExpr(stmt.expr);
                         propagateInExpr(stmt.addr);
                         for (auto &a : stmt.args) propagateInExpr(a);

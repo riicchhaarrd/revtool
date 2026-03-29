@@ -250,7 +250,12 @@ public:
         };
 
         // Process copy edges: merge if no interference between representatives
+        // Skip edges involving phi temps (loop variable phis must stay separate
+        // from their initial/updated values to preserve loop semantics)
         for (auto &[a, b] : copyEdges) {
+            int ta = tempList[a], tb = tempList[b];
+            if (func.phiTemps.count(ta) || func.phiTemps.count(tb))
+                continue; // don't coalesce phi temps with their sources
             int ra = ufFind(a), rb = ufFind(b);
             if (ra == rb) continue;
             if (!interferes(ra, rb))

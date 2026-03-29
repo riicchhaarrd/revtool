@@ -96,8 +96,12 @@ private:
         if (constTemps.empty()) return;
 
         // Pass 2: replace all Temp refs with the constant value
+        // Skip assignments to phi temps (their RHS should NOT be const-folded
+        // because they represent loop-carried values)
         for (auto &bb : func.blocks) {
             for (auto &stmt : bb.stmts) {
+                if (stmt.kind == IRStmtKind::Assign && func.phiTemps.count(stmt.destTemp))
+                    continue; // don't const-prop inside phi definitions
                 propagateConstsInExpr(stmt.expr, constTemps);
                 propagateConstsInExpr(stmt.addr, constTemps);
                 for (auto &a : stmt.args) propagateConstsInExpr(a, constTemps);
