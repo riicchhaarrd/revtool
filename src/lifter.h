@@ -804,6 +804,9 @@ private:
                 return IRExpr::mkAddrOf(IRExpr::mkFunc(fit->second));
             { std::string sn = m_mf.symbolNameAtAddress(addr);
               if (!sn.empty()) return IRExpr::mkVar(sn); }
+            // Try nearest symbol for struct field access: globalVar + offset
+            { std::string nearest = m_mf.nearestSymbolName(addr);
+              if (!nearest.empty()) return IRExpr::mkVar(nearest); }
             const Section *dSec = m_mf.sectionForAddress(addr);
             if (dSec && (dSec->segname == "__DATA" || dSec->segname == "__IMPORT")) {
                 char gn[32]; snprintf(gn, sizeof(gn), "g_%X", addr);
@@ -868,6 +871,9 @@ private:
             // Try nlist symbol table for named globals
             std::string symName = m_mf.symbolNameAtAddress(addr);
             if (!symName.empty()) return IRExpr::mkVar(symName);
+            // Try nearest symbol for base+offset access
+            { std::string nearest = m_mf.nearestSymbolName(addr);
+              if (!nearest.empty()) return IRExpr::mkVar(nearest); }
             // For addresses in data sections, use a synthetic global name
             const Section *dataSec = m_mf.sectionForAddress(addr);
             if (dataSec && (dataSec->segname == "__DATA" || dataSec->segname == "__IMPORT")) {
