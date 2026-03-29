@@ -810,7 +810,8 @@ public:
         // &0->field_X → 0xX
         cleaned.replace("&0->field_", "0x__F");
         cleaned.replace("&(0)->field_", "0x__F");
-        // &VAR->field_1 → (VAR + 1) — general case for non-pointer bases
+        // &VAR->field_HEX → (VAR + 0xHEX) — only for synthetic field_XX names
+        // Real field names (resolved from type info) are preserved as &VAR->realName
         {
             // Use a simple scan for &WORD->field_HEX patterns
             int pos = 0;
@@ -827,12 +828,28 @@ public:
                     while (hexEnd < cleaned.size() && QString("0123456789ABCDEFabcdef").contains(cleaned[hexEnd]))
                         ++hexEnd;
                     if (hexEnd > hexStart) {
-                        QString varName = cleaned.mid(start, nameEnd - start);
-                        QString hexOff = cleaned.mid(hexStart, hexEnd - hexStart);
-                        QString replacement = "(" + varName + " + 0x" + hexOff + ")";
-                        cleaned.replace(pos, hexEnd - pos, replacement);
-                        pos += replacement.size();
-                        continue;
+                        // Check this is purely hex (a synthetic field_XX name, not a real name
+                        // like "field_type" that happens to start with "field_")
+                        QString hexPart = cleaned.mid(hexStart, hexEnd - hexStart);
+                        bool allHex = true;
+                        for (int i = 0; i < hexPart.size(); ++i) {
+                            QChar c = hexPart[i];
+                            if (!((c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f'))) {
+                                allHex = false; break;
+                            }
+                        }
+                        // Only convert synthetic field_XX names (all hex chars, followed by
+                        // non-alpha — not a suffix of a real field name)
+                        bool isSynthetic = allHex && (hexEnd >= cleaned.size() ||
+                            !cleaned[hexEnd].isLetterOrNumber());
+                        if (isSynthetic) {
+                            QString varName = cleaned.mid(start, nameEnd - start);
+                            QString hexOff = cleaned.mid(hexStart, hexEnd - hexStart);
+                            QString replacement = "(" + varName + " + 0x" + hexOff + ")";
+                            cleaned.replace(pos, hexEnd - pos, replacement);
+                            pos += replacement.size();
+                            continue;
+                        }
                     }
                 }
                 ++pos;
@@ -1374,7 +1391,12 @@ private:
                     if (declaredVarIds.count(vit->second)) continue;
                     declaredVarIds.insert(vit->second);
                 }
-                out += "    " + QString::fromStdString(inferTempType(id) + " " + tname) + ";\n";
+                std::string itype = inferTempType(id);
+                // Override float type for vars with float/pointer conflict
+                if ((itype == "float" || itype == "vec_t") && vit != m_func.tempToVar.end() &&
+                    m_func.noFloatVars.count(vit->second))
+                    itype = "int";
+                out += "    " + QString::fromStdString(itype + " " + tname) + ";\n";
                 declared.insert(tname);
             }
             // Declare synthetic stack variables (var_XX, arg_XX) not covered by STABS
@@ -2845,8 +2867,20 @@ private:
                     // (not an arithmetic expression like -(v16 * 2))
                     if (!lhs.empty() && (isalpha(lhs[0]) || lhs[0] == '_')) {
                         int off = (int)e->kids[1]->value;
-                        char fname[32]; snprintf(fname, sizeof(fname), "field_%X", (unsigned)off);
-                        result = "&" + lhs + "->" + fname;
+                        // Try type-aware field name
+                        TypeRef baseType = exprType(e->kids[0].get());
+                        std::string access;
+                        if (baseType != NullType && m_types.isStructPointer(baseType)) {
+                            TypeRef structRef = m_types.getPointedStruct(baseType);
+                            if (structRef != NullType)
+                                access = m_types.formatFieldAccess(structRef, off);
+                        }
+                        if (!access.empty())
+                            result = "&" + lhs + "->" + access;
+                        else {
+                            char fname[32]; snprintf(fname, sizeof(fname), "field_%X", (unsigned)off);
+                            result = "&" + lhs + "->" + fname;
+                        }
                         break;
                     }
                 }

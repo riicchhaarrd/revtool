@@ -324,6 +324,7 @@ struct IRFunc {
     std::map<int, int>            tempToVar;   // tempId -> coalesced variable id
     std::map<int, std::string>    varNames;    // varId -> display name
     std::map<int, TypeRef>        varTypes;    // varId -> inferred type
+    std::set<int>                 noFloatVars; // varIds where float type was cleared (float/pointer conflict)
 
     int newTemp(TypeRef t = NullType) {
         int id = nextTemp++;

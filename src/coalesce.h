@@ -414,6 +414,61 @@ public:
                 }
             }
 
+            // Validate: float type applied to a group where a temp is used as
+            // a pointer base (Load/Store address) is a type conflict.
+            // The register was reused for both a float value and a pointer.
+            if (bestType != NullType) {
+                auto *rt = types.resolveType(bestType);
+                bool isFloatType = rt && rt->kind == StabsTypeKind::Float;
+                if (!isFloatType) {
+                    std::string fmt = types.formatType(bestType);
+                    isFloatType = (fmt == "float" || fmt == "double" || fmt == "vec_t");
+                }
+                if (isFloatType) {
+                    std::set<int> groupTids;
+                    for (int idx : members) groupTids.insert(tempList[idx]);
+                    bool usedAsPtr = false;
+                    for (auto &bb : func.blocks) {
+                        for (auto &stmt : bb.stmts) {
+                            std::function<bool(const IRExpr*)> hasGroupTemp;
+                            hasGroupTemp = [&](const IRExpr *e) -> bool {
+                                if (!e) return false;
+                                if (e->op == IROp::Temp && groupTids.count(e->tempId()))
+                                    return true;
+                                for (auto &k : e->kids)
+                                    if (hasGroupTemp(k.get())) return true;
+                                return false;
+                            };
+                            // Recursively find Load/Store nodes — group temp in address = pointer usage
+                            std::function<bool(const IRExpr*)> findPtrUse;
+                            findPtrUse = [&](const IRExpr *e) -> bool {
+                                if (!e) return false;
+                                if (e->op == IROp::Load && !e->kids.empty() &&
+                                    hasGroupTemp(e->kids[0].get()))
+                                    return true;
+                                for (auto &k : e->kids)
+                                    if (findPtrUse(k.get())) return true;
+                                return false;
+                            };
+                            if (findPtrUse(stmt.expr.get())) usedAsPtr = true;
+                            for (auto &a : stmt.args)
+                                if (findPtrUse(a.get())) usedAsPtr = true;
+                            // Temp used in Store address
+                            if (stmt.addr && hasGroupTemp(stmt.addr.get()))
+                                usedAsPtr = true;
+                            if (usedAsPtr) break;
+                        }
+                        if (usedAsPtr) break;
+                    }
+                    if (usedAsPtr) {
+                        bestType = NullType;
+                        func.noFloatVars.insert(varId);
+                        for (int idx : members)
+                            func.tempTypes.erase(tempList[idx]);
+                    }
+                }
+            }
+
             // Record mapping for all temps in this group
             func.varNames[varId] = bestName;
             if (bestType != NullType)
