@@ -1304,12 +1304,14 @@ private:
         IROp cmpOp;
         if (isTest && lhs->op == rhs->op && lhs->op == IROp::Temp &&
             lhs->value == rhs->value) {
-            // test reg, reg → flags based on reg value
+            // test reg, reg → flags based on reg value (OF=0 after test)
             rhs = IRExpr::mkConst(0);
-            if      (jmn == "je"  || jmn == "jz")  cmpOp = IROp::Eq;
-            else if (jmn == "jne" || jmn == "jnz") cmpOp = IROp::Ne;
-            else if (jmn == "js")                   cmpOp = IROp::Slt;
-            else if (jmn == "jns")                  cmpOp = IROp::Sge;
+            if      (jmn == "je"  || jmn == "jz")   cmpOp = IROp::Eq;
+            else if (jmn == "jne" || jmn == "jnz")  cmpOp = IROp::Ne;
+            else if (jmn == "js"  || jmn == "jl" || jmn == "jnge")  cmpOp = IROp::Slt;
+            else if (jmn == "jns" || jmn == "jge" || jmn == "jnl")  cmpOp = IROp::Sge;
+            else if (jmn == "jle" || jmn == "jng")   cmpOp = IROp::Sle;
+            else if (jmn == "jg"  || jmn == "jnle")  cmpOp = IROp::Sgt;
             else cmpOp = IROp::Ne;
         } else if (isTest) {
             // test with different operands: condition is (lhs & rhs) vs 0

@@ -2078,10 +2078,23 @@ private:
                         }
                     }
                     if (!usedArrayNotation) {
-                        char buf[128];
-                        snprintf(buf, sizeof(buf), "*(int *)((char *)%s + 0x%X) = %s",
-                                 base.c_str(), (unsigned)off, val.c_str());
-                        out += pad(indent) + QString::fromStdString(buf) + ";\n";
+                        // Try type-aware struct field access
+                        TypeRef stBaseType = exprType(a->kids[0].get());
+                        std::string access;
+                        if (stBaseType != NullType && m_types.isStructPointer(stBaseType)) {
+                            TypeRef structRef = m_types.getPointedStruct(stBaseType);
+                            if (structRef != NullType)
+                                access = m_types.formatFieldAccess(structRef, off);
+                        }
+                        if (!access.empty()) {
+                            out += pad(indent) + QString::fromStdString(
+                                base + "->" + access + " = " + val) + ";\n";
+                        } else {
+                            char buf[128];
+                            snprintf(buf, sizeof(buf), "*(int *)((char *)%s + 0x%X) = %s",
+                                     base.c_str(), (unsigned)off, val.c_str());
+                            out += pad(indent) + QString::fromStdString(buf) + ";\n";
+                        }
                     }
                 }
                 // Add(base, Mul(idx, scale)) or Add(Mul(idx, scale), base) → base[idx] = val
