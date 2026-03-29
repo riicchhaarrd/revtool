@@ -443,13 +443,21 @@ def norm(s):
     s = re.sub(r'\b_[a-zA-Z]\w{3,}\b', '<C>', s)
     # Strip $ before <C> (e.g., $<C> → <C>)
     s = re.sub(r'\$<C>', '<C>', s)
-    # Normalize parameter loads: movl N(%ebp), %REG → movl N(%ebp), %<R>
-    # (register choice is allocation-dependent, operand offset is semantic)
+    # Normalize register choice in parameter loads only
+    # (register allocation is compiler-dependent, not semantic)
+    # Parameter loads: movl N(%ebp), %REG → movl N(%ebp), %<R>
     s = re.sub(r'^movl (\d+\(%ebp\)), %(eax|ecx|edx|esi|edi)',
                r'movl \1, %<R>', s)
-    # Normalize register-to-memory stores: movl %REG, N(%ebx/esi/edi/ebp)
+    # Register-to-base-offset stores: movl %REG, N(%ebx/esi/edi)
     s = re.sub(r'^movl %(eax|ecx|edx|esi|edi), (\d+\(%e[bsd][xip]\))',
                r'movl %<R>, \2', s)
+    # Normalize XMM register names (float register allocation varies)
+    s = re.sub(r'%xmm[0-7]', '%xmm<N>', s)
+    # Normalize stack-offset stores: movl %REG, N(%esp) and movss ..., N(%esp)
+    s = re.sub(r'^(movl|movss) %(eax|ecx|edx|esi|edi|xmm<N>), (\d+\(%esp\))',
+               r'\1 %<R>, \3', s)
+    s = re.sub(r'^(movl|movss) %(eax|ecx|edx|esi|edi|xmm<N>), \(%esp\)',
+               r'\1 %<R>, (%esp)', s)
     # Normalize branch targets
     s = re.sub(r'^(j\w+) .*', r'\1 <T>', s)
     # Normalize padding instructions (nop, hlt sequences)
@@ -627,7 +635,8 @@ def check_function(name_or_addr, data, text_addr, text_off, verbose=True):
 
     # Strip #include lines and 'static' keyword from decompiled code
     c_code = re.sub(r'#include\s*[<"].*?[>"]', '', c_code)
-    c_code = re.sub(r'^static\s+', '', c_code)  # remove static from function definition
+    # Strip 'static' to prevent inlining/removal when compiling in isolation
+    c_code = re.sub(r'^static\s+', '', c_code)
 
     # Try 1: compile the single function with stubs
     ok, asm_text, errors = compile_to_asm(c_code)
