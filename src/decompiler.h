@@ -2892,8 +2892,9 @@ private:
             return "t" + std::to_string(id);
         }
 
-        // Infer temp type from its defining expression
-        std::string inferTempType(int id) {
+        // Infer temp type from its defining expression (with cycle detection)
+        std::string inferTempType(int id, int depth = 0) {
+            if (depth > 10) return "int"; // depth limit to prevent infinite recursion
             auto it = m_tempDef.find(id);
             if (it == m_tempDef.end() || !it->second) return "int";
             auto *e = it->second;
@@ -3004,7 +3005,7 @@ private:
                             }
                         }
                         // Recursive: check if the operand temp itself infers to float
-                        if (inferTempType(k->tempId()) == "float")
+                        if (inferTempType(k->tempId(), depth + 1) == "float")
                             return "float";
                     }
                     // Check if operand is a Call to a known float-returning function
@@ -3021,7 +3022,7 @@ private:
             // that can be traced to a float value
             if (e->op == IROp::Temp) {
                 // Copy from another temp — recurse
-                return inferTempType(e->tempId());
+                return inferTempType(e->tempId(), depth + 1);
             }
             return "int";
         }

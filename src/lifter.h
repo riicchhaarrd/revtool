@@ -529,8 +529,7 @@ public:
         }
 
         // ── Pass 8: fix loop-carried register state ────────────────
-        // DISABLED pending crash fix (segfault on some functions)
-        if (false && (int)func.blocks.size() <= 50 && func.nextTemp < 500) {
+        if ((int)func.blocks.size() >= 3) {
             // Compute dominators
             int n = (int)func.blocks.size();
             func.idom.assign(n, -1);
@@ -641,12 +640,19 @@ public:
                     }
                 }
 
+                // Limit: only process a few induction variables per loop
+                // to avoid cascading replacements and performance issues
+                int inductionCount = 0;
                 for (auto &[baseTemp, loopTemp] : inductionMap) {
+                    if (inductionCount++ >= 5) break; // limit per loop
 
-                    // Insert copies instead of phi (emitter doesn't handle phis from pass 8)
-                    // phiTemp = baseTemp (at preheader predecessors)
-                    // phiTemp = loopTemp (at back-edge predecessors)
+                    // Sanity: skip if baseTemp == loopTemp (no actual induction)
+                    if (baseTemp == loopTemp) continue;
+                    // Skip if baseTemp is already a phi temp from a previous iteration
+                    if (baseTemp >= func.nextTemp - 20) continue;
+
                     int phiTemp = func.newTemp(func.tempType(baseTemp));
+                    func.phiTemps.insert(phiTemp); // mark as phi for copy-prop skip
                     bool hasSources = false;
                     for (int pred : header.preds) {
                         if (pred < 0 || pred >= n) continue;
