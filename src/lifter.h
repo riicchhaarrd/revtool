@@ -1487,20 +1487,21 @@ private:
                 std::string retStr = m_types.formatType(m_func->returnType);
                 bool isDefaultInt = (retStr == "int" || retStr == "Bool" || retStr == "BOOL");
                 if (isDefaultInt) {
+                    bool isVoid = false;
                     // If the block has NO statements, the function is an empty stub → void
-                    if (bb.stmts.empty()) {
-                        bb.stmts.push_back(IRStmt::mkReturn());
-                        return;
+                    if (bb.stmts.empty()) isVoid = true;
+                    else {
+                        // If the last statement is a Store/VarSet, EAX is leftover → void
+                        auto &lastStmt = bb.stmts.back();
+                        if (lastStmt.kind == IRStmtKind::Store ||
+                            lastStmt.kind == IRStmtKind::VarSet)
+                            isVoid = true;
+                        // If the last statement is a Call (void call), the function is void
+                        if (lastStmt.kind == IRStmtKind::Call)
+                            isVoid = true;
                     }
-                    // If the last statement is a Store/VarSet, EAX is leftover → void
-                    auto &lastStmt = bb.stmts.back();
-                    if (lastStmt.kind == IRStmtKind::Store ||
-                        lastStmt.kind == IRStmtKind::VarSet) {
-                        bb.stmts.push_back(IRStmt::mkReturn());
-                        return;
-                    }
-                    // If the last statement is a Call (void call), the function is void
-                    if (lastStmt.kind == IRStmtKind::Call) {
+                    if (isVoid) {
+                        m_func->detectedVoid = true;
                         bb.stmts.push_back(IRStmt::mkReturn());
                         return;
                     }
