@@ -168,12 +168,49 @@ private:
 
             // t = expr -> t has type of expr
             TypeRef exprT = inferExprType(stmt.expr.get());
-            if (exprT != NullType)
-                setType(stmt.destTemp, exprT);
+            if (exprT != NullType) {
+                // Don't propagate union/struct types to scalar temps
+                auto *et = m_types->resolveType(exprT);
+                if (et && (et->kind == StabsTypeKind::Union || et->kind == StabsTypeKind::Struct))
+                    exprT = NullType;
+                // Also check by formatted name (cross-CU type conflicts)
+                if (exprT != NullType) {
+                    std::string fmt = m_types->formatType(exprT);
+                    if (fmt.find("DvarValue") != std::string::npos ||
+                        fmt.find("DvarLimits") != std::string::npos ||
+                        fmt.find("union ") == 0 || fmt.find("struct ") == 0)
+                        exprT = NullType;
+                }
+                if (exprT != NullType)
+                    setType(stmt.destTemp, exprT);
+            }
 
-            // t = otherTemp -> same type (union)
+            // t = otherTemp -> propagate type (but don't unite if struct/union
+            // to avoid spreading struct types to unrelated temps)
             if (stmt.expr->op == IROp::Temp) {
-                unite(stmt.destTemp, stmt.expr->tempId());
+                int srcTemp = stmt.expr->tempId();
+                TypeRef srcType = NullType;
+                auto sit = m_knownType.find(find(srcTemp));
+                if (sit != m_knownType.end()) srcType = sit->second;
+                bool isStructType = false;
+                if (srcType != NullType) {
+                    auto *st = m_types->resolveType(srcType);
+                    isStructType = st && (st->kind == StabsTypeKind::Struct ||
+                                          st->kind == StabsTypeKind::Union);
+                    // Also check formatted name for cross-CU conflicts
+                    if (!isStructType) {
+                        std::string fmt = m_types->formatType(srcType);
+                        if (fmt.find("State") != std::string::npos ||
+                            fmt.find("_s") != std::string::npos)
+                            isStructType = true;
+                    }
+                }
+                if (isStructType) {
+                    // Only set type, don't merge — prevents struct type spreading
+                    if (exprT == NullType) setType(stmt.destTemp, srcType);
+                } else {
+                    unite(stmt.destTemp, srcTemp);
+                }
             }
 
             // Assign from Call: propagate return type and match arg types
@@ -331,9 +368,28 @@ private:
         }
         if (e->op == IROp::Field) return e->typeRef;
         if (e->op == IROp::Call) return e->typeRef;
+        // &expr → pointer to expr's type (don't propagate struct types through AddrOf)
+        if (e->op == IROp::AddrOf) return NullType;
 
         // Load(addr) -> type is the pointee type of addr
         if (e->op == IROp::Load && !e->kids.empty()) {
+            // Special case: Load(Add(structPtr, const)) → field type
+            auto *addr = e->kids[0].get();
+            if (addr && addr->op == IROp::Add && addr->kids.size() == 2 &&
+                addr->kids[1] && addr->kids[1]->isConst()) {
+                TypeRef baseType = inferExprType(addr->kids[0].get());
+                if (baseType != NullType) {
+                    TypeRef pointee = m_types->derefPointer(baseType);
+                    if (pointee != NullType) {
+                        auto *pt = m_types->resolveType(pointee);
+                        if (pt && (pt->kind == StabsTypeKind::Struct || pt->kind == StabsTypeKind::Union)) {
+                            // Don't return the struct type — return NullType so the
+                            // temp gets a scalar type from context instead
+                            return NullType;
+                        }
+                    }
+                }
+            }
             TypeRef addrType = inferExprType(e->kids[0].get());
             if (addrType != NullType) {
                 TypeRef pointee = m_types->derefPointer(addrType);
@@ -360,6 +416,23 @@ private:
                 if (e->op == IROp::Add && isPointerType(rhsT)) return rhsT;
             }
 
+            // For Mul/Div, never propagate struct/union types (arithmetic = scalar)
+            if (e->op == IROp::Mul || e->op == IROp::SDiv || e->op == IROp::UDiv ||
+                e->op == IROp::SMod || e->op == IROp::UMod) {
+                auto check = [&](TypeRef t) -> bool {
+                    if (t == NullType) return false;
+                    auto *rt = m_types->resolveType(t);
+                    if (rt && (rt->kind == StabsTypeKind::Struct ||
+                               rt->kind == StabsTypeKind::Union ||
+                               rt->kind == StabsTypeKind::Pointer))
+                        return true;
+                    // Check formatted name for cross-CU conflicts
+                    std::string fmt = m_types->formatType(t);
+                    return fmt.find("State") != std::string::npos;
+                };
+                if (check(lhsT)) lhsT = NullType;
+                if (check(rhsT)) rhsT = NullType;
+            }
             // Otherwise propagate non-null types
             if (lhsT != NullType) return lhsT;
             if (rhsT != NullType) return rhsT;

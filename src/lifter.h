@@ -2303,28 +2303,51 @@ private:
         if ((mn == "minss" || mn == "minsd" || mn == "minps" || mn == "minpd") && n == 2) {
             auto a = readSSEOp(o[0], mn.find('d') != std::string::npos);
             auto b = readSSEOp(o[1], mn.find('d') != std::string::npos);
-            if (a && b) writeOp(o[0], IRExpr::mkVar("fminf(" + varText(std::move(a)) + ", " + varText(std::move(b)) + ")"), bb);
+            if (a && b) {
+                std::vector<std::unique_ptr<IRExpr>> args;
+                args.push_back(std::move(a));
+                args.push_back(std::move(b));
+                writeOp(o[0], IRExpr::mkCall("fminf", std::move(args)), bb);
+            }
             return true;
         }
         if ((mn == "maxss" || mn == "maxsd" || mn == "maxps" || mn == "maxpd") && n == 2) {
             auto a = readSSEOp(o[0], mn.find('d') != std::string::npos);
             auto b = readSSEOp(o[1], mn.find('d') != std::string::npos);
-            if (a && b) writeOp(o[0], IRExpr::mkVar("fmaxf(" + varText(std::move(a)) + ", " + varText(std::move(b)) + ")"), bb);
+            if (a && b) {
+                std::vector<std::unique_ptr<IRExpr>> args;
+                args.push_back(std::move(a));
+                args.push_back(std::move(b));
+                writeOp(o[0], IRExpr::mkCall("fmaxf", std::move(args)), bb);
+            }
             return true;
         }
         if ((mn == "sqrtss" || mn == "sqrtsd" || mn == "sqrtps" || mn == "sqrtpd") && n == 2) {
             auto src = readSSEOp(o[1], mn.find('d') != std::string::npos);
-            if (src) writeOp(o[0], IRExpr::mkVar("sqrtf(" + varText(std::move(src)) + ")"), bb);
+            if (src) {
+                std::vector<std::unique_ptr<IRExpr>> args;
+                args.push_back(std::move(src));
+                writeOp(o[0], IRExpr::mkCall("sqrtf", std::move(args)), bb);
+            }
             return true;
         }
         if ((mn == "rsqrtss" || mn == "rsqrtps") && n == 2) {
             auto src = readSSEOp(o[1], false);
-            if (src) writeOp(o[0], IRExpr::mkVar("(1.0f / sqrtf(" + varText(std::move(src)) + "))"), bb);
+            if (src) {
+                std::vector<std::unique_ptr<IRExpr>> args;
+                args.push_back(std::move(src));
+                auto sqrtCall = IRExpr::mkCall("sqrtf", std::move(args));
+                writeOp(o[0], IRExpr::mkBinary(IROp::SDiv,
+                    IRExpr::mkVar("1.0f"), std::move(sqrtCall)), bb);
+            }
             return true;
         }
         if ((mn == "rcpss" || mn == "rcpps") && n == 2) {
             auto src = readSSEOp(o[1], false);
-            if (src) writeOp(o[0], IRExpr::mkVar("(1.0f / " + varText(std::move(src)) + ")"), bb);
+            if (src) {
+                writeOp(o[0], IRExpr::mkBinary(IROp::SDiv,
+                    IRExpr::mkVar("1.0f"), std::move(src)), bb);
+            }
             return true;
         }
 

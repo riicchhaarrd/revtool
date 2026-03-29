@@ -327,9 +327,8 @@ public:
                 if (rt && (rt->kind == StabsTypeKind::Struct || rt->kind == StabsTypeKind::Union))
                     isStructPtrType = true;
                 if (rt && rt->kind == StabsTypeKind::Pointer) {
-                    auto *pt = types.resolveType(rt->targetType);
-                    if (pt && (pt->kind == StabsTypeKind::Struct || pt->kind == StabsTypeKind::Union))
-                        isStructPtrType = true;
+                    // ANY pointer type used in multiplication is wrong
+                    isStructPtrType = true;
                 }
                 // Also check by formatted name — STABS type table conflicts can
                 // cause resolveType to return Int for what's actually a struct
@@ -345,10 +344,13 @@ public:
                     };
                     if (!fmtType.empty() && !scalarTypes.count(fmtType) &&
                         fmtType.find("*") == std::string::npos) {
-                        // Check if it looks like a struct (has _s or State in name)
+                        // Check if it looks like a struct/union
                         if (fmtType.find("_s") != std::string::npos ||
                             fmtType.find("State") != std::string::npos ||
-                            fmtType.find("Info") != std::string::npos) {
+                            fmtType.find("Info") != std::string::npos ||
+                            fmtType.find("Dvar") != std::string::npos ||
+                            fmtType.find("union ") == 0 ||
+                            fmtType.find("struct ") == 0) {
                             isStructPtrType = true;
                         }
                     }
