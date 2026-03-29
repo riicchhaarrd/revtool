@@ -289,7 +289,7 @@ def compile_to_asm(c_code):
     types_block = '\n'.join(ordered)
     full = STUBS + '\n' + types_block + '\n' + func_protos + '\n' + c_code
 
-    # Try compile
+    # Try compile with extracted types
     ok, stdout, stderr = _try_compile(full)
     if ok: return True, stdout, stderr
 

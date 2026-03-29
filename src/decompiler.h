@@ -2688,10 +2688,28 @@ private:
                     }
                 }
                 // Try folding each child individually for partial simplification
+                // Helper: emit a child expression, adding [0] for array-typed vars
+                // used in scalar arithmetic context (Mul/Div)
+                auto emitScalar = [&](IRExpr *child) -> std::string {
+                    std::string s = emitExpr(child);
+                    if (e->op == IROp::Mul || e->op == IROp::SDiv || e->op == IROp::UDiv) {
+                        // Check if emitted result is a bare local array variable name
+                        for (auto &l : m_func.locals) {
+                            if (l.typeRef != NullType && cName(l.name) == s) {
+                                auto *lt = m_types.resolveType(l.typeRef);
+                                if (lt && lt->kind == StabsTypeKind::Array) {
+                                    s += "[0]";
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    return s;
+                };
                 auto emitChild = [&](IRExpr *child) -> std::string {
                     auto [mb, mf] = evalMul(child);
-                    if (mb && mf > 1) return "(" + emitExpr(mb) + " * " + std::to_string(mf) + ")";
-                    return emitExpr(child);
+                    if (mb && mf > 1) return "(" + emitScalar(mb) + " * " + std::to_string(mf) + ")";
+                    return emitScalar(child);
                 };
                 std::string lhs = emitChild(e->kids[0].get());
                 // (base + const) in expression context → &base->field_XX
