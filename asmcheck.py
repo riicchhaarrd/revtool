@@ -260,8 +260,10 @@ def compile_to_asm(c_code):
             if name in already or name in funcs: continue
             if re.search(r'\*\s*\(' + re.escape(name) + r'\)|' + re.escape(name) + r'\s*->', full):
                 stubs += f'extern void *{name};\n'
-            elif name in assign_rhs and name not in stubs_types:
-                stubs += f'extern void *{name};\n'
+            elif (name in assign_rhs and name not in stubs_types and
+                  not name.endswith('_f')):
+                if name not in already:
+                    stubs += f'extern void *{name};\n'
             elif name[0].isupper() or name.endswith('_t'):
                 stubs += f'typedef int {name};\n'
                 # Used in A = B assignment — declare as void* for function pointer compat

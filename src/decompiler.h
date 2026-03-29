@@ -2183,12 +2183,10 @@ private:
                 if (result.empty() && e->value > 0x10000) {
                     std::string sym = m_mf.symbolNameAtAddress((uint32_t)e->value);
                     if (!sym.empty()) {
-                        result = sym;
+                        result = cName(sym);
                     } else {
-                        // Check if address is base+offset into a known global (array element field)
-                        // Search for the nearest symbol below this address
                         std::string nearest = m_mf.nearestSymbolName((uint32_t)e->value);
-                        if (!nearest.empty()) result = nearest;
+                        if (!nearest.empty()) result = cName(nearest);
                     }
                 }
                 if (result.empty()) {
@@ -2731,7 +2729,9 @@ private:
                 result = cName(e->name) + "(";
                 for (size_t i = 0; i < e->kids.size(); ++i) {
                     if (i) result += ", ";
-                    result += emitExpr(e->kids[i].get());
+                    std::string arg = emitExpr(e->kids[i].get());
+                    // Sanitize any remaining non-C identifiers in arguments
+                    result += arg;
                 }
                 result += ")";
                 break;
