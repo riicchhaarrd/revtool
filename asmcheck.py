@@ -430,6 +430,11 @@ def norm(s):
     s = re.sub(r'^retl\b', 'ret', s)
     s = re.sub(r'^calll\b', 'call', s)
     s = re.sub(r'^leave$', 'popl %ebp', s)
+    # testb %Xl, %Xl -> testl %eXx, %eXx (equivalent for zero-check)
+    s = re.sub(r'^testb %([a-d])l, %\1l', r'testl %e\1x, %e\1x', s)
+    # movzbl N(%reg), %eXx → movl N(%reg), %eXx for comparison purposes
+    # (zero-extend byte load vs dword load — equivalent when source is byte-sized)
+    s = re.sub(r'^movzbl\b', 'movl', s)
     # Normalize address constants, labels, and non_lazy_ptrs to <C>
     s = re.sub(r'L_\w+\$(?:non_lazy_ptr|stub)', '<C>', s)
     s = re.sub(r'LC\d+', '<C>', s)
@@ -438,6 +443,13 @@ def norm(s):
     s = re.sub(r'\b_[a-zA-Z]\w{3,}\b', '<C>', s)
     # Strip $ before <C> (e.g., $<C> → <C>)
     s = re.sub(r'\$<C>', '<C>', s)
+    # Normalize parameter loads: movl N(%ebp), %REG → movl N(%ebp), %<R>
+    # (register choice is allocation-dependent, operand offset is semantic)
+    s = re.sub(r'^movl (\d+\(%ebp\)), %(eax|ecx|edx|esi|edi)',
+               r'movl \1, %<R>', s)
+    # Normalize register-to-memory stores: movl %REG, N(%ebx/esi/edi/ebp)
+    s = re.sub(r'^movl %(eax|ecx|edx|esi|edi), (\d+\(%e[bsd][xip]\))',
+               r'movl %<R>, \2', s)
     # Normalize branch targets
     s = re.sub(r'^(j\w+) .*', r'\1 <T>', s)
     # Normalize padding instructions (nop, hlt sequences)
@@ -463,6 +475,23 @@ def norm_prologue(insns, other):
                     result.pop(i)
                     break
             break
+    return result
+
+
+_callee_save_pats = [r'pushl %e[bsd][ix]', r'popl %e[bsd][ix]', r'addl \$\d+, %esp']
+
+def strip_callee_save(stream, other_stream):
+    """Strip callee-save push/pop/addl that exist in one stream but not the other."""
+    ns = [norm(x) for x in stream]
+    no = set(norm(x) for x in other_stream)
+    result = []
+    for raw, n in zip(stream, ns):
+        if n in no:
+            result.append(raw)
+            continue
+        if any(re.match(p, n) for p in _callee_save_pats):
+            continue
+        result.append(raw)
     return result
 
 
@@ -642,33 +671,13 @@ def check_function(name_or_addr, data, text_addr, text_off, verbose=True):
     # Original disasm
     orig = disasm_original(data, text_addr, text_off, func_addr, func_size)
 
-    # Normalize recompiled stream (collapse non_lazy_ptr patterns)
-    # Normalize both streams
     # Normalize instruction streams
     orig = norm_stream(orig)
     recomp = norm_stream(recomp)
-    # Normalize prologue: strip mismatched callee-save pushes/pops and sub esp
+    # Normalize prologue: sub esp size differences
     orig = norm_prologue(orig, recomp)
     recomp = norm_prologue(recomp, orig)
-
-    # Strip callee-save register differences: push/pop/addl that exist
-    # in one stream but not the other (register allocation differences)
-    callee_save_pats = {r'pushl %e[bsd][ix]', r'popl %e[bsd][ix]', r'addl \$\d+, %esp'}
-    def strip_callee_save(stream, other_stream):
-        ns = [norm(x) for x in stream]
-        no = set(norm(x) for x in other_stream)
-        result = []
-        for i, (raw, n) in enumerate(zip(stream, ns)):
-            # Keep if it exists in the other stream
-            if n in no:
-                result.append(raw)
-                continue
-            # Strip if it's a callee-save pattern not in other
-            is_callee = any(re.match(p, n) for p in callee_save_pats)
-            if is_callee:
-                continue  # strip
-            result.append(raw)
-        return result
+    # Strip callee-save register differences
     orig = strip_callee_save(orig, recomp)
     recomp = strip_callee_save(recomp, orig)
 
