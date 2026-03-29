@@ -519,8 +519,9 @@ def check_function(name_or_addr, data, text_addr, text_off, verbose=True):
             print(f'{func_name}: decompilation failed')
         return None
 
-    # Strip #include lines from decompiled code
+    # Strip #include lines and 'static' keyword from decompiled code
     c_code = re.sub(r'#include\s*[<"].*?[>"]', '', c_code)
+    c_code = re.sub(r'^static\s+', '', c_code)  # remove static from function definition
 
     # Try 1: compile the single function with stubs
     ok, asm_text, errors = compile_to_asm(c_code)

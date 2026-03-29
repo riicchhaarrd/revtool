@@ -2472,7 +2472,17 @@ private:
                             result = "(" + base + " + " + std::to_string(off) + ")";
                         }
                     } else {
-                        result = "&" + emitExpr(inner);
+                        // Check if inner is a field_X on a non-pointer base
+                        // → use pointer arithmetic instead of ->
+                        std::string innerStr = emitExpr(inner);
+                        if (innerStr.find("->field_") != std::string::npos) {
+                            // Convert &(base->field_N) to (base + N)
+                            std::string base2 = emitExpr(inner->kids[0].get());
+                            int off2 = (int)inner->value;
+                            result = "(" + base2 + " + " + std::to_string(off2) + ")";
+                        } else {
+                            result = "&" + innerStr;
+                        }
                     }
                 } else {
                     result = "&" + emitExpr(inner);
@@ -2553,11 +2563,10 @@ private:
                     // or the field may be at a different sub-offset within a larger field.
                     fieldValid = false;
                 }
-                if (isSynthField && !fieldValid) {
-                    // Struct is empty/forward-declared — use cast-based pointer arithmetic
+                if (isSynthField) {
+                    // Synthetic field: always use cast-based pointer arithmetic
                     int off = (int)e->value;
-                    result = "*(int *)((char *)" + base + " + 0x" +
-                        ([&]{ char buf[16]; snprintf(buf, sizeof(buf), "%X", off); return std::string(buf); })() + ")";
+                    result = "*(int *)((char *)(" + base + ") + " + std::to_string(off) + ")";
                 } else {
                     result = base + "->" + e->name;
                 }
@@ -2717,10 +2726,14 @@ private:
                 if (e->op == IROp::Add && e->kids[1] && e->kids[1]->isConst() &&
                     e->kids[1]->value > 0 && e->kids[1]->value < 0x10000 &&
                     (e->kids[0]->op == IROp::Var || e->kids[0]->op == IROp::Temp)) {
-                    int off = (int)e->kids[1]->value;
-                    char fname[32]; snprintf(fname, sizeof(fname), "field_%X", (unsigned)off);
-                    result = "&" + lhs + "->" + fname;
-                    break;
+                    // Only use &base->field_X when the emitted base is a simple identifier
+                    // (not an arithmetic expression like -(v16 * 2))
+                    if (!lhs.empty() && (isalpha(lhs[0]) || lhs[0] == '_')) {
+                        int off = (int)e->kids[1]->value;
+                        char fname[32]; snprintf(fname, sizeof(fname), "field_%X", (unsigned)off);
+                        result = "&" + lhs + "->" + fname;
+                        break;
+                    }
                 }
                 // Simplify: (x + -N) → (x - N)
                 if (e->op == IROp::Add && e->kids[1] && e->kids[1]->isConst() &&
