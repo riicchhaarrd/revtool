@@ -130,6 +130,7 @@ public:
 
             // For each phi, insert a copy at the end of each predecessor
             for (auto &phi : phis) {
+                func.phiTemps.insert(phi.destTemp);
                 for (auto &[predId, srcTemp] : phi.phiSources) {
                     if (srcTemp < 0) continue;
                     if (predId < 0 || predId >= (int)func.blocks.size()) continue;

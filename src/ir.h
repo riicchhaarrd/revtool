@@ -307,6 +307,7 @@ struct IRFunc {
     TypeRef                  returnType = NullType;
     bool                     isStatic = false;
     bool                     detectedVoid = false; // heuristic: function returns void despite STABS saying int
+    std::set<int>            phiTemps;    // temps from phi nodes — don't const-propagate
     std::vector<StabsTypedVar> params;
     std::vector<StabsTypedVar> locals;
     int                      sourceFileIdx = -1;

@@ -1492,6 +1492,8 @@ private:
                 for (auto &stmt : bb.stmts) {
                     if (stmt.kind != IRStmtKind::Assign) continue;
                     if (!stmt.expr) continue;
+                    // NOTE: phi temps (from destroySSA) are NOT skipped here because
+                    // skipping them breaks the emitter for large functions.
                     // t = var → replace all uses of t with var
                     if (stmt.expr->op == IROp::Var) {
                         m_copyMap[stmt.destTemp] = stmt.expr->name;
