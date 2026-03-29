@@ -708,10 +708,31 @@ def check_function(name_or_addr, data, text_addr, text_off, verbose=True):
         if s.startswith('subl') or s.startswith('pushl'):
             continue
         break
-    if use_regparm:
-        c_code = re.sub(r'^(static\s+)?(\w)', r'__attribute__((regparm(3))) \2', c_code)
-    # Strip 'static' to prevent inlining/removal when compiling in isolation
-    c_code = re.sub(r'^static\s+', '', c_code)
+    if use_regparm and c_code.startswith('static'):
+        # Keep static + noinline so GCC's IPA passes float params in XMM registers.
+        # Add a dummy caller to prevent the static function from being removed.
+        c_code = re.sub(r'^static\s+', 'static __attribute__((noinline)) ', c_code)
+        # Find the function name (after attribute, return type)
+        # Pattern: static __attribute__(...) RETTYPE FNAME(
+        m_fn = re.search(r'\)\s+\w+\s+(\w+)\s*\(', c_code)
+        if m_fn:
+            fname = m_fn.group(1)
+            # Find the full param list
+            ps = c_code.index('(', m_fn.end() - 1)
+            depth = 0; pe = ps
+            for ci in range(ps, len(c_code)):
+                if c_code[ci] == '(': depth += 1
+                if c_code[ci] == ')': depth -= 1
+                if depth == 0: pe = ci; break
+            params = re.sub(r'\s+', ' ', c_code[ps+1:pe])
+            pnames = []
+            for p in params.split(','):
+                w = p.strip().replace('*', ' * ').split()
+                if w: pnames.append(w[-1].strip('*'))
+            c_code += f'\nvoid __dummy({params}) {{ {fname}({",".join(pnames)}); }}\n'
+    elif c_code.startswith('static'):
+        # Strip 'static' to prevent inlining/removal when compiling in isolation
+        c_code = re.sub(r'^static\s+', '', c_code)
 
     # Try 1: compile the single function with stubs
     ok, asm_text, errors = compile_to_asm(c_code)

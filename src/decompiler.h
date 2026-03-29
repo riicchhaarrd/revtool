@@ -3291,9 +3291,11 @@ private:
                 }
                 if (vslot >= 0 && !e->kids.empty()) {
                     std::string thisArg = emitExpr(e->kids[0].get());
+                    // Use _Bool return type for vtable calls (most return bool,
+                    // and _Bool generates testb instead of testl for condition checks)
                     char buf[128];
                     snprintf(buf, sizeof(buf),
-                        "((int(*)(void*))(((void**)(*(void**)%s))[%d]))(",
+                        "((_Bool(*)(void*))(((void**)(*(void**)%s))[%d]))(",
                         thisArg.c_str(), vslot);
                     result = buf;
                     for (size_t i = 0; i < e->kids.size(); ++i) {
