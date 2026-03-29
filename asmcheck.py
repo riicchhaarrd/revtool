@@ -35,6 +35,12 @@ typedef unsigned char byte;
 typedef int OSStatus; typedef short OSErr; typedef int Boolean;
 typedef unsigned int OSType; typedef void *CursHandle;
 typedef void *WindowRef; typedef void *MenuRef; typedef void *CGrafPtr;
+typedef void *GDHandle; typedef void *CursPtr;
+typedef unsigned int CGDirectDisplayID;
+typedef unsigned char Str255[256];
+typedef struct { float x, y; } CGPoint;
+typedef struct { float w, h; } CGSize;
+typedef struct { CGPoint origin; CGSize size; } CGRect;
 #define NULL ((void*)0)
 float floorf(float); float ceilf(float); float sqrtf(float);
 float sinf(float); float cosf(float); float tanf(float);
@@ -175,7 +181,7 @@ def compile_to_asm(c_code):
     # Pre-extract all struct/typedef types referenced in the code from the types header
     extracted = {}  # name -> definition (ordered by dependency)
     # Find struct references AND typedef names (Type_t patterns used as pointer types)
-    refs = set(re.findall(r'struct\s+(\w+)', c_code))
+    refs = set(re.findall(r'(?:struct|union)\s+(\w+)', c_code))
     # Also find typedef names used as pointer base types: "type_t *var"
     # Skip simple types already in STUBS (vec_t, qboolean, etc.)
     stubs_types = set(re.findall(r'typedef\s+\S+.*?\s+(\w+)\s*[;\[]', STUBS))
@@ -244,9 +250,28 @@ def compile_to_asm(c_code):
         for m in re.finditer(r"syntax error before " + q + r"(\w+)" + cq, stderr): undeclared.add(m.group(1))
         # Remove conflicting stubs
         for m in re.finditer(r"conflicting types for " + q + r"(\w+)" + cq, stderr):
-            full = re.sub(r'^extern\s+\w+\s+\*?' + re.escape(m.group(1)) + r'\s*;.*\n', '', full, flags=re.MULTILINE)
+            cname = re.escape(m.group(1))
+            full = re.sub(r'^extern\s+\w+\s+\*?' + cname + r'\s*;.*\n', '', full, flags=re.MULTILINE)
+            full = re.sub(r'^void\s+' + cname + r'\s*\(void\)\s*;.*\n', '', full, flags=re.MULTILINE)
+            full = re.sub(r'^typedef\s+int\s+' + cname + r'\s*;.*\n', '', full, flags=re.MULTILINE)
+        # Also handle "redefinition of 'struct X'" — remove the duplicate
+        for m in re.finditer(r"redefinition of " + q + r"struct\s+(\w+)" + cq, stderr):
+            cname = re.escape(m.group(1))
+            # Remove the SECOND definition (keep the first from pre-extraction)
+            # Find all occurrences and remove all but the first
+            pattern = r'struct ' + cname + r' \{[^}]*\};\n'
+            matches = list(re.finditer(pattern, full))
+            if len(matches) > 1:
+                # Remove from the end to preserve indices
+                for match in reversed(matches[1:]):
+                    full = full[:match.start()] + full[match.end():]
+        for m in re.finditer(r"redeclared as different kind of symbol.*\n.*previous declaration of " + q + r"(\w+)" + cq, stderr):
+            cname = re.escape(m.group(1))
+            full = re.sub(r'^extern\s+\w+\s+\*?' + cname + r'\s*;.*\n', '', full, flags=re.MULTILINE)
+            full = re.sub(r'^void\s+' + cname + r'\s*\(void\)\s*;.*\n', '', full, flags=re.MULTILINE)
+            full = re.sub(r'^typedef\s+int\s+' + cname + r'\s*;.*\n', '', full, flags=re.MULTILINE)
         if not undeclared: break
-        already = set(re.findall(r'(?:typedef|struct|extern)\s+\w+.*?\s+(\w+)\s*[;\{]', full))
+        already = set(re.findall(r'(?:typedef|struct|union|extern|enum)\s+\w+.*?\s+(\w+)\s*[;\{]', full))
         funcs = set(re.findall(r'\b(?:int|void|float|static)\s+(\w+)\s*\(', full))
         stubs = ''
         # Find names used in direct assignments (A = B; where B is a bare identifier)
@@ -256,18 +281,23 @@ def compile_to_asm(c_code):
             rhs = m.group(1)
             if not rhs[0].isdigit() and rhs not in ('0', 'NULL', 'true', 'false'):
                 assign_rhs.add(rhs)
+        # Detect names passed as arguments to Cmd_AddCommand/Cmd_AddServerCommand
+        # (these are function pointer arguments)
+        call_args = set()
+        for m in re.finditer(r'(?:Cmd_AddCommand|Cmd_AddServerCommand|Cmd_AddCommandInternal)\s*\([^,]+,\s*(\w+)', full):
+            call_args.add(m.group(1))
         for name in sorted(undeclared):
             if name in already or name in funcs: continue
             if re.search(r'\*\s*\(' + re.escape(name) + r'\)|' + re.escape(name) + r'\s*->', full):
                 stubs += f'extern void *{name};\n'
-            elif (name in assign_rhs and name not in stubs_types and
-                  not name.endswith('_f')):
+            elif name.endswith('_f') or (name in call_args and not name[0].isdigit()
+                                         and name not in stubs_types):
+                stubs += f'void {name}(void);\n'
+            elif (name in assign_rhs and name not in stubs_types):
                 if name not in already:
                     stubs += f'extern void *{name};\n'
             elif name[0].isupper() or name.endswith('_t'):
                 stubs += f'typedef int {name};\n'
-                # Used in A = B assignment — declare as void* for function pointer compat
-                stubs += f'extern void *{name};\n'
             else:
                 stubs += f'extern int {name};\n'
         if not stubs: break

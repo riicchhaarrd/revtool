@@ -986,6 +986,15 @@ private:
                 }
                 return;
             }
+            // Pre-emit union dependencies (small, self-contained types)
+            for (auto &f : t->fields) {
+                if (f.typeRef == NullType) continue;
+                auto *ft = types.resolveType(f.typeRef);
+                if (ft && ft->kind == StabsTypeKind::Union &&
+                    !ft->name.empty() && ft->name != t->name &&
+                    !emittedNames.count(ft->name))
+                    emitTypeDefsRecursive(out, types, f.typeRef, emitted, emittedNames, depth + 1);
+            }
             // Check if all field types compile without undefined types.
             // Emit structs with unknown field types as offset-based int arrays.
             {
