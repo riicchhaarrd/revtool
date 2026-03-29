@@ -440,22 +440,42 @@ def norm(s):
 
 
 def norm_prologue(insns, other):
-    """Remove sub esp,N from prologue if the other stream has a different size or no sub esp.
-    Also normalize leave;ret vs popl %ebp;ret in epilogue."""
+    """Normalize prologue/epilogue differences between original and recompiled:
+    - Remove sub esp,N if sizes differ or one has none
+    - Remove callee-save pushes/pops that don't appear in the other stream
+    - Normalize leave;ret vs popl %ebp;ret in epilogue."""
     result = list(insns)
-    # Check if first few instructions have sub esp
-    for i in range(min(3, len(result))):
+    # Build set of callee-save regs pushed in each stream's prologue
+    def prologue_pushes(stream):
+        pushes = []
+        for inst in stream[:6]:  # check first 6 instructions
+            n = norm(inst)
+            m = re.match(r'pushl (%\w+)', n)
+            if m and m.group(1) != '%ebp':  # skip frame pointer push
+                pushes.append(n)
+            elif not m and not n.startswith('movl %esp'):
+                break  # stop at first non-prologue instruction
+        return pushes
+    my_pushes = set(prologue_pushes(result))
+    other_pushes = set(prologue_pushes(other))
+    # Remove callee-save pushes that are in mine but not in other
+    extra = my_pushes - other_pushes
+    if extra:
+        result = [inst for inst in result if norm(inst) not in extra]
+        # Also remove matching pops from epilogue
+        for push in extra:
+            pop = push.replace('pushl', 'popl')
+            result = [inst for inst in result if norm(inst) != pop]
+    # Handle sub esp differences: normalize value if sizes differ, remove if only one has it
+    for i in range(min(5, len(result))):
         n = norm(result[i])
         if re.match(r'subl? \$?\d+, %esp', n):
-            # Check if other stream has a matching sub esp at same position
             if i < len(other):
                 on = norm(other[i])
                 if re.match(r'subl? \$?\d+, %esp', on) and on != n:
-                    # Different sizes — normalize both to generic
                     result[i] = 'subl $<N>, %esp'
                     break
                 elif not re.match(r'subl? \$?\d+, %esp', on):
-                    # Other has no sub esp — remove ours
                     result.pop(i)
                     break
             break

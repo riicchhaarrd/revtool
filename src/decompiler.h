@@ -1482,6 +1482,7 @@ private:
         std::map<int, TypeRef> m_tempStructPtr;   // temp → struct pointer type (from Field access)
         std::set<int>         m_forceDeclareTemps; // temps that leak as raw tN and need declaration
         std::set<int>         m_inliningTemps;    // cycle guard for temp inlining in emitExpr
+        int                   m_addrDepth = 0;     // >0 when emitting Load/Store address sub-exprs
         std::set<int>         m_loadAddrTemps;    // temps used in Load address expressions
 
         // Force temps with cross-block def/use to be declared (not inlined)
@@ -2037,6 +2038,7 @@ private:
                 std::string val = stmt.expr ? emitExpr(stmt.expr.get()) : "0";
                 if (!stmt.addr) break;
                 auto *a = stmt.addr.get();
+                struct AddrGuard { int &d; AddrGuard(int &d):d(d){d++;} ~AddrGuard(){d--;} } _ag(m_addrDepth);
                 std::string storeCast = "int";
                 if (stmt.storeSize == 1) storeCast = "char";
                 else if (stmt.storeSize == 2) storeCast = "short";
@@ -2386,7 +2388,7 @@ private:
                 result = tryFloatConst((uint32_t)e->value);
                 // Check for FourCC constants (4 printable ASCII bytes)
                 if (result.empty()) result = tryFourCC((uint32_t)e->value);
-                // Try to resolve large constants as global variable addresses
+                // Try to resolve large constants as global variable/function addresses
                 if (result.empty() && e->value > 0x10000) {
                     std::string sym = m_mf.symbolNameAtAddress((uint32_t)e->value);
                     if (!sym.empty()) {
@@ -2394,6 +2396,17 @@ private:
                     } else {
                         std::string nearest = m_mf.nearestSymbolName((uint32_t)e->value);
                         if (!nearest.empty()) result = cName(nearest);
+                    }
+                    // Data symbols need & (address-of) since the constant IS
+                    // the address, not the value at the address.
+                    // Exception: inside Load/Store address expressions, the constant
+                    // is already being used as an address — no & needed.
+                    // Function symbols don't need & (function names decay to pointers).
+                    if (!result.empty() && m_addrDepth == 0) {
+                        auto *sec = m_mf.sectionForAddress((uint32_t)e->value);
+                        bool isData = sec && sec->segname != "__TEXT";
+                        if (isData)
+                            result = "&" + result;
                     }
                 }
                 if (result.empty()) {
@@ -2503,6 +2516,7 @@ private:
 
             case IROp::Load: {
                 auto *addr = e->kids[0].get();
+                m_addrDepth++;
                 // (base + index*scale + const) → base->array_NN[index] pattern
                 if (addr && addr->op == IROp::Add && addr->kids.size() == 2 &&
                     addr->kids[1]->isConst() && addr->kids[1]->value > 0 &&
@@ -2623,6 +2637,7 @@ private:
                         result = "*(int *)(" + addrStr + ")";
                     }
                 }
+                m_addrDepth--;
                 break;
             }
 
