@@ -528,6 +528,175 @@ public:
             }
         }
 
+        // ── Pass 8: fix loop-carried register state ────────────────
+        // DISABLED: needs optimization — current O(n³) is too slow.
+        // TODO: integrate into the SSA pass or use worklist algorithm.
+        if (false) {
+            // Compute dominators
+            int n = (int)func.blocks.size();
+            func.idom.assign(n, -1);
+            func.idom[0] = 0;
+            if (n > 1) {
+                std::vector<int> rpo;
+                std::vector<int> rpoNum(n, -1);
+                {
+                    std::vector<bool> vis(n, false);
+                    std::vector<int> po;
+                    std::vector<std::pair<int,int>> stk = {{0, 0}};
+                    vis[0] = true;
+                    while (!stk.empty()) {
+                        auto &[nd, ci] = stk.back();
+                        auto &sc = func.blocks[nd].succs;
+                        if (ci < (int)sc.size()) {
+                            int s = sc[ci++];
+                            if (s >= 0 && s < n && !vis[s]) { vis[s] = true; stk.push_back({s, 0}); }
+                        } else { po.push_back(nd); stk.pop_back(); }
+                    }
+                    rpo.resize(po.size());
+                    for (int i = 0; i < (int)po.size(); ++i) {
+                        rpo[po.size()-1-i] = po[i];
+                        rpoNum[po[i]] = (int)po.size()-1-i;
+                    }
+                }
+                auto intersect = [&](int b1, int b2) -> int {
+                    while (b1 != b2) {
+                        while (rpoNum[b1] > rpoNum[b2]) b1 = func.idom[b1];
+                        while (rpoNum[b2] > rpoNum[b1]) b2 = func.idom[b2];
+                    }
+                    return b1;
+                };
+                bool changed = true;
+                for (int iter = 0; iter < n && changed; ++iter) {
+                    changed = false;
+                    for (int idx = 1; idx < (int)rpo.size(); ++idx) {
+                        int b = rpo[idx];
+                        int newIdom = -1;
+                        for (int p : func.blocks[b].preds) {
+                            if (p < 0 || p >= n || func.idom[p] == -1) continue;
+                            newIdom = (newIdom == -1) ? p : intersect(newIdom, p);
+                        }
+                        if (newIdom == -1) newIdom = 0;
+                        if (func.idom[b] != newIdom) { func.idom[b] = newIdom; changed = true; }
+                    }
+                }
+            }
+
+            // Detect back edges: B→H where H dominates B
+            std::map<int, std::set<int>> loopHeaders;
+            for (auto &bb : func.blocks) {
+                for (int succ : bb.succs) {
+                    if (succ < 0 || succ >= n) continue;
+                    int runner = bb.id;
+                    bool dominates = false;
+                    int limit = n;
+                    while (runner >= 0 && limit-- > 0) {
+                        if (runner == succ) { dominates = true; break; }
+                        if (runner == func.idom[runner]) break;
+                        runner = func.idom[runner];
+                    }
+                    if (dominates)
+                        loopHeaders[succ].insert(bb.id);
+                }
+            }
+
+            for (auto &[headerId, backEdgeSources] : loopHeaders) {
+                auto &header = func.blocks[headerId];
+                std::set<int> loopBlocks;
+                for (int src : backEdgeSources)
+                    for (int bi = 0; bi < n; ++bi) {
+                        // Block is in loop if header dominates it and it can reach a back-edge source
+                        int r = bi;
+                        bool dominated = false;
+                        int lim = n;
+                        while (r >= 0 && lim-- > 0) {
+                            if (r == headerId) { dominated = true; break; }
+                            if (r == func.idom[r]) break;
+                            r = func.idom[r];
+                        }
+                        if (dominated) loopBlocks.insert(bi);
+                    }
+
+                // Find temps assigned in loop body by induction: t2 = t1 + const
+                std::set<int> loopDefinedTemps;
+                for (int bi : loopBlocks) {
+                    auto &lb = func.blocks[bi];
+                    for (auto &stmt : lb.stmts) {
+                        if (stmt.kind == IRStmtKind::Assign && stmt.destTemp >= 0)
+                            loopDefinedTemps.insert(stmt.destTemp);
+                    }
+                }
+
+                for (int loopTemp : loopDefinedTemps) {
+                    int baseTemp = -1;
+                    for (int bi : loopBlocks) {
+                        auto &lb = func.blocks[bi];
+                        for (auto &stmt : lb.stmts) {
+                            if (stmt.kind != IRStmtKind::Assign || stmt.destTemp != loopTemp) continue;
+                            if (!stmt.expr) continue;
+                            if ((stmt.expr->op == IROp::Add || stmt.expr->op == IROp::Sub) &&
+                                stmt.expr->kids.size() == 2) {
+                                auto *lhs = stmt.expr->kids[0].get();
+                                auto *rhs = stmt.expr->kids[1].get();
+                                if (lhs && lhs->op == IROp::Temp && rhs && rhs->isConst())
+                                    baseTemp = lhs->tempId();
+                                else if (rhs && rhs->op == IROp::Temp && lhs && lhs->isConst())
+                                    baseTemp = rhs->tempId();
+                            }
+                        }
+                    }
+                    if (baseTemp < 0) continue;
+
+                    // Insert copies instead of phi (emitter doesn't handle phis from pass 8)
+                    // phiTemp = baseTemp (at preheader predecessors)
+                    // phiTemp = loopTemp (at back-edge predecessors)
+                    int phiTemp = func.newTemp(func.tempType(baseTemp));
+                    bool hasSources = false;
+                    for (int pred : header.preds) {
+                        if (pred < 0 || pred >= n) continue;
+                        auto &predBlock = func.blocks[pred];
+                        int srcTemp = backEdgeSources.count(pred) ? loopTemp : baseTemp;
+                        // Insert copy before the terminal statement
+                        auto copy = IRStmt::mkAssign(phiTemp,
+                            IRExpr::mkTemp(srcTemp, func.tempType(srcTemp)),
+                            func.tempType(srcTemp));
+                        if (!predBlock.stmts.empty()) {
+                            auto k = predBlock.stmts.back().kind;
+                            if (k == IRStmtKind::Branch || k == IRStmtKind::Jump ||
+                                k == IRStmtKind::Switch || k == IRStmtKind::Return)
+                                predBlock.stmts.insert(predBlock.stmts.end() - 1, std::move(copy));
+                            else
+                                predBlock.stmts.push_back(std::move(copy));
+                        } else {
+                            predBlock.stmts.push_back(std::move(copy));
+                        }
+                        hasSources = true;
+                    }
+                    if (!hasSources) continue;
+
+                    // Replace baseTemp → phiTemp in all loop blocks
+                    for (int bi : loopBlocks) {
+                        auto &lb = func.blocks[bi];
+                        for (auto &stmt : lb.stmts) {
+                            if (stmt.kind == IRStmtKind::Phi) continue;
+                            auto replTemp = [&](std::unique_ptr<IRExpr> &e) {
+                                if (!e) return;
+                                std::vector<IRExpr*> stk = {e.get()};
+                                while (!stk.empty()) {
+                                    auto *nd = stk.back(); stk.pop_back();
+                                    if (nd->op == IROp::Temp && nd->tempId() == baseTemp)
+                                        nd->value = phiTemp;
+                                    for (auto &k : nd->kids) if (k) stk.push_back(k.get());
+                                }
+                            };
+                            replTemp(stmt.expr);
+                            replTemp(stmt.addr);
+                            for (auto &a : stmt.args) replTemp(a);
+                        }
+                    }
+                }
+            }
+        }
+
         cs_free(insn, count);
         cs_close(&cs);
         return func;
