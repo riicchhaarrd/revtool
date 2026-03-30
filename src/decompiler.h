@@ -1040,6 +1040,32 @@ public:
             }
             } // for arrType
         }
+        // Fix impossible nested conditions: if (x == 0) { if (x != 0/> 0) {
+        // The outer == 0 makes the inner always-false → dead code.
+        // Fix by inverting the outer condition to match the inner's expected value.
+        {
+            QStringList cl = cleaned.split('\n');
+            for (int i = 0; i < cl.size(); ++i) {
+                QString t = cl[i].trimmed();
+                if (t.startsWith("if (") && t.endsWith("{") && t.contains("== 0")) {
+                    int eqPos = t.indexOf("== 0");
+                    QString condExpr = t.mid(4, eqPos - 4).trimmed();
+                    if (condExpr.isEmpty()) continue;
+                    for (int j = i + 1; j < std::min(i + 4, (int)cl.size()); ++j) {
+                        QString t2 = cl[j].trimmed();
+                        // Inner condition contradicts outer: != 0, > 0, < 0, etc.
+                        if (t2.startsWith("if (") && t2.contains(condExpr) &&
+                            (t2.contains("!= 0") || t2.contains("> 0") || t2.contains("< 0"))) {
+                            cl[i].replace("== 0", "!= 0");
+                            break;
+                        }
+                        if (!t2.isEmpty() && t2 != "}" && !t2.startsWith("if (") && t2 != "return;")
+                            break;
+                    }
+                }
+            }
+            cleaned = cl.join('\n');
+        }
         QStringList lines = cleaned.split('\n');
         // Pass 1: Remove empty if blocks
         QStringList pass1;

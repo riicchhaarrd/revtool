@@ -399,9 +399,17 @@ def compile_to_asm(c_code):
             # Use static for real globals to get direct addressing (no non_lazy_ptr).
             # Don't use static for decompiler-generated names (vN, varN, tN, gN)
             # which might shadow local variables.
+            # Use static for read-only globals (direct addressing, no NLP).
+            # But NOT for globals that are written to in the function
+            # (static enables constant folding of initial value = 0).
             is_real_global = (not re.match(r'^(v\d|var_|t\d)', name) and
                               len(name) > 2 and name[0].islower())
+            is_written = bool(re.search(re.escape(name) + r'\s*=\s*', full))
             qual = 'static ' if is_real_global else ''
+            # Written-to globals must be extern to prevent constant folding
+            # (static globals with default init=0 get folded by the compiler)
+            if is_written and is_real_global:
+                qual = 'extern '
             if re.search(r'\*\s*\(' + re.escape(name) + r'\)|' +
                           re.escape(name) + r'\s*->|' +
                           re.escape(name) + r'\s*\[', full):
@@ -442,15 +450,16 @@ def extract_func_asm(asm_text, func_name):
             continue
         stripped = line.strip()
         # Stop at next global function label or section directive
-        if stripped.endswith(':') and not stripped.startswith('L'):
+        # (skip L-labels and numeric labels like 0: 1: etc.)
+        if stripped.endswith(':') and not stripped.startswith('L') and not stripped[0].isdigit():
             if not line.startswith('\t') and not line.startswith(' '):
                 break
         if stripped.startswith('.section') or stripped.startswith('.subsections'):
             break
         if not stripped or stripped.startswith('.'):
             continue
-        if stripped.startswith('L') and stripped.endswith(':'):
-            continue  # skip local labels
+        if (stripped.startswith('L') or stripped[0].isdigit()) and stripped.endswith(':'):
+            continue  # skip local and numeric labels
         insns.append(stripped)
     # Strip trailing padding
     while insns and insns[-1] in ('hlt', 'nop', 'hlt ; hlt ; hlt ; hlt ; hlt'):
