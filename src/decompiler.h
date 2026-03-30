@@ -52,8 +52,8 @@ public:
 
         Emitter em(mf, func);
         if (s_flatMode) {
-            QString code = em.generateFlat();
-            return code;
+            QString code = em.generateFlat(tree.get());
+            return cleanupOutput(code);
         }
         QString code = em.generate(tree.get());
         return format ? clangFormat(cleanupOutput(code)) : cleanupOutput(code);
@@ -1769,38 +1769,48 @@ private:
             return out;
         }
 
-        // Flat (goto-based) code generation: emit basic blocks in address order
-        // with explicit goto/if-goto for branches. This preserves the original's
-        // basic block layout exactly.
-        QString generateFlat() {
-            QString out;
-            // Function signature (same as generate())
-            std::string retType = "int";
-            if (m_func.detectedVoid) retType = "void";
-            else if (m_func.returnType != NullType)
-                retType = m_types.formatType(m_func.returnType);
-            std::string qual = m_func.isStatic ? "static " : "";
-            std::string funcName = cName(m_func.name);
-            out += QString::fromStdString(qual + retType) + " " +
-                   QString::fromStdString(funcName) + "(";
-            if (!m_func.params.empty()) {
-                for (size_t i = 0; i < m_func.params.size(); ++i) {
-                    if (i) out += ", ";
-                    auto &p = m_func.params[i];
-                    std::string decl = (p.typeRef != NullType) ?
-                        m_types.formatDecl(p.typeRef, p.name) : ("int " + p.name);
-                    out += QString::fromStdString(decl);
+        // Flat (goto-based) code generation: uses the structured mode's
+        // declarations + signature, but emits basic blocks in address order
+        // with explicit goto/if-goto. This preserves the original's block layout.
+        QString generateFlat(StructNode *root) {
+            // First, generate the structured output to get proper declarations
+            QString structOut = generate(root);
+            // Extract everything up to and including the opening brace + declarations
+            // Then replace the body with flat blocks
+            int bodyStart = structOut.indexOf("{\n") + 2;
+            // Find where declarations end (first line that's not a declaration or blank)
+            QStringList lines = structOut.split('\n');
+            int declEnd = 0;
+            bool pastBrace = false;
+            for (int i = 0; i < lines.size(); ++i) {
+                if (lines[i].trimmed() == "{") { pastBrace = true; continue; }
+                if (!pastBrace) continue;
+                QString t = lines[i].trimmed();
+                if (t.isEmpty()) { declEnd = i + 1; continue; }
+                // Declaration patterns
+                if (t.startsWith("int ") || t.startsWith("float ") || t.startsWith("char ") ||
+                    t.startsWith("char *") || t.startsWith("void *") || t.startsWith("const ") ||
+                    t.startsWith("register ") || t.startsWith("unsigned ") ||
+                    t.startsWith("playerState_t") || t.startsWith("qboolean") ||
+                    t.startsWith("struct ") || t.startsWith("vec_t") || t.startsWith("vec3_t") ||
+                    t.startsWith("OSStatus") || t.startsWith("Str255") || t.startsWith("MenuRef") ||
+                    t.startsWith("WindowRef") || t.startsWith("UInt32") || t.startsWith("size_t") ||
+                    t.startsWith("CGDirect") || t.startsWith("dvar_t") || t.startsWith("Bool") ||
+                    t.startsWith("byte ") || t.startsWith("cmd_function_t") ||
+                    t.startsWith("DObjAnimMat") || t.startsWith("XModel") || t.startsWith("short ")) {
+                    declEnd = i + 1;
+                    continue;
                 }
-            } else {
-                out += "void";
+                break;
             }
-            out += ")\n{\n";
-            // TODO: emit variable declarations
-            // Emit each basic block in order
+            // Build output: signature + declarations + flat body
+            QString out;
+            for (int i = 0; i <= declEnd && i < lines.size(); ++i)
+                out += lines[i] + "\n";
+            // Emit flat blocks
             for (int bbId = 0; bbId < (int)m_func.blocks.size(); ++bbId) {
                 auto &bb = m_func.blocks[bbId];
                 out += QString("bb_%1:\n").arg(bbId);
-                // Emit statements
                 for (auto &stmt : bb.stmts) {
                     if (stmt.kind == IRStmtKind::Branch) {
                         std::string cond = stmt.expr ? emitExpr(stmt.expr.get()) : "1";
@@ -1811,8 +1821,7 @@ private:
                         out += QString("    goto bb_%1;\n").arg(stmt.jumpTarget);
                     } else if (stmt.kind == IRStmtKind::Return) {
                         if (stmt.expr) {
-                            std::string val = emitExpr(stmt.expr.get());
-                            out += "    return " + QString::fromStdString(val) + ";\n";
+                            out += "    return " + QString::fromStdString(emitExpr(stmt.expr.get())) + ";\n";
                         } else {
                             out += "    return;\n";
                         }
