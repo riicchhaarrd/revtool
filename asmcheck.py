@@ -61,6 +61,29 @@ char *strcpy(char*,const char*); int sprintf(char*,const char*,...);
 int printf(const char*,...); int snprintf(char*,size_t,const char*,...);
 int setjmp(void*); void exit(int); void *malloc(size_t); void free(void*);
 int abs(int); int atoi(const char*);
+typedef void *FILE;
+typedef void *unzFile;
+typedef int ControlPartCode;
+typedef struct { short v; short h; } MacPoint;
+typedef unsigned short UniChar;
+typedef int Fixed;
+typedef int TextEncoding;
+typedef int ScriptCode;
+typedef int RegionCode;
+typedef unsigned int FourCharCode;
+typedef unsigned int OptionBits;
+typedef int EventKind;
+typedef void *EventRef;
+typedef int EventParamName;
+typedef int EventParamType;
+typedef void *EventHandlerRef;
+typedef void *EventHandlerCallRef;
+typedef void *EventHandlerUPP;
+typedef int EventModifiers;
+typedef void *AEDesc;
+typedef void *AppleEvent;
+typedef void *CFRunLoopTimerContext;
+typedef int IOReturn;
 '''
 
 # Dvar function prototypes with proper float parameter types
@@ -362,6 +385,18 @@ def compile_to_asm(c_code, orig_check=None):
         undeclared = set()
         for m in re.finditer(q + r"(\w+)" + cq + r" undeclared", stderr): undeclared.add(m.group(1))
         for m in re.finditer(r"syntax error before " + q + r"(\w+)" + cq, stderr): undeclared.add(m.group(1))
+        # Handle "two or more data types": extract unknown type from the error line
+        for m in re.finditer(r':(\d+):.*two or more data types', stderr):
+            lineno = int(m.group(1))
+            code_lines = full.split('\n')
+            if lineno <= len(code_lines):
+                line_text = code_lines[lineno-1].strip()
+                # First word is likely the unknown return type
+                words = re.findall(r'\b([A-Z]\w+)\b', line_text)
+                for w in words:
+                    if w not in ('NULL', 'TRUE', 'FALSE') and len(w) > 2:
+                        undeclared.add(w)
+                        break
         # Remove conflicting stubs
         for m in re.finditer(r"conflicting types for " + q + r"(\w+)" + cq, stderr):
             cname = re.escape(m.group(1))

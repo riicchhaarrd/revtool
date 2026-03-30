@@ -1084,6 +1084,49 @@ public:
             }
             cleaned = cl.join('\n');
         }
+        // Fix hex integer constants used as float arguments in Dvar_Register* calls.
+        // The decompiler emits float bits as hex (0x3DCCCCCD) instead of float literals (0.1f).
+        // When passed to a function expecting float, this causes wrong values.
+        {
+            for (auto &fn : {"Dvar_RegisterFloat", "Dvar_RegisterColor",
+                             "Dvar_RegisterVec2", "Dvar_RegisterVec3", "Dvar_RegisterVec4"}) {
+                QString qfn = QString::fromUtf8(fn);
+                int pos = 0;
+                while ((pos = cleaned.indexOf(qfn + "(", pos)) != -1) {
+                    int paren = cleaned.indexOf('(', pos);
+                    if (paren < 0) { pos++; continue; }
+                    // Scan args for hex constants: 0xHHHHHHHH
+                    int depth = 0;
+                    for (int ci = paren; ci < cleaned.size(); ++ci) {
+                        if (cleaned[ci] == '(') depth++;
+                        if (cleaned[ci] == ')') { depth--; if (depth == 0) break; }
+                        // Match 0xHHHHHHHH (exactly 8 hex digits)
+                        if (cleaned[ci] == '0' && ci + 9 < cleaned.size() &&
+                            (cleaned[ci+1] == 'x' || cleaned[ci+1] == 'X')) {
+                            QString hex = cleaned.mid(ci, 10);
+                            // Check it's exactly 0x + 8 hex chars followed by non-alnum
+                            bool isHex8 = hex.size() == 10;
+                            for (int h = 2; h < 10 && isHex8; ++h)
+                                isHex8 = QString("0123456789ABCDEFabcdef").contains(hex[h]);
+                            if (isHex8 && (ci + 10 >= cleaned.size() || !cleaned[ci+10].isLetterOrNumber())) {
+                                bool ok;
+                                uint32_t bits = hex.toUInt(&ok, 16);
+                                if (ok && bits > 0x100) {
+                                    float fval;
+                                    memcpy(&fval, &bits, 4);
+                                    if (fval == fval && fval > -1e10f && fval < 1e10f) {
+                                        QString floatStr = QString::number((double)fval, 'g', 8) + "f";
+                                        cleaned.replace(ci, 10, floatStr);
+                                        ci += floatStr.size() - 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    pos = paren + 1;
+                }
+            }
+        }
         // Fix integer 0 used as float argument: AngleDelta(0, ...) → AngleDelta(0.0f, ...)
         // The compiler generates cvtsi2ss for int→float conversion, but the original
         // uses raw 0 bits (same as float 0.0) with no conversion.
