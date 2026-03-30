@@ -405,16 +405,13 @@ def compile_to_asm(c_code, orig_check=None):
             is_real_global = (not re.match(r'^(v\d|var_|t\d)', name) and
                               len(name) > 2 and name[0].islower())
             is_written = bool(re.search(re.escape(name) + r'\s*=\s*', full))
-            # Detect if the original accesses globals through NLP (__IMPORT section).
-            # NLP globals → 'extern' (matches NLP, prevents constant folding).
-            # Direct globals → 'static' (matches direct addressing).
-            has_nlp = False
-            if orig_check:
-                has_nlp = any(re.search(r'0x19[56][0-9a-fA-F]{4}', inst) for inst in orig_check)
-            # Written globals with NLP in original: use 'extern'
-            # Read-only or no NLP: use 'static'
-            if is_real_global and is_written and has_nlp:
-                qual = 'extern '
+            # Written globals compared to 0 need 'static volatile' to prevent
+            # constant folding (compiler folds static_var == 0 to true).
+            # Other written globals use plain 'static'.
+            is_zero_compared = is_written and re.search(
+                re.escape(name) + r'\s*==\s*0\b', full)
+            if is_real_global and is_zero_compared:
+                qual = 'static volatile '
             elif is_real_global:
                 qual = 'static '
             else:

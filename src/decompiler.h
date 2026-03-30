@@ -3676,7 +3676,7 @@ private:
                 if (inner_e->op == IROp::Var)
                     return "*(short *)(&" + inner + ")";
                 return "(short)(" + inner + ")";
-            case CastKind::IntToFloat: return "(double)(" + inner + ")";
+            case CastKind::IntToFloat: return "(float)(" + inner + ")";
             case CastKind::FloatToInt: return "(int)(" + inner + ")";
             case CastKind::BitCast:    return inner;
             default: return inner;
