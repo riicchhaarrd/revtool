@@ -2081,9 +2081,7 @@ private:
                 // add __builtin_expect to preserve the original branch direction.
                 // Only for simple conditions (pointer != 0, func() != 0, etc.)
                 // to avoid changing complex control flow unnecessarily.
-                if (node->negated && !hasElse && !condTrue && !condFalse) {
-                    // Only add for simple integer zero-check conditions
-                    // (not float comparisons like "x == 0.0f")
+                if (!condTrue && !condFalse && !hasElse) {
                     bool isSimpleZeroCheck = false;
                     for (auto &sfx : {" != 0", " == 0", " > 0", " <= 0"}) {
                         size_t len = strlen(sfx);
@@ -2092,8 +2090,15 @@ private:
                             isSimpleZeroCheck = true; break;
                         }
                     }
-                    if (isSimpleZeroCheck)
-                        cond = "__builtin_expect(" + cond + ", 1)";
+                    if (isSimpleZeroCheck) {
+                        if (node->negated)
+                            cond = "__builtin_expect(" + cond + ", 1)";
+                        // setjmp()==0 is "unlikely" in the loop context —
+                        // the normal return happens once, error check runs every iteration
+                        else if (cond.find("setjmp") != std::string::npos &&
+                                 cond.find("== 0") != std::string::npos)
+                            cond = "__builtin_expect(" + cond + ", 0)";
+                    }
                 }
                 out += pad(indent) + "if (" + QString::fromStdString(cond) + ") {\n";
                 for (auto &child : node->children)
