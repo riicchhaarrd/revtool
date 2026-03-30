@@ -1114,6 +1114,24 @@ public:
                 }
             }
         }
+        // Fix duplicate nested conditions: if (X) { if (X) { → if (X) { if (1) {
+        // The inner condition is always true → replace with constant true.
+        {
+            QStringList cl = cleaned.split('\n');
+            for (int i = 0; i < cl.size() - 1; ++i) {
+                QString t = cl[i].trimmed();
+                if (!t.startsWith("if (") || !t.endsWith("{")) continue;
+                int j = i + 1;
+                while (j < cl.size() && cl[j].trimmed().isEmpty()) j++;
+                if (j < cl.size() && cl[j].trimmed() == t) {
+                    // Replace inner duplicate with if (1) — always true, no branch
+                    QString indent = cl[j];
+                    indent.truncate(cl[j].indexOf('i'));
+                    cl[j] = indent + "if (1) {";
+                }
+            }
+            cleaned = cl.join('\n');
+        }
         QStringList lines = cleaned.split('\n');
         // Pass 1: Remove empty if blocks
         QStringList pass1;

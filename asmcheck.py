@@ -226,7 +226,7 @@ def _try_compile(code):
         os.unlink(cpath)
 
 
-def compile_to_asm(c_code):
+def compile_to_asm(c_code, orig_check=None):
     # Pre-extract all struct/typedef types referenced in the code from the types header
     extracted = {}  # name -> definition (ordered by dependency)
     # Find struct references AND typedef names (Type_t patterns used as pointer types)
@@ -405,11 +405,20 @@ def compile_to_asm(c_code):
             is_real_global = (not re.match(r'^(v\d|var_|t\d)', name) and
                               len(name) > 2 and name[0].islower())
             is_written = bool(re.search(re.escape(name) + r'\s*=\s*', full))
-            qual = 'static ' if is_real_global else ''
-            # Written-to globals must be extern to prevent constant folding
-            # (static globals with default init=0 get folded by the compiler)
-            if is_written and is_real_global:
+            # Detect if the original accesses globals through NLP (__IMPORT section).
+            # NLP globals → 'extern' (matches NLP, prevents constant folding).
+            # Direct globals → 'static' (matches direct addressing).
+            has_nlp = False
+            if orig_check:
+                has_nlp = any(re.search(r'0x19[56][0-9a-fA-F]{4}', inst) for inst in orig_check)
+            # Written globals with NLP in original: use 'extern'
+            # Read-only or no NLP: use 'static'
+            if is_real_global and is_written and has_nlp:
                 qual = 'extern '
+            elif is_real_global:
+                qual = 'static '
+            else:
+                qual = ''
             if re.search(r'\*\s*\(' + re.escape(name) + r'\)|' +
                           re.escape(name) + r'\s*->|' +
                           re.escape(name) + r'\s*\[', full):
@@ -786,7 +795,8 @@ def check_function(name_or_addr, data, text_addr, text_off, verbose=True):
         c_code = re.sub(r'^static\s+', '', c_code)
 
     # Try 1: compile the single function with stubs
-    ok, asm_text, errors = compile_to_asm(c_code)
+    # Pass original disassembly for NLP detection
+    ok, asm_text, errors = compile_to_asm(c_code, orig_check=orig_check)
 
     # Try 2: source file fallback (disabled — source files have too many Carbon deps)
     # if not ok:
