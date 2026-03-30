@@ -107,18 +107,36 @@ def disasm_original(data, text_addr, text_off, func_addr, func_size=0):
     fo = text_off + (func_addr - text_addr)
     size = func_size if func_size > 0 else 4096
     all_insns = []
-    last_ret = -1
+    all_addrs = []
     for i in md.disasm(data[fo:fo+size], func_addr):
         all_insns.append(f'{i.mnemonic} {i.op_str}'.strip())
-        if i.mnemonic in ('ret', 'retl'):
-            last_ret = len(all_insns)
-    # Return up to and including the last ret (captures all basic blocks)
-    if last_ret > 0:
-        insns = all_insns[:last_ret]
-    else:
-        insns = all_insns
-    # Strip trailing nop/hlt padding
-    while insns and insns[-1] in ('nop', 'hlt'):
+        all_addrs.append(i.address)
+    if not all_insns:
+        return []
+    # Find the last ret
+    last_ret_idx = -1
+    for idx in range(len(all_insns)):
+        if all_insns[idx] in ('ret', 'retl'):
+            last_ret_idx = idx
+    # Find forward branch targets from BEFORE the last ret that land AFTER it
+    # (these are code blocks like error handlers placed after the return)
+    end_idx = last_ret_idx + 1 if last_ret_idx >= 0 else len(all_insns)
+    for idx in range(end_idx):
+        m = re.match(r'j\w+\s+(0x[0-9a-fA-F]+)', all_insns[idx])
+        if m:
+            target = int(m.group(1), 16)
+            # Find the instruction index for this target
+            for tidx in range(end_idx, len(all_insns)):
+                if all_addrs[tidx] == target:
+                    # Extend to include this block (until next ret/jmp/padding)
+                    for bidx in range(tidx, len(all_insns)):
+                        s = all_insns[bidx]
+                        end_idx = max(end_idx, bidx + 1)
+                        if s.startswith('ret') or s.startswith('jmp'):
+                            break
+                    break
+    insns = all_insns[:end_idx]
+    while insns and insns[-1] in ('nop', 'hlt', 'int3', 'ud2'):
         insns.pop()
     return insns
 
