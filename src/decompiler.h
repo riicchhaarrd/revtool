@@ -1040,31 +1040,79 @@ public:
             }
             } // for arrType
         }
-        // Fix impossible nested conditions: if (x == 0) { if (x != 0/> 0) {
-        // The outer == 0 makes the inner always-false → dead code.
-        // Fix by inverting the outer condition to match the inner's expected value.
+        // Fix impossible nested conditions: if (x == V) { if (x != V) {
+        // The outer condition makes the inner always-false → dead code.
+        // Fix by inverting the outer condition.
+        // Also handle: if (V == x) { if (V != x) { (reversed operand order)
         {
             QStringList cl = cleaned.split('\n');
             for (int i = 0; i < cl.size(); ++i) {
                 QString t = cl[i].trimmed();
-                if (t.startsWith("if (") && t.endsWith("{") && t.contains("== 0")) {
-                    int eqPos = t.indexOf("== 0");
-                    QString condExpr = t.mid(4, eqPos - 4).trimmed();
-                    if (condExpr.isEmpty()) continue;
-                    for (int j = i + 1; j < std::min(i + 4, (int)cl.size()); ++j) {
-                        QString t2 = cl[j].trimmed();
-                        // Inner condition contradicts outer: != 0, > 0, < 0, etc.
-                        if (t2.startsWith("if (") && t2.contains(condExpr) &&
-                            (t2.contains("!= 0") || t2.contains("> 0") || t2.contains("< 0"))) {
-                            cl[i].replace("== 0", "!= 0");
+                if (!t.startsWith("if (") || !t.endsWith("{")) continue;
+                // Extract: if (EXPR == VALUE) or if (VALUE == EXPR)
+                int eqPos = t.indexOf(" == ");
+                if (eqPos < 0) continue;
+                QString lhs = t.mid(4, eqPos - 4).trimmed();
+                int bracePos = t.lastIndexOf('{');
+                QString rhs = t.mid(eqPos + 4, bracePos - eqPos - 4).trimmed().chopped(1).trimmed();
+                // rhs might have trailing ")"
+                while (rhs.endsWith(')') && lhs.count('(') <= lhs.count(')'))
+                    rhs.chop(1);
+
+                // Check next few lines for contradictory inner if
+                for (int j = i + 1; j < std::min(i + 4, (int)cl.size()); ++j) {
+                    QString t2 = cl[j].trimmed();
+                    // Inner condition contradicts outer
+                    if (t2.startsWith("if (") &&
+                        ((t2.contains(lhs) && t2.contains("!=")) ||
+                         (t2.contains(lhs) && (t2.contains("> ") || t2.contains("< "))))) {
+                        // Verify it's actually contradictory (same expression, different comparison)
+                        if (t2.contains(lhs + " != ") || t2.contains(lhs + " > ") || t2.contains(lhs + " < ") ||
+                            t2.contains("!= " + lhs) || t2.contains("> " + lhs) || t2.contains("< " + lhs)) {
+                            cl[i].replace(" == ", " != ");
                             break;
                         }
-                        if (!t2.isEmpty() && t2 != "}" && !t2.startsWith("if (") && t2 != "return;")
-                            break;
                     }
+                    if (!t2.isEmpty() && t2 != "}" && !t2.startsWith("if (") && t2 != "return;")
+                        break;
                 }
             }
             cleaned = cl.join('\n');
+        }
+        // Fix integer 0 used as float argument: AngleDelta(0, ...) → AngleDelta(0.0f, ...)
+        // The compiler generates cvtsi2ss for int→float conversion, but the original
+        // uses raw 0 bits (same as float 0.0) with no conversion.
+        {
+            // Replace bare integer 0 in function calls where we know the param is float
+            // Pattern: known_float_func(... 0, ...) or (... 0)
+            for (auto &fn : {"AngleDelta", "AngleNormalize180", "AngleNormalize180Accurate",
+                             "BG_CheckProne"}) {
+                QString qfn = QString::fromUtf8(fn);
+                int pos = 0;
+                while ((pos = cleaned.indexOf(qfn + "(", pos)) != -1) {
+                    // Find the argument list and replace bare 0 with 0.0f
+                    int pstart = cleaned.indexOf('(', pos);
+                    if (pstart < 0) { pos++; continue; }
+                    int depth = 0;
+                    for (int ci = pstart; ci < cleaned.size(); ++ci) {
+                        if (cleaned[ci] == '(') depth++;
+                        if (cleaned[ci] == ')') {
+                            depth--;
+                            if (depth == 0) {
+                                // Replace ", 0)" and "(0," patterns within this call
+                                QString args = cleaned.mid(pstart, ci - pstart + 1);
+                                args.replace(", 0)", ", 0.0f)");
+                                args.replace(", 0,", ", 0.0f,");
+                                args.replace("(0,", "(0.0f,");
+                                args.replace("(0)", "(0.0f)");
+                                cleaned.replace(pstart, ci - pstart + 1, args);
+                                break;
+                            }
+                        }
+                    }
+                    pos = pstart + 1;
+                }
+            }
         }
         QStringList lines = cleaned.split('\n');
         // Pass 1: Remove empty if blocks
@@ -2119,9 +2167,11 @@ private:
                     if (isSimpleZeroCheck) {
                         if (node->negated)
                             cond = "__builtin_expect(" + cond + ", 1)";
-                        // setjmp()==0 is "unlikely" in the loop context —
-                        // the normal return happens once, error check runs every iteration
-                        else if (cond.find("setjmp") != std::string::npos &&
+                        // setjmp()==0 and guard checks are "unlikely" —
+                        // one-time init or error recovery paths
+                        else if ((cond.find("setjmp") != std::string::npos ||
+                                  cond.find("guard") != std::string::npos ||
+                                  cond.find("acquire") != std::string::npos) &&
                                  cond.find("== 0") != std::string::npos)
                             cond = "__builtin_expect(" + cond + ", 0)";
                     }
