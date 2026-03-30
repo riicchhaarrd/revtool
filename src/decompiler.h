@@ -1805,7 +1805,7 @@ private:
             }
             // Build output: signature + declarations + flat body
             QString out;
-            for (int i = 0; i <= declEnd && i < lines.size(); ++i)
+            for (int i = 0; i < declEnd && i < lines.size(); ++i)
                 out += lines[i] + "\n";
             // Emit flat blocks
             for (int bbId = 0; bbId < (int)m_func.blocks.size(); ++bbId) {
