@@ -791,8 +791,7 @@ def check_function(name_or_addr, data, text_addr, text_off, verbose=True):
         # Strip 'static' to prevent inlining/removal when compiling in isolation
         c_code = re.sub(r'^static\s+', '', c_code)
 
-    # Try 1: compile the single function with stubs
-    # Pass original disassembly for NLP detection
+    # Try 1: compile the single function with stubs (structured mode)
     ok, asm_text, errors = compile_to_asm(c_code, orig_check=orig_check)
 
     # Try 2: source file fallback (disabled — source files have too many Carbon deps)
@@ -833,6 +832,42 @@ def check_function(name_or_addr, data, text_addr, text_off, verbose=True):
 
     # Original disasm
     orig = disasm_original(data, text_addr, text_off, func_addr, func_size)
+
+    # Try flat (goto-based) mode as alternative compilation
+    # Use whichever produces a better LCS match
+    if recomp:
+        try:
+            r_flat = subprocess.run([DECOMP, BINARY, '-f', f'{func_addr:X}', '--flat'],
+                                   capture_output=True, text=True, timeout=30)
+            flat_code = r_flat.stdout.strip()
+            if flat_code and 'goto' in flat_code:
+                flat_code = re.sub(r'#include\s*[<"].*?[>"]', '', flat_code)
+                flat_code = re.sub(r'^static\s+', '', flat_code)
+                ok_f, asm_f, _ = compile_to_asm(flat_code, orig_check=orig_check)
+                if ok_f:
+                    recomp_f = extract_func_asm(asm_f, func_name)
+                    if not recomp_f:
+                        for l2 in asm_f.split('\n'):
+                            if ':' in l2 and not l2.startswith('.') and not l2.startswith('L'):
+                                label = l2.split(':')[0].strip().lstrip('_')
+                                recomp_f = extract_func_asm(asm_f, label)
+                                if recomp_f: break
+                    if recomp_f:
+                        # Quick LCS for both versions
+                        def quick_lcs(a, b):
+                            na = [norm(x) for x in a]; nb = [norm(x) for x in b]
+                            m2, n2 = len(na), len(nb); prev2 = [0]*(n2+1)
+                            for ii in range(m2):
+                                curr2 = [0]*(n2+1)
+                                for jj in range(n2):
+                                    curr2[jj+1] = prev2[jj]+1 if na[ii]==nb[jj] else max(curr2[jj],prev2[jj+1])
+                                prev2 = curr2
+                            return prev2[n2]
+                        lcs_struct = quick_lcs(orig, recomp)
+                        lcs_flat = quick_lcs(orig, recomp_f)
+                        if lcs_flat > lcs_struct:
+                            recomp = recomp_f
+        except: pass
 
     # Normalize instruction streams
     orig = norm_stream(orig)

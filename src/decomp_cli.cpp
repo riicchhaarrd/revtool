@@ -118,6 +118,7 @@ int main(int argc, char *argv[]) {
         else if (strcmp(argv[i], "-a") == 0) doAll = true;
         else if (strcmp(argv[i], "--gcc") == 0) doGcc = true;
         else if (strcmp(argv[i], "--ssa") == 0) Decompiler::s_useSSA = true;
+        else if (strcmp(argv[i], "--flat") == 0) Decompiler::s_flatMode = true;
         else if (strcmp(argv[i], "--types") == 0) doTypes = true;
         else if (strcmp(argv[i], "--srcof") == 0 && i + 1 < argc)
             srcOfAddr = strtoul(argv[++i], nullptr, 16);

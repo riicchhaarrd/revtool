@@ -24,6 +24,7 @@
 class Decompiler {
 public:
     static inline bool s_useSSA = false;
+    static inline bool s_flatMode = false;
 
     // Decompile a single function
     static QString decompile(const MachOFile &mf, uint32_t funcAddr, bool format = true) {
@@ -50,6 +51,10 @@ public:
         auto tree = structurer.structure(func);
 
         Emitter em(mf, func);
+        if (s_flatMode) {
+            QString code = em.generateFlat();
+            return code;
+        }
         QString code = em.generate(tree.get());
         return format ? clangFormat(cleanupOutput(code)) : cleanupOutput(code);
     }
@@ -1764,6 +1769,62 @@ private:
             return out;
         }
 
+        // Flat (goto-based) code generation: emit basic blocks in address order
+        // with explicit goto/if-goto for branches. This preserves the original's
+        // basic block layout exactly.
+        QString generateFlat() {
+            QString out;
+            // Function signature (same as generate())
+            std::string retType = "int";
+            if (m_func.detectedVoid) retType = "void";
+            else if (m_func.returnType != NullType)
+                retType = m_types.formatType(m_func.returnType);
+            std::string qual = m_func.isStatic ? "static " : "";
+            std::string funcName = cName(m_func.name);
+            out += QString::fromStdString(qual + retType) + " " +
+                   QString::fromStdString(funcName) + "(";
+            if (!m_func.params.empty()) {
+                for (size_t i = 0; i < m_func.params.size(); ++i) {
+                    if (i) out += ", ";
+                    auto &p = m_func.params[i];
+                    std::string decl = (p.typeRef != NullType) ?
+                        m_types.formatDecl(p.typeRef, p.name) : ("int " + p.name);
+                    out += QString::fromStdString(decl);
+                }
+            } else {
+                out += "void";
+            }
+            out += ")\n{\n";
+            // TODO: emit variable declarations
+            // Emit each basic block in order
+            for (int bbId = 0; bbId < (int)m_func.blocks.size(); ++bbId) {
+                auto &bb = m_func.blocks[bbId];
+                out += QString("bb_%1:\n").arg(bbId);
+                // Emit statements
+                for (auto &stmt : bb.stmts) {
+                    if (stmt.kind == IRStmtKind::Branch) {
+                        std::string cond = stmt.expr ? emitExpr(stmt.expr.get()) : "1";
+                        out += QString("    if (%1) goto bb_%2; else goto bb_%3;\n")
+                            .arg(QString::fromStdString(cond))
+                            .arg(stmt.trueTarget).arg(stmt.falseTarget);
+                    } else if (stmt.kind == IRStmtKind::Jump) {
+                        out += QString("    goto bb_%1;\n").arg(stmt.jumpTarget);
+                    } else if (stmt.kind == IRStmtKind::Return) {
+                        if (stmt.expr) {
+                            std::string val = emitExpr(stmt.expr.get());
+                            out += "    return " + QString::fromStdString(val) + ";\n";
+                        } else {
+                            out += "    return;\n";
+                        }
+                    } else {
+                        emitStmt(out, stmt, 1);
+                    }
+                }
+            }
+            out += "}\n";
+            return out;
+        }
+
     private:
         const MachOFile      &m_mf;
         IRFunc               &m_func;
@@ -2185,12 +2246,10 @@ private:
                     if (isSimpleZeroCheck) {
                         if (node->negated)
                             cond = "__builtin_expect(" + cond + ", 1)";
-                        // setjmp()==0 and guard checks are "unlikely" —
-                        // one-time init or error recovery paths
-                        else if ((cond.find("setjmp") != std::string::npos ||
-                                  cond.find("guard") != std::string::npos ||
-                                  cond.find("acquire") != std::string::npos) &&
-                                 cond.find("== 0") != std::string::npos)
+                        // Non-negated "== 0" conditions: these are typically
+                        // error/init checks where the == 0 path is unlikely.
+                        // Mark as unlikely to match the original's forward-branch-not-taken.
+                        else if (cond.find("== 0") != std::string::npos)
                             cond = "__builtin_expect(" + cond + ", 0)";
                     }
                 }
