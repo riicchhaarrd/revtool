@@ -1119,6 +1119,56 @@ public:
                 }
             }
         }
+        // Fix STABS int→float mismatch: when "int var_X" is assigned from a
+        // float-returning function (AngleDelta etc.) and used in float context,
+        // change declaration to "float var_X" to avoid spurious truncation.
+        {
+            static const char *floatFuncs[] = {
+                "AngleDelta", "AngleNormalize180", "AngleNormalize180Accurate",
+                "PitchForYawOnNormal", "Vec3Normalize", "Vec2Normalize",
+                "floorf", "sinf", "cosf", "sqrtf", "fminf", "fmaxf", nullptr
+            };
+            QStringList cl = cleaned.split('\n');
+            // Find int var_X declarations where all uses are float-like
+            for (int i = 0; i < cl.size(); ++i) {
+                QString t = cl[i].trimmed();
+                if (!t.startsWith("int var_")) continue;
+                int semi = t.indexOf(';');
+                if (semi < 0) continue;
+                QString varName = t.mid(4, semi - 4).trimmed();
+                if (varName.isEmpty()) continue;
+                // Check all lines for this variable's usage
+                bool assignedFromFloat = false;
+                bool usedAsInt = false;
+                for (int j = i + 1; j < cl.size(); ++j) {
+                    QString line = cl[j];
+                    if (!line.contains(varName)) continue;
+                    // Check if assigned from a float function
+                    if (line.contains(varName + " = ")) {
+                        for (int fi = 0; floatFuncs[fi]; ++fi) {
+                            if (line.contains(QString::fromUtf8(floatFuncs[fi]) + "(")) {
+                                assignedFromFloat = true;
+                                break;
+                            }
+                        }
+                    }
+                    // Check if used in float context (0.0f comparison, fabsf, etc.)
+                    if (line.contains(varName) &&
+                        (line.contains("0.0f") || line.contains("fabsf"))) {
+                        assignedFromFloat = true;
+                    }
+                    // Check if used as a pure integer (bit ops, array index, etc.)
+                    if (line.contains(varName + " &") || line.contains(varName + " |") ||
+                        line.contains(varName + " <<") || line.contains("[" + varName + "]")) {
+                        usedAsInt = true;
+                    }
+                }
+                if (assignedFromFloat && !usedAsInt) {
+                    cl[i].replace("int " + varName, "float " + varName);
+                }
+            }
+            cleaned = cl.join('\n');
+        }
         // Fix duplicate nested conditions: if (X) { if (X) { → if (X) { if (1) {
         // The inner condition is always true → replace with constant true.
         {
@@ -1807,11 +1857,49 @@ private:
             QString out;
             for (int i = 0; i < declEnd && i < lines.size(); ++i)
                 out += lines[i] + "\n";
+            // Helper: resolve a return expression through temp assignments.
+            // If "return TEMP" and TEMP was assigned EXPR in the same block, return EXPR.
+            auto resolveReturnExpr = [&](const BasicBlock &bb, int retIdx) -> std::string {
+                auto &retStmt = bb.stmts[retIdx];
+                if (!retStmt.expr) return "";
+                std::string retStr = emitExpr(retStmt.expr.get());
+                if (retStmt.expr->op == IROp::Temp && retIdx > 0) {
+                    auto &prev = bb.stmts[retIdx - 1];
+                    if (prev.kind == IRStmtKind::Assign &&
+                        prev.destTemp == retStmt.expr->tempId() && prev.expr) {
+                        return emitExpr(prev.expr.get());
+                    }
+                }
+                return retStr;
+            };
+            // Find canonical return blocks: blocks that end with a Return,
+            // preceded only by assignments (no side effects).
+            // Other blocks returning the same value can use "goto bb_X" instead,
+            // allowing the compiler to share the return path (tail merge).
+            std::map<std::string, int> canonicalReturn; // return expr string → block ID
+            for (int bbId = 0; bbId < (int)m_func.blocks.size(); ++bbId) {
+                auto &bb = m_func.blocks[bbId];
+                if (bb.stmts.empty()) continue;
+                auto &lastStmt = bb.stmts.back();
+                if (lastStmt.kind != IRStmtKind::Return) continue;
+                bool onlyAssigns = true;
+                for (int si = 0; si < (int)bb.stmts.size() - 1; ++si) {
+                    if (bb.stmts[si].kind != IRStmtKind::Assign) {
+                        onlyAssigns = false; break;
+                    }
+                }
+                if (!onlyAssigns) continue;
+                int retIdx = (int)bb.stmts.size() - 1;
+                std::string retExpr = resolveReturnExpr(bb, retIdx);
+                if (!canonicalReturn.count(retExpr))
+                    canonicalReturn[retExpr] = bbId;
+            }
             // Emit flat blocks
             for (int bbId = 0; bbId < (int)m_func.blocks.size(); ++bbId) {
                 auto &bb = m_func.blocks[bbId];
                 out += QString("bb_%1:\n").arg(bbId);
-                for (auto &stmt : bb.stmts) {
+                for (int si = 0; si < (int)bb.stmts.size(); ++si) {
+                    auto &stmt = bb.stmts[si];
                     if (stmt.kind == IRStmtKind::Branch) {
                         std::string cond = stmt.expr ? emitExpr(stmt.expr.get()) : "1";
                         out += QString("    if (%1) goto bb_%2; else goto bb_%3;\n")
@@ -1820,13 +1908,33 @@ private:
                     } else if (stmt.kind == IRStmtKind::Jump) {
                         out += QString("    goto bb_%1;\n").arg(stmt.jumpTarget);
                     } else if (stmt.kind == IRStmtKind::Return) {
-                        if (stmt.expr) {
-                            out += "    return " + QString::fromStdString(emitExpr(stmt.expr.get())) + ";\n";
+                        // Check if return can be redirected to a canonical return block
+                        std::string resolved = resolveReturnExpr(bb, si);
+                        auto cit = canonicalReturn.find(resolved);
+                        if (cit != canonicalReturn.end() && cit->second != bbId) {
+                            out += QString("    goto bb_%1;\n").arg(cit->second);
                         } else {
-                            out += "    return;\n";
+                            if (stmt.expr) {
+                                out += "    return " + QString::fromStdString(emitExpr(stmt.expr.get())) + ";\n";
+                            } else {
+                                out += "    return;\n";
+                            }
                         }
                     } else {
-                        emitStmt(out, stmt, 1);
+                        // Skip assignments to temps that feed into a redirected return
+                        bool skipForReturn = false;
+                        if (stmt.kind == IRStmtKind::Assign && si + 1 < (int)bb.stmts.size()) {
+                            auto &next = bb.stmts[si + 1];
+                            if (next.kind == IRStmtKind::Return && next.expr &&
+                                next.expr->op == IROp::Temp && next.expr->tempId() == stmt.destTemp) {
+                                std::string resolved = resolveReturnExpr(bb, si + 1);
+                                auto cit = canonicalReturn.find(resolved);
+                                if (cit != canonicalReturn.end() && cit->second != bbId)
+                                    skipForReturn = true;
+                            }
+                        }
+                        if (!skipForReturn)
+                            emitStmt(out, stmt, 1);
                     }
                 }
             }

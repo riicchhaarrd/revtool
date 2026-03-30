@@ -47,7 +47,9 @@ typedef struct { CGPoint origin; CGSize size; } CGRect;
 #define NULL ((void*)0)
 float floorf(float); float ceilf(float); float sqrtf(float);
 float sinf(float); float cosf(float); float tanf(float);
-float fabsf(float); float fminf(float,float); float fmaxf(float,float);
+float fabsf(float);
+static inline float fminf(float a, float b) { return a < b ? a : b; }
+static inline float fmaxf(float a, float b) { return a > b ? a : b; }
 float acosf(float); float asinf(float); float atanf(float);
 float atan2f(float,float); float fmodf(float,float); float powf(float,float);
 double atan2(double,double); double floor(double); double ceil(double);
@@ -483,10 +485,16 @@ def norm(s):
     s = re.sub(r',\s*', ', ', s)
     # Strip comments
     s = s.split('#')[0].strip()
-    # retl -> ret, calll -> call, leave -> popl %ebp
+    # retl -> ret, calll -> call, leave -> popl %ebp, cvtsi2ssl -> cvtsi2ss
     s = re.sub(r'^retl\b', 'ret', s)
     s = re.sub(r'^calll\b', 'call', s)
     s = re.sub(r'^leave$', 'popl %ebp', s)
+    s = re.sub(r'^cvtsi2ssl\b', 'cvtsi2ss', s)
+    # Normalize addl $-N → subl $N and subl $-N → addl $N
+    m = re.match(r'^(addl|subl) \$-(\d+)(.*)', s)
+    if m:
+        op = 'subl' if m.group(1) == 'addl' else 'addl'
+        s = f'{op} ${m.group(2)}{m.group(3)}'
     # Normalize string ops: repe/repz and repne/repnz
     s = re.sub(r'^repe\b', 'repz', s)
     s = re.sub(r'^repne\b', 'repnz', s)
@@ -494,6 +502,10 @@ def norm(s):
     s = re.sub(r'^(repz cmpsb).*', r'\1', s)
     # testb %Xl, %Xl -> testl %eXx, %eXx (equivalent for zero-check)
     s = re.sub(r'^testb %([a-d])l, %\1l', r'testl %e\1x, %e\1x', s)
+    # testl %REG, %REG (self-test) → testl %<R>, %<R> (register doesn't matter)
+    m = re.match(r'^testl (%(e[abcd]x|e[sd]i|ebx)), \1$', s)
+    if m:
+        s = 'testl %<R>, %<R>'
     # movzbl N(%reg), %eXx → movl N(%reg), %eXx for comparison purposes
     # (zero-extend byte load vs dword load — equivalent when source is byte-sized)
     s = re.sub(r'^movzbl\b', 'movl', s)
@@ -518,8 +530,19 @@ def norm(s):
     # Normalize struct field loads: movl N(%REG), %REG2 where N is small offset
     s = re.sub(r'^movl (\d+)\(%(eax|ecx|edx|esi|edi|ebx)\), %(eax|ecx|edx|esi|edi)',
                r'movl \1(%<R>), %<R>', s)
+    # Normalize int↔float load variants into XMM registers
+    # cvtsi2ss N(%reg), %xmm ≈ movss N(%reg), %xmm for matching purposes
+    # (dvar values may be accessed as int or float depending on type info)
+    s = re.sub(r'^cvtsi2ss (\d+\()', r'movss \1', s)
     # Normalize XMM register names (float register allocation varies)
     s = re.sub(r'%xmm[0-7]', '%xmm<N>', s)
+    # Normalize ucomiss/comiss operand order (branch swaps compensate)
+    # ucomiss %xmmA, %xmmB → ucomiss %xmm<N>, %xmm<N> (already normalized)
+    # But also normalize ucomiss <C>, %xmm → ucomiss %xmm<N>, <C>
+    # (canonical form: xmm operand first)
+    m = re.match(r'^(u?comiss) (<C>), (%xmm<N>)', s)
+    if m:
+        s = f'{m.group(1)} {m.group(3)}, {m.group(2)}'
     # Normalize index register in indirect calls: call *TABLE(, %REG, N)
     s = re.sub(r'^call \*(<C>)\(, %(eax|ecx|edx|esi|edi), (\d+)\)',
                r'call *\1(, %<R>, \3)', s)
@@ -619,6 +642,38 @@ def norm_stream(insns):
                 result.append(f'{m.group(1)} {m.group(2)}, <C>')
                 i += 2
                 continue
+        # Collapse 3-instruction NLP patterns: movl NLP, %r1; movl (%r1), %r2; OP N(%r2), ...
+        # → movl <C>, %r2; OP N(%r2), ...
+        # This handles: load NLP pointer, dereference, then access struct field
+        if (i + 2 < len(insns) and
+            n.startswith('movl <C>, %') and is_nlp):
+            reg = n.split(', ')[1]
+            next_n = norm(insns[i+1])
+            m_deref = re.match(r'movl \(' + re.escape(reg) + r'\), (%\w+)', next_n)
+            if m_deref:
+                reg2 = m_deref.group(1)
+                third_n = norm(insns[i+2])
+                # movl N(%reg2), %dest → movl N(%<R>), %<R> (struct field load)
+                m3 = re.match(r'(movl|movzbl|movb|movss) (\d+)\(' + re.escape(reg2) + r'\), (.+)', third_n)
+                if m3:
+                    result.append(f'movl <C>, {reg2}')
+                    result.append(insns[i+2])
+                    i += 3
+                    continue
+                # movl val, N(%reg2) → field store through NLP
+                m3 = re.match(r'(movl|movb|movss) (.+), (\d+)\(' + re.escape(reg2) + r'\)', third_n)
+                if m3:
+                    result.append(f'movl <C>, {reg2}')
+                    result.append(insns[i+2])
+                    i += 3
+                    continue
+                # cmpb/testb etc on (%reg2) or N(%reg2)
+                m3 = re.match(r'(cmpb|cmpw|cmpl|testb|testl) (.+), (\d*)\(' + re.escape(reg2) + r'\)', third_n)
+                if m3:
+                    result.append(f'movl <C>, {reg2}')
+                    result.append(insns[i+2])
+                    i += 3
+                    continue
         # Collapse: movl <C>, %reg; movl %reg, <C> → movl <C>, <C>
         # (store-through-register for function pointers / globals)
         if (i + 1 < len(insns) and
@@ -627,6 +682,19 @@ def norm_stream(insns):
             next_n = norm(insns[i+1])
             if re.match(r'movl ' + re.escape(reg) + r', <C>', next_n):
                 result.append('movl <C>, <C>')
+                i += 2
+                continue
+        # Collapse: movl <C>, %reg; movl %reg, N(%esp) → movl <C>, N(%esp)
+        # (argument push through register vs direct push)
+        if (i + 1 < len(insns) and
+            re.match(r'movl <C>, %e\w+', n)):
+            reg = n.split(', ')[1]  # e.g., '%eax'
+            # Use raw instruction for register matching (norm may have replaced reg with %<R>)
+            raw_next = insns[i+1].strip().replace('\t', ' ')
+            m = re.match(r'movl?\s+' + re.escape(reg) + r',\s*(\d*\(%esp\))', raw_next)
+            if m:
+                esp_loc = m.group(1) or '(%esp)'
+                result.append(f'movl <C>, {esp_loc}')
                 i += 2
                 continue
         # Normalize tail call: call X; leave; ret -> call X (drop leave+ret)
@@ -666,6 +734,14 @@ def norm_stream(insns):
             next_rn = norm(result[j+1])
             if re.match(r'movl ' + re.escape(reg) + r', <C>', next_rn):
                 collapsed.append('movl <C>, <C>')
+                j += 2
+                continue
+            # movl <C>, %reg; movl %reg, N(%esp) → movl <C>, N(%esp)
+            raw_next_r = result[j+1].strip().replace('\t', ' ')
+            m = re.match(r'movl?\s+' + re.escape(reg) + r',\s*(\d*\(%esp\))', raw_next_r)
+            if m:
+                esp_loc = m.group(1) or '(%esp)'
+                collapsed.append(f'movl <C>, {esp_loc}')
                 j += 2
                 continue
         collapsed.append(result[j])
