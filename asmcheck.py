@@ -106,11 +106,20 @@ def disasm_original(data, text_addr, text_off, func_addr, func_size=0):
     md.syntax = capstone.CS_OPT_SYNTAX_ATT
     fo = text_off + (func_addr - text_addr)
     size = func_size if func_size > 0 else 4096
-    insns = []
+    all_insns = []
+    last_ret = -1
     for i in md.disasm(data[fo:fo+size], func_addr):
-        insns.append(f'{i.mnemonic} {i.op_str}'.strip())
+        all_insns.append(f'{i.mnemonic} {i.op_str}'.strip())
         if i.mnemonic in ('ret', 'retl'):
-            break
+            last_ret = len(all_insns)
+    # Return up to and including the last ret (captures all basic blocks)
+    if last_ret > 0:
+        insns = all_insns[:last_ret]
+    else:
+        insns = all_insns
+    # Strip trailing nop/hlt padding
+    while insns and insns[-1] in ('nop', 'hlt'):
+        insns.pop()
     return insns
 
 
@@ -404,7 +413,7 @@ def compile_to_asm(c_code):
 
 
 def extract_func_asm(asm_text, func_name):
-    """Extract a function's instructions from gcc -S output."""
+    """Extract a function's instructions from gcc -S output (all basic blocks)."""
     insns = []
     in_func = False
     for line in asm_text.split('\n'):
@@ -413,12 +422,21 @@ def extract_func_asm(asm_text, func_name):
             continue
         if not in_func:
             continue
-        line = line.strip()
-        if not line or line.startswith('.') or line.startswith('L'):
-            continue
-        insns.append(line)
-        if line.startswith('ret'):
+        stripped = line.strip()
+        # Stop at next global function label or section directive
+        if stripped.endswith(':') and not stripped.startswith('L'):
+            if not line.startswith('\t') and not line.startswith(' '):
+                break
+        if stripped.startswith('.section') or stripped.startswith('.subsections'):
             break
+        if not stripped or stripped.startswith('.'):
+            continue
+        if stripped.startswith('L') and stripped.endswith(':'):
+            continue  # skip local labels
+        insns.append(stripped)
+    # Strip trailing padding
+    while insns and insns[-1] in ('hlt', 'nop', 'hlt ; hlt ; hlt ; hlt ; hlt'):
+        insns.pop()
     return insns
 
 
