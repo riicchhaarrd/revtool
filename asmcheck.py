@@ -372,7 +372,7 @@ def compile_to_asm(c_code):
             # Use static for real globals to get direct addressing (no non_lazy_ptr).
             # Don't use static for decompiler-generated names (vN, varN, tN, gN)
             # which might shadow local variables.
-            is_real_global = (not re.match(r'^(v\d|var_|t\d|g_)', name) and
+            is_real_global = (not re.match(r'^(v\d|var_|t\d)', name) and
                               len(name) > 2 and name[0].islower())
             qual = 'static ' if is_real_global else ''
             if re.search(r'\*\s*\(' + re.escape(name) + r'\)|' +
@@ -383,7 +383,13 @@ def compile_to_asm(c_code):
                 stubs += f'void {name}(void);\n'
             elif (name in assign_rhs and name not in stubs_types):
                 if name not in already:
-                    stubs += f'{qual}void *{name};\n'
+                    # Names starting with uppercase used as RHS of assignment are likely
+                    # function names (function pointer assignment). Declare as function
+                    # prototypes so the compiler uses the address as an immediate.
+                    if name[0].isupper():
+                        stubs += f'int {name}(void);\n'
+                    else:
+                        stubs += f'{qual}void *{name};\n'
             elif name[0].isupper() or name.endswith('_t'):
                 stubs += f'typedef int {name};\n'
             else:
