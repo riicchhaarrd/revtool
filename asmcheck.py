@@ -84,6 +84,29 @@ typedef void *AEDesc;
 typedef void *AppleEvent;
 typedef void *CFRunLoopTimerContext;
 typedef int IOReturn;
+/* zlib types */
+typedef struct { int _[16]; } z_stream;
+typedef struct { int _[4]; } unz_global_info;
+typedef struct { int _[16]; } unz_file_info;
+typedef unsigned long uLong;
+typedef unsigned int uInt;
+typedef void *voidpf;
+typedef int SIZE_T;
+/* Win32 stubs */
+typedef struct { int dwLowDateTime; int dwHighDateTime; } FILETIME;
+typedef struct { int _[80]; } WIN32_FIND_DATAA;
+typedef void *HANDLE;
+typedef int HRESULT;
+/* Game engine types */
+typedef struct { float _[4]; } DObjAnimMat;
+typedef int scr_thread_t;
+typedef void *scr_func_t;
+typedef int TextureID;
+typedef int isNegative;
+/* Network types */
+typedef int SOCKET;
+typedef struct { int _[4]; } fd_set;
+typedef struct { int _[2]; } timeval;
 '''
 
 # Dvar function prototypes with proper float parameter types
@@ -391,12 +414,45 @@ def compile_to_asm(c_code, orig_check=None):
             code_lines = full.split('\n')
             if lineno <= len(code_lines):
                 line_text = code_lines[lineno-1].strip()
-                # First word is likely the unknown return type
-                words = re.findall(r'\b([A-Z]\w+)\b', line_text)
+                # First word(s) before the function name are the unknown return type
+                # Try uppercase first, then any word that looks like a type
+                words = re.findall(r'\b(\w+)\b', line_text)
                 for w in words:
-                    if w not in ('NULL', 'TRUE', 'FALSE') and len(w) > 2:
+                    if w in ('static', 'void', 'int', 'char', 'float', 'double',
+                             'unsigned', 'signed', 'const', 'struct', 'union',
+                             'short', 'long', 'typedef', 'extern', 'inline',
+                             'NULL', 'TRUE', 'FALSE', 'return', 'if', 'else',
+                             'while', 'for', 'do', 'switch', 'case', 'break'):
+                        continue
+                    if len(w) > 1 and w not in already and w not in funcs:
                         undeclared.add(w)
                         break
+        # Handle "storage size of 'X' isn't known" - add struct stub
+        for m in re.finditer(r"storage size of " + q + r"(\w+)" + cq + r" isn.t known", stderr):
+            vname = m.group(1)
+            # Find the declaration line to get the type
+            for line in full.split('\n'):
+                if vname in line and ('struct ' in line or '_t ' in line):
+                    tm = re.search(r'((?:struct\s+)?\w+)\s+' + re.escape(vname) + r'\s*[;\[]', line)
+                    if tm:
+                        tname = tm.group(1).strip()
+                        if tname.startswith('struct '):
+                            sname = tname.split()[1]
+                            undeclared.add(sname)
+                    break
+        # Handle "variable or field declared void" - the decompiler emitted void type
+        for m in re.finditer(r"variable or field " + q + r"(\w+)" + cq + r" declared void", stderr):
+            # Find the line and change 'void' to 'int'
+            vname = m.group(1)
+            full = re.sub(r'\bvoid\s+' + re.escape(vname) + r'\s*;',
+                         'int ' + vname + ';', full)
+            full = re.sub(r'\bvoid\s+' + re.escape(vname) + r'\s*=',
+                         'int ' + vname + ' =', full)
+        # Handle "label at end of compound statement" - add empty statement after label
+        if 'label at end of compound statement' in stderr:
+            full = re.sub(r'(bb_\d+:)\s*\n(\s*\})', r'\1 ;\n\2', full)
+            # Also handle label on same line as }
+            full = re.sub(r'(bb_\d+:)\s*\}', r'\1 ; }', full)
         # Remove conflicting stubs
         for m in re.finditer(r"conflicting types for " + q + r"(\w+)" + cq, stderr):
             cname = re.escape(m.group(1))
@@ -419,7 +475,11 @@ def compile_to_asm(c_code, orig_check=None):
             full = re.sub(r'^extern\s+\w+\s+\*?' + cname + r'\s*;.*\n', '', full, flags=re.MULTILINE)
             full = re.sub(r'^void\s+' + cname + r'\s*\(void\)\s*;.*\n', '', full, flags=re.MULTILINE)
             full = re.sub(r'^typedef\s+int\s+' + cname + r'\s*;.*\n', '', full, flags=re.MULTILINE)
-        if not undeclared: break
+        if not undeclared:
+            # Even with no undeclared names, try recompiling if we patched the code
+            ok, stdout, stderr = _try_compile(full)
+            if ok: return True, stdout, stderr
+            break
         already = set(re.findall(r'(?:typedef|struct|union|extern|enum)\s+\w+.*?\s+(\w+)\s*[;\{]', full))
         funcs = set(re.findall(r'\b(?:int|void|float|static)\s+(\w+)\s*\(', full))
         stubs = ''
