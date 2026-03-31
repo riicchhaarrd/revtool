@@ -346,6 +346,8 @@ def compile_to_asm(c_code, orig_check=None):
                 continue
             # Extract function name from prototype line
             m = re.match(r'(?:const\s+)?(?:struct\s+)?(?:\w[\w\s\*]*?)\s+\*?\s*(\w+)\s*\(', line.strip())
+            if not m:
+                continue
             if not m or m.group(1) not in assigned_calls:
                 continue
             proto_name = m.group(1)

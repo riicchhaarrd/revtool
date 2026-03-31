@@ -3196,23 +3196,20 @@ private:
                          addr->kids.size() == 2) {
                     result = "*(int *)((char *)(" + emitExpr(addr) + "))";
                 }
-                // bare pointer dereference of a simple var/temp → use clean *(var) syntax
+                // bare pointer dereference of a simple var/temp: Load(Var) = *var
+                // For pointer types, this just reads the pointer value — no field access.
+                // Field access only happens at Load(Add(Var, Const(offset))) above.
                 else if (addr && (addr->op == IROp::Var || addr->op == IROp::Temp)) {
                     TypeRef addrType = exprType(addr);
-                    if (addrType != NullType && m_types.isStructPointer(addrType)) {
-                        TypeRef structRef = m_types.getPointedStruct(addrType);
-                        std::string access = structRef != NullType ?
-                            m_types.formatFieldAccess(structRef, 0) : "";
-                        if (!access.empty())
-                            result = emitExpr(addr) + "->" + access;
-                        else
-                            result = "*(" + emitExpr(addr) + ")";
-                    } else if (addrType != NullType) {
+                    if (addrType != NullType) {
                         auto *at = m_types.resolveType(addrType);
                         if (at && at->kind == StabsTypeKind::Pointer) {
                             auto *tgt = m_types.resolveType(at->targetType);
+                            // Simple scalar pointer (int*, float*): var[0] notation
                             if (tgt && tgt->sizeBytes > 0 && tgt->sizeBytes <= 8 &&
-                                tgt->kind != StabsTypeKind::Struct && tgt->kind != StabsTypeKind::Union)
+                                tgt->kind != StabsTypeKind::Struct &&
+                                tgt->kind != StabsTypeKind::Union &&
+                                tgt->kind != StabsTypeKind::Pointer)
                                 result = emitExpr(addr) + "[0]";
                             else
                                 result = "*(" + emitExpr(addr) + ")";
@@ -3653,13 +3650,19 @@ private:
                 case IROp::SDiv: case IROp::UDiv: op = " / "; break;
                 case IROp::SMod: case IROp::UMod: op = " % "; break;
                 case IROp::Shl:  op = " << "; break;
-                case IROp::Shr: case IROp::Sar: op = " >> "; break;
+                case IROp::Sar: op = " >> "; break;
+                case IROp::Shr:  op = " >> "; break; // handled below with unsigned cast
                 case IROp::And:  op = " & "; break;
                 case IROp::Or:   op = " | "; break;
                 case IROp::Xor:  op = " ^ "; break;
                 default: op = " + "; break;
                 }
-                result = "(" + lhs + op + rhs + ")";
+                if (e->op == IROp::Shr) {
+                    // Logical shift right needs unsigned cast to avoid sar
+                    result = "((unsigned)(" + lhs + ") >> " + rhs + ")";
+                } else {
+                    result = "(" + lhs + op + rhs + ")";
+                }
                 break;
             }
 
