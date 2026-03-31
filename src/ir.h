@@ -70,6 +70,7 @@ struct IRExpr {
 
     // How many statements reference this temp (for inlining decisions)
     int useCount = 0;
+    int loadSize = 4;  // For Load: memory access size in bytes (1, 2, 4)
 
     // ── Constructors ────────────────────────────────────────────────
     static std::unique_ptr<IRExpr> mkConst(int64_t v, TypeRef t = NullType) {
@@ -162,6 +163,7 @@ struct IRExpr {
         auto e = std::make_unique<IRExpr>();
         e->op = op; e->value = value; e->name = name;
         e->typeRef = typeRef; e->castKind = castKind; e->useCount = useCount;
+        e->loadSize = loadSize;
         for (auto &k : kids)
             e->kids.push_back(k->clone());
         return e;

@@ -943,7 +943,18 @@ private:
         switch (op.type) {
         case X86_OP_REG: return readReg(op.reg);
         case X86_OP_IMM: return readImm(op.imm);
-        case X86_OP_MEM: return readMem(op.mem);
+        case X86_OP_MEM: {
+            auto result = readMem(op.mem);
+            // Propagate operand size for correct cast width
+            if (result && op.size > 0 && op.size < 4) {
+                if (result->op == IROp::Load)
+                    result->loadSize = op.size;
+                // For Field nodes created by struct resolution, propagate via loadSize
+                else if (result->op == IROp::Field)
+                    result->loadSize = op.size;
+            }
+            return result;
+        }
         default: return IRExpr::mkConst(0);
         }
     }

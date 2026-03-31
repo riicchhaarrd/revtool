@@ -2969,6 +2969,15 @@ private:
         }
 
         // ── Emit an IR expression as a C string ─────────────────────
+        // Get the cast type name for a Load based on its access size
+        static const char* loadCastType(int loadSize) {
+            switch (loadSize) {
+            case 1: return "unsigned char";
+            case 2: return "unsigned short";
+            default: return "int";
+            }
+        }
+
         std::string emitExpr(IRExpr *e, bool negate = false) {
             if (!e) return "0"; // null expression fallback
 
@@ -3244,15 +3253,15 @@ private:
                     }
                     if (result.empty()) {
                         char buf[64];
-                        snprintf(buf, sizeof(buf), "*(int *)((char *)%s + 0x%llX)",
-                                 base.c_str(), (unsigned long long)off);
+                        snprintf(buf, sizeof(buf), "*(%s *)((char *)%s + 0x%llX)",
+                                 loadCastType(e->loadSize), base.c_str(), (unsigned long long)off);
                         result = buf;
                     }
                 }
                 // General Add/Sub expression → *(int *)((char *)(expr))
                 else if (addr && (addr->op == IROp::Add || addr->op == IROp::Sub) &&
                          addr->kids.size() == 2) {
-                    result = "*(int *)((char *)(" + emitExpr(addr) + "))";
+                    result = std::string("*(") + loadCastType(e->loadSize) + " *)((char *)(" + emitExpr(addr) + "))";
                 }
                 // bare pointer dereference of a simple var/temp: Load(Var) = *var
                 // For pointer types, this just reads the pointer value — no field access.
@@ -3291,10 +3300,11 @@ private:
                         auto *rt = m_types.resolveType(addrT);
                         isPtr = rt && rt->kind == StabsTypeKind::Pointer;
                     }
+                    const char *lct = loadCastType(e->loadSize);
                     if (isPtr)
-                        result = "*(int *)(" + addrStr + ")";
+                        result = std::string("*(") + lct + " *)(" + addrStr + ")";
                     else
-                        result = "*(int *)((char *)(" + addrStr + "))";
+                        result = std::string("*(") + lct + " *)((char *)(" + addrStr + "))";
                 }
                 m_addrDepth--;
                 break;
@@ -3411,7 +3421,7 @@ private:
                 if (isSynthField) {
                     // Synthetic field: always use cast-based pointer arithmetic
                     int off = (int)e->value;
-                    result = "*(int *)((char *)(" + base + ") + " + std::to_string(off) + ")";
+                    result = std::string("*(") + loadCastType(e->loadSize) + " *)((char *)(" + base + ") + " + std::to_string(off) + ")";
                 } else {
                     result = base + "->" + e->name;
                 }
