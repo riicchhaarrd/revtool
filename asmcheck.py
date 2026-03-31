@@ -106,6 +106,20 @@ typedef int isNegative;
 typedef int SOCKET;
 typedef struct { int _[4]; } fd_set;
 typedef struct { int _[2]; } timeval;
+/* JPEG types */
+typedef struct { int _[256]; } jpeg_compress_struct;
+typedef struct { int _[256]; } jpeg_decompress_struct;
+typedef jpeg_decompress_struct* j_decompress_ptr;
+typedef jpeg_compress_struct* j_compress_ptr;
+typedef int JDIMENSION; typedef int JSAMPLE; typedef short JCOEF;
+typedef int boolean;
+typedef short DCTELEM;
+typedef int *JSAMPARRAY; typedef int *JSAMPROW; typedef int *JBLOCKROW;
+/* Misc missing */
+typedef int scr_anim_t;
+typedef struct { int _[32]; } SpeexBits;
+typedef void *ogg_stream_state;
+typedef struct { int _[64]; } inflate_state;
 '''
 
 # Dvar function prototypes with proper float parameter types
@@ -332,6 +346,8 @@ def compile_to_asm(c_code, orig_check=None):
                 continue
             # Extract function name from prototype line
             m = re.match(r'(?:const\s+)?(?:struct\s+)?(?:\w[\w\s\*]*?)\s+\*?\s*(\w+)\s*\(', line.strip())
+            if not m:
+                continue
             if not m or m.group(1) not in assigned_calls:
                 continue
             proto_name = m.group(1)
