@@ -943,7 +943,18 @@ private:
         switch (op.type) {
         case X86_OP_REG: return readReg(op.reg);
         case X86_OP_IMM: return readImm(op.imm);
-        case X86_OP_MEM: return readMem(op.mem);
+        case X86_OP_MEM: {
+            auto result = readMem(op.mem);
+            // Propagate operand size for correct cast width
+            if (result && op.size > 0 && op.size < 4) {
+                if (result->op == IROp::Load)
+                    result->loadSize = op.size;
+                // For Field nodes created by struct resolution, propagate via loadSize
+                else if (result->op == IROp::Field)
+                    result->loadSize = op.size;
+            }
+            return result;
+        }
         default: return IRExpr::mkConst(0);
         }
     }
@@ -1040,30 +1051,9 @@ private:
             int bt = regTemp(m.base);
             if (bt >= 0) baseType = m_func->tempType(bt);
 
-            // Try resolving type from STABS for named globals
-            // readReg returns Temps, so follow temp→definition to find Var name
-            if (baseType == NullType && base && base->op == IROp::Temp) {
-                int tid = base->tempId();
-                // Search through all emitted BBs for the temp assignment
-                for (auto &blk : m_func->blocks) {
-                    for (auto &s : blk.stmts) {
-                        if (s.kind == IRStmtKind::Assign && s.destTemp == tid && s.expr) {
-                            IRExpr *def = s.expr.get();
-                            if (def->op == IROp::Var && !def->name.empty()) {
-                                auto *gn = m_types.globalByName(def->name);
-                                if (gn && gn->typeRef != NullType) {
-                                    auto *gt = m_types.resolveType(gn->typeRef);
-                                    if (gt && gt->kind == StabsTypeKind::Pointer)
-                                        baseType = gn->typeRef;
-                                }
-                            }
-                        }
-                    }
-                    if (baseType != NullType) break;
-                }
-            }
             // Try struct field resolution with array subscript support
-            if (baseType != NullType && m_types.isStructPointer(baseType)) {
+            // Skip offset 0: [reg+0] is just *reg, not a field access
+            if (m.disp != 0 && baseType != NullType && m_types.isStructPointer(baseType)) {
                 TypeRef structRef = m_types.getPointedStruct(baseType);
                 if (structRef != NullType) {
                     std::string access = m_types.formatFieldAccess(structRef, (int)m.disp);
