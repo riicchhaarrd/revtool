@@ -914,6 +914,36 @@ public:
                 cleaned.replace("*(char *)(" + gname + ")", "*(char *)(" + ptrName + ")");
             }
         }
+        // Fix invalid array pointer syntax in declarations: "float[4] * mtx" → "float * mtx"
+        // Only on declaration lines (function signature or local variable declarations)
+        {
+            QStringList cl = cleaned.split('\n');
+            for (int i = 0; i < cl.size(); ++i) {
+                QString t = cl[i].trimmed();
+                // Only process declaration-like lines (function signatures and variable decls)
+                bool isDecl = (t.contains('(') && t.contains(')') && !t.contains('=') && !t.contains("if ") && !t.contains("while ")) ||
+                              (t.endsWith(';') && !t.contains('=') && !t.contains('('));
+                if (!isDecl) continue;
+                // Replace TYPE[N] * NAME with TYPE * NAME
+                int pos = 0;
+                while ((pos = cl[i].indexOf('[', pos)) != -1) {
+                    int be = cl[i].indexOf(']', pos);
+                    if (be < 0) break;
+                    bool allDig = true;
+                    for (int ci = pos + 1; ci < be; ++ci)
+                        if (!cl[i][ci].isDigit()) { allDig = false; break; }
+                    if (!allDig || be == pos + 1) { pos = be + 1; continue; }
+                    int after = be + 1;
+                    while (after < cl[i].size() && cl[i][after] == ' ') after++;
+                    if (after < cl[i].size() && cl[i][after] == '*') {
+                        cl[i].remove(pos, after - pos);
+                    } else {
+                        pos = be + 1;
+                    }
+                }
+            }
+            cleaned = cl.join('\n');
+        }
         // Remove redundant double casts: (type)((type)(x)) → (type)(x)
         {
             int pos = 0;

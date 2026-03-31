@@ -98,7 +98,6 @@ typedef struct { int _[80]; } WIN32_FIND_DATAA;
 typedef void *HANDLE;
 typedef int HRESULT;
 /* Game engine types */
-typedef struct { float _[4]; } DObjAnimMat;
 typedef int scr_thread_t;
 typedef void *scr_func_t;
 typedef int TextureID;
@@ -404,10 +403,33 @@ def compile_to_asm(c_code, orig_check=None):
 
     # Retry: add simple stubs for remaining undeclared names
     q = r"[\x60\x27\u2018]"; cq = r"[\x27\u2019]"
+    stubs_types = set()  # track what we've added as types
     for attempt in range(5):
         undeclared = set()
         for m in re.finditer(q + r"(\w+)" + cq + r" undeclared", stderr): undeclared.add(m.group(1))
-        for m in re.finditer(r"syntax error before " + q + r"(\w+)" + cq, stderr): undeclared.add(m.group(1))
+        for m in re.finditer(r"syntax error before " + q + r"(\w+)" + cq, stderr):
+            token = m.group(1)
+            undeclared.add(token)
+            # If the token is '*', look at the error line for the unknown type before it
+            if token == '*':
+                for em in re.finditer(r":(\d+):.*syntax error before.*\*", stderr):
+                    eln = int(em.group(1))
+                    code_lines = full.split('\n')
+                    if eln <= len(code_lines):
+                        eline = code_lines[eln-1].strip()
+                        # Find words before * that look like type names
+                        words = re.findall(r'\b(\w+)\b', eline)
+                        for w in words:
+                            if (w[0].isupper() or w.endswith('_t') or w.endswith('_s')) and len(w) > 2:
+                                undeclared.add(w)
+                    break
+        # "dereferencing pointer to incomplete type" - add struct definition
+        for m in re.finditer(r"dereferencing pointer to incomplete type", stderr):
+            # Find the struct name from context
+            pass  # handled below with struct stub generation
+        # "invalid type argument of '->' / 'unary *'" - the variable needs pointer type
+        # "invalid operands to binary" - type mismatch, try casting
+        # These are harder to fix automatically
         # Handle "two or more data types": extract unknown type from the error line
         for m in re.finditer(r':(\d+):.*two or more data types', stderr):
             lineno = int(m.group(1))
@@ -451,8 +473,34 @@ def compile_to_asm(c_code, orig_check=None):
         # Handle "label at end of compound statement" - add empty statement after label
         if 'label at end of compound statement' in stderr:
             full = re.sub(r'(bb_\d+:)\s*\n(\s*\})', r'\1 ;\n\2', full)
-            # Also handle label on same line as }
             full = re.sub(r'(bb_\d+:)\s*\}', r'\1 ; }', full)
+        # Handle "dereferencing pointer to incomplete type" - add struct definition
+        for m in re.finditer(r"dereferencing pointer to incomplete type", stderr):
+            pass  # extract struct name from the error line
+        for m in re.finditer(r":(\d+):.*dereferencing pointer to incomplete type", stderr):
+            lineno = int(m.group(1))
+            code_lines = full.split('\n')
+            if lineno <= len(code_lines):
+                line_text = code_lines[lineno-1]
+                # Look for struct X * patterns near this line
+                for sm in re.finditer(r'struct\s+(\w+)\s*\*', full):
+                    sname = sm.group(1)
+                    # Check if this struct has a definition
+                    if not re.search(r'struct\s+' + re.escape(sname) + r'\s*\{', full):
+                        # Add a stub struct definition
+                        stub = f'struct {sname} {{ int _[64]; }};\n'
+                        if stub not in full:
+                            idx = full.find(STUBS) + len(STUBS) if STUBS in full else 0
+                            full = full[:idx] + stub + full[idx:]
+                            break  # one at a time
+        # Handle "switch quantity not an integer" - cast to int
+        for m in re.finditer(r":(\d+):.*switch quantity not an integer", stderr):
+            lineno = int(m.group(1))
+            code_lines = full.split('\n')
+            if lineno <= len(code_lines):
+                line_text = code_lines[lineno-1]
+                code_lines[lineno-1] = re.sub(r'switch\s*\((.+?)\)', r'switch ((int)(\1))', line_text)
+                full = '\n'.join(code_lines)
         # Remove conflicting stubs
         for m in re.finditer(r"conflicting types for " + q + r"(\w+)" + cq, stderr):
             cname = re.escape(m.group(1))
@@ -475,6 +523,36 @@ def compile_to_asm(c_code, orig_check=None):
             full = re.sub(r'^extern\s+\w+\s+\*?' + cname + r'\s*;.*\n', '', full, flags=re.MULTILINE)
             full = re.sub(r'^void\s+' + cname + r'\s*\(void\)\s*;.*\n', '', full, flags=re.MULTILINE)
             full = re.sub(r'^typedef\s+int\s+' + cname + r'\s*;.*\n', '', full, flags=re.MULTILINE)
+        # Handle "too few/many arguments to function" - fix prototype arg count
+        for m in re.finditer(r"too (?:few|many) arguments to function " + q + r"(.+?)" + cq, stderr):
+            fname_raw = m.group(1)
+            # Extract function name (may be wrapped in expression)
+            fm = re.search(r'\b(\w+)\s*$', fname_raw)
+            if not fm: continue
+            fname = fm.group(1)
+            # Count actual arguments at the call site
+            call_pat = re.escape(fname) + r'\s*\('
+            cm = re.search(call_pat, full)
+            if not cm: continue
+            # Count args by tracking parens
+            start = cm.end() - 1
+            depth = 0; nargs = 0; i = start
+            for i in range(start, min(start+500, len(full))):
+                if full[i] == '(': depth += 1
+                elif full[i] == ')':
+                    depth -= 1
+                    if depth == 0:
+                        if i > start + 1: nargs += 1  # non-empty args
+                        break
+                elif full[i] == ',' and depth == 1: nargs += 1
+            if nargs > 0:
+                # Remove old prototype and add new one
+                full = re.sub(r'^(?:int|void)\s+' + re.escape(fname) + r'\s*\([^)]*\)\s*;.*\n',
+                             '', full, flags=re.MULTILINE)
+                params = ', '.join(['int'] * nargs)
+                new_proto = f'int {fname}({params});\n'
+                idx = full.find(STUBS) + len(STUBS) if STUBS in full else 0
+                full = full[:idx] + new_proto + full[idx:]
         if not undeclared:
             # Even with no undeclared names, try recompiling if we patched the code
             ok, stdout, stderr = _try_compile(full)
