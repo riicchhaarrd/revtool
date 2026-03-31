@@ -1321,16 +1321,33 @@ public:
         QStringList pass2;
         for (int i = 0; i < pass1.size(); ++i) {
             QString trimmed = pass1[i].trimmed();
-            // Match more variable declaration patterns
-            if (trimmed.startsWith("int v") || trimmed.startsWith("float v") ||
-                trimmed.startsWith("int *v") ||
-                trimmed.startsWith("int var_") || trimmed.startsWith("float var_")) {
-                // Extract the variable name (find first 'v' for the var name)
-                QString varName;
-                int nameStart = trimmed.indexOf('v');
-                int nameEnd = trimmed.indexOf(';', nameStart);
-                if (nameStart >= 0 && nameEnd > nameStart)
-                    varName = trimmed.mid(nameStart, nameEnd - nameStart);
+            // Match variable declaration: TYPE NAME; (no assignment, no function body)
+            // Detect: line ends with ";", contains no "=", no "(", and starts with a type keyword
+            bool isDecl = false;
+            QString varName;
+            if (trimmed.endsWith(';') && !trimmed.contains('=') && !trimmed.contains('(') && !trimmed.contains('[')) {
+                // Check starts with known type or looks like TYPE NAME;
+                static const char *typeKw[] = {"int ", "float ", "char ", "short ", "unsigned ",
+                    "void *", "const ", "vec_t ", "vec3_t ", "vec2_t ", "byte ",
+                    "playerState_t ", "qboolean ", "Bool ", "dvar_t ", "cmd_function_t ",
+                    "struct ", "char *", "int *", "float *", nullptr};
+                for (int k = 0; typeKw[k]; ++k) {
+                    if (trimmed.startsWith(typeKw[k])) { isDecl = true; break; }
+                }
+                if (isDecl) {
+                    // Extract variable name: last word before ";"
+                    int semi = trimmed.lastIndexOf(';');
+                    int nameEnd2 = semi;
+                    while (nameEnd2 > 0 && trimmed[nameEnd2-1] == ' ') nameEnd2--;
+                    int ns = nameEnd2 - 1;
+                    while (ns > 0 && (trimmed[ns-1].isLetterOrNumber() || trimmed[ns-1] == '_'))
+                        ns--;
+                    varName = trimmed.mid(ns, nameEnd2 - ns).trimmed();
+                    // Don't remove if the name starts with * (pointer decl)
+                    if (varName.startsWith('*')) varName = varName.mid(1);
+                }
+            }
+            if (isDecl && !varName.isEmpty()) {
                 // Check if this var is used anywhere in the rest of the enclosing scope
                 // Track brace depth to find the matching closing brace
                 if (!varName.isEmpty()) {
@@ -2736,10 +2753,10 @@ private:
                     out += pad(indent) + QString::fromStdString(
                         base + "->" + fname + " = " + val) + ";\n";
                 }
-                // General Add/Sub expression → *(expr) = val without ugly cast
+                // General Add/Sub expression → *(type *)((char *)(expr)) = val
                 else if ((a->op == IROp::Add || a->op == IROp::Sub) && a->kids.size() == 2) {
                     out += pad(indent) + QString::fromStdString(
-                        "*(" + emitExpr(a) + ") = " + val) + ";\n";
+                        "*(" + storeCast + " *)((char *)(" + emitExpr(a) + ")) = " + val) + ";\n";
                 }
                 else if (a->op == IROp::Var || a->op == IROp::Temp) {
                     // For scalar pointers (float*, int*), use base[0] = val
@@ -2754,13 +2771,18 @@ private:
                             break;
                         }
                     }
-                    std::string addr = emitExpr(a);
-                    out += pad(indent) + QString::fromStdString(
-                        "*(" + storeCast + " *)(" + addr + ") = " + val) + ";\n";
+                    std::string addrS = emitExpr(a);
+                    bool aIsPtr = (atInfo && atInfo->kind == StabsTypeKind::Pointer);
+                    if (aIsPtr)
+                        out += pad(indent) + QString::fromStdString(
+                            "*(" + storeCast + " *)(" + addrS + ") = " + val) + ";\n";
+                    else
+                        out += pad(indent) + QString::fromStdString(
+                            "*(" + storeCast + " *)((char *)(" + addrS + ")) = " + val) + ";\n";
                 } else {
-                    std::string addr = emitExpr(a);
+                    std::string addrS = emitExpr(a);
                     out += pad(indent) + QString::fromStdString(
-                        "*(" + storeCast + " *)(" + addr + ") = " + val) + ";\n";
+                        "*(" + storeCast + " *)((char *)(" + addrS + ")) = " + val) + ";\n";
                 }
                 break;
             }
@@ -3169,10 +3191,10 @@ private:
                         result = buf;
                     }
                 }
-                // General Add/Sub expression → *(expr) without ugly cast
+                // General Add/Sub expression → *(int *)((char *)(expr))
                 else if (addr && (addr->op == IROp::Add || addr->op == IROp::Sub) &&
                          addr->kids.size() == 2) {
-                    result = "*(" + emitExpr(addr) + ")";
+                    result = "*(int *)((char *)(" + emitExpr(addr) + "))";
                 }
                 // bare pointer dereference of a simple var/temp → use clean *(var) syntax
                 else if (addr && (addr->op == IROp::Var || addr->op == IROp::Temp)) {
@@ -3204,13 +3226,20 @@ private:
                     result = "*(" + emitExpr(addr) + ")";
                 }
                 // If result uses *(expr), ensure it's a valid dereference
-                if (!result.empty() && result[0] == '*' && addr) {
-                    // Always cast plain *(var) to *(int*)(var) to avoid void* dereference
-                    // and to handle cases where the var type is unknown
-                    if (addr->op == IROp::Var || addr->op == IROp::Temp) {
-                        std::string addrStr = emitExpr(addr);
-                        result = "*(int *)(" + addrStr + ")";
+                // Cast through (char *) to handle int→pointer and const→pointer safely
+                if (!result.empty() && result[0] == '*' && result.find("*(int *)") != 0 &&
+                    result.find("*(char *)") != 0 && result.find("*(short *)") != 0) {
+                    std::string addrStr = emitExpr(addr);
+                    TypeRef addrT = exprType(addr);
+                    bool isPtr = false;
+                    if (addrT != NullType) {
+                        auto *rt = m_types.resolveType(addrT);
+                        isPtr = rt && rt->kind == StabsTypeKind::Pointer;
                     }
+                    if (isPtr)
+                        result = "*(int *)(" + addrStr + ")";
+                    else
+                        result = "*(int *)((char *)(" + addrStr + "))";
                 }
                 m_addrDepth--;
                 break;
@@ -3543,6 +3572,79 @@ private:
                     result = emitExpr(e->kids[0]->kids[0].get(), negate);
                     break;
                 }
+                // Helper: resolve temp to its definition for pattern matching
+                auto resolveToLoad = [&](IRExpr *expr) -> IRExpr* {
+                    if (!expr) return expr;
+                    if (expr->op == IROp::Temp) {
+                        auto it = m_tempDef.find(expr->tempId());
+                        if (it != m_tempDef.end() && it->second)
+                            return it->second;
+                    }
+                    return expr;
+                };
+                // SSE fabsf pattern: And(val, Load(mask_addr)) where mask=0x7FFFFFFF
+                if (e->op == IROp::And) {
+                    auto checkFabsMask = [&](IRExpr *maskExpr) -> bool {
+                        if (!maskExpr) return false;
+                        maskExpr = resolveToLoad(maskExpr);
+                        // Load(Const(addr)) where *addr == 0x7FFFFFFF
+                        if (maskExpr->op == IROp::Load && !maskExpr->kids.empty()) {
+                            auto *addrExpr = resolveToLoad(maskExpr->kids[0].get());
+                            if (addrExpr && addrExpr->isConst()) {
+                                uint32_t addr = (uint32_t)addrExpr->value;
+                                int64_t fo = m_mf.fileOffsetForAddress(addr);
+                                if (fo >= 0) {
+                                    const uint8_t *p = m_mf.bytesAt((uint32_t)fo, 4);
+                                    uint32_t val = p ? *(const uint32_t*)p : 0;
+                                    return val == 0x7FFFFFFF;
+                                }
+                            }
+                        }
+                        // Direct constant 0x7FFFFFFF
+                        if (maskExpr->isConst() && (uint32_t)maskExpr->value == 0x7FFFFFFF)
+                            return true;
+                        return false;
+                    };
+                    // Check both operand orders: And(val, mask) or And(mask, val)
+                    if (e->kids.size() == 2) {
+                        if (checkFabsMask(e->kids[1].get())) {
+                            result = "fabsf(" + lhs + ")"; break;
+                        }
+                        if (checkFabsMask(e->kids[0].get())) {
+                            result = "fabsf(" + rhs + ")"; break;
+                        }
+                    }
+                }
+                // SSE negation pattern: Xor(val, Load(mask_addr)) where mask=0x80000000
+                if (e->op == IROp::Xor) {
+                    auto checkNegMask = [&](IRExpr *maskExpr) -> bool {
+                        if (!maskExpr) return false;
+                        maskExpr = resolveToLoad(maskExpr);
+                        if (maskExpr->op == IROp::Load && !maskExpr->kids.empty()) {
+                            auto *addrExpr = resolveToLoad(maskExpr->kids[0].get());
+                            if (addrExpr && addrExpr->isConst()) {
+                                uint32_t addr = (uint32_t)addrExpr->value;
+                                int64_t fo = m_mf.fileOffsetForAddress(addr);
+                                if (fo >= 0) {
+                                    const uint8_t *p = m_mf.bytesAt((uint32_t)fo, 4);
+                                    uint32_t val = p ? *(const uint32_t*)p : 0;
+                                    return val == 0x80000000;
+                                }
+                            }
+                        }
+                        if (maskExpr->isConst() && (uint32_t)maskExpr->value == 0x80000000)
+                            return true;
+                        return false;
+                    };
+                    if (e->kids.size() == 2) {
+                        if (checkNegMask(e->kids[1].get())) {
+                            result = "(-(" + lhs + "))"; break;
+                        }
+                        if (checkNegMask(e->kids[0].get())) {
+                            result = "(-(" + rhs + "))"; break;
+                        }
+                    }
+                }
                 std::string op;
                 switch (e->op) {
                 case IROp::Add:  op = " + "; break;
@@ -3555,7 +3657,7 @@ private:
                 case IROp::And:  op = " & "; break;
                 case IROp::Or:   op = " | "; break;
                 case IROp::Xor:  op = " ^ "; break;
-                default: op = " + "; break; // fallback: treat unknown binary as addition
+                default: op = " + "; break;
                 }
                 result = "(" + lhs + op + rhs + ")";
                 break;

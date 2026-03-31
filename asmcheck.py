@@ -116,6 +116,7 @@ typedef int boolean;
 typedef short DCTELEM;
 typedef int *JSAMPARRAY; typedef int *JSAMPROW; typedef int *JBLOCKROW;
 /* Misc missing */
+typedef int scr_anim_t;
 typedef struct { int _[32]; } SpeexBits;
 typedef void *ogg_stream_state;
 typedef struct { int _[64]; } inflate_state;
