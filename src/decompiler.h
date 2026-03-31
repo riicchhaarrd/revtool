@@ -3180,6 +3180,14 @@ private:
                         TypeRef structRef = m_types.getPointedStruct(baseType);
                         std::string access = structRef != NullType ?
                             m_types.formatFieldAccess(structRef, (int)off) : "";
+                        // Debug: trace incorrect field resolution
+                        if (!access.empty() && access.find("[") != std::string::npos &&
+                            access.find("arr_") == std::string::npos) {
+                            // Subscript on a non-array field is likely wrong —
+                            // the field resolver is treating a pointer field as an array.
+                            // Fall through to the generic *(type*)((char*)base + off) path.
+                            access.clear();
+                        }
                         if (!access.empty()) {
                             result = base + "->" + access;
                         }

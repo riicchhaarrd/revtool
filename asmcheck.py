@@ -486,6 +486,9 @@ def compile_to_asm(c_code, orig_check=None):
                          'int ' + vname + ';', full)
             full = re.sub(r'\bvoid\s+' + re.escape(vname) + r'\s*=',
                          'int ' + vname + ' =', full)
+        # Handle "assignment of read-only member" — strip const from pointer params
+        if 'read-only' in stderr:
+            full = re.sub(r'\bconst\s+((?:struct\s+)?\w+\s*\*)', r'\1', full)
         # Handle "label at end of compound statement" - add empty statement after label
         if 'label at end of compound statement' in stderr:
             full = re.sub(r'(bb_\d+:)\s*\n(\s*\})', r'\1 ;\n\2', full)
