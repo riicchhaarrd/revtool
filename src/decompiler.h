@@ -28,6 +28,7 @@
 class Decompiler {
 public:
     static inline bool s_useSSA = false;
+    static inline bool s_flatMode = false;
 
     // Decompile a single function
     static QString decompile(const MachOFile &mf, uint32_t funcAddr, bool format = true) {
@@ -54,6 +55,10 @@ public:
         auto tree = structurer.structure(func);
 
         Emitter em(mf, func);
+        if (s_flatMode) {
+            QString code = em.generateFlat(tree.get());
+            return cleanupOutput(code);
+        }
         QString code = em.generate(tree.get());
         return format ? clangFormat(cleanupOutput(code)) : cleanupOutput(code);
     }
@@ -867,6 +872,107 @@ public:
                 pos += 2;
             }
         }
+        // Optimize global struct access: when (char *)GLOBAL is used multiple times,
+        // introduce a local pointer to force register-based access (matching original asm)
+        {
+            // Count occurrences of (char *)NAME + 0x patterns
+            std::map<QString, int> globalCounts;
+            QString marker = "(char *)";
+            int pos = 0;
+            while ((pos = cleaned.indexOf(marker, pos)) != -1) {
+                int nameStart = pos + marker.size();
+                // Skip whitespace
+                while (nameStart < cleaned.size() && cleaned[nameStart] == ' ') nameStart++;
+                int nameEnd = nameStart;
+                while (nameEnd < cleaned.size() && (cleaned[nameEnd].isLetterOrNumber() || cleaned[nameEnd] == '_'))
+                    nameEnd++;
+                if (nameEnd > nameStart) {
+                    QString gname = cleaned.mid(nameStart, nameEnd - nameStart);
+                    // Check followed by " + 0x"
+                    int afterName = nameEnd;
+                    while (afterName < cleaned.size() && cleaned[afterName] == ' ') afterName++;
+                    if (afterName < cleaned.size() && cleaned[afterName] == '+') {
+                        // Only count real globals (not locals)
+                        // Only real globals, not decompiler-generated locals (vN, varN, tN)
+                        bool isDecompLocal = (gname[0] == 'v' && gname.size() >= 2 && gname[1].isDigit()) ||
+                                             gname.startsWith("var_") || gname.startsWith("t");
+                        if (gname.size() >= 2 && gname[0].isLower() && !isDecompLocal) {
+                            globalCounts[gname]++;
+                        }
+                    }
+                }
+                pos = nameStart;
+            }
+            for (auto &[gname, count] : globalCounts) {
+                if (count < 3) continue;
+                QString ptrName = "_" + gname + "_p";
+                int bracePos = cleaned.indexOf('{');
+                if (bracePos >= 0) {
+                    int insertPos = cleaned.indexOf('\n', bracePos) + 1;
+                    cleaned.insert(insertPos, "    char *" + ptrName + " = (char *)" + gname + ";\n");
+                }
+                cleaned.replace("(char *)" + gname + " ", ptrName + " ");
+                cleaned.replace("(char *)" + gname + ")", ptrName + ")");
+                // Also replace *(type*)(GLOBAL) patterns to use the pointer
+                cleaned.replace("*(int *)(" + gname + ")", "*(int *)(" + ptrName + ")");
+                cleaned.replace("*(char *)(" + gname + ")", "*(char *)(" + ptrName + ")");
+            }
+        }
+        // Fix invalid array pointer syntax in declarations: "float[4] * mtx" → "float * mtx"
+        // Only on declaration lines (function signature or local variable declarations)
+        {
+            QStringList cl = cleaned.split('\n');
+            for (int i = 0; i < cl.size(); ++i) {
+                QString t = cl[i].trimmed();
+                // Only process declaration-like lines (function signatures and variable decls)
+                bool isDecl = (t.contains('(') && t.contains(')') && !t.contains('=') && !t.contains("if ") && !t.contains("while ")) ||
+                              (t.endsWith(';') && !t.contains('=') && !t.contains('('));
+                if (!isDecl) continue;
+                // Replace TYPE[N] * NAME with TYPE * NAME
+                int pos = 0;
+                while ((pos = cl[i].indexOf('[', pos)) != -1) {
+                    int be = cl[i].indexOf(']', pos);
+                    if (be < 0) break;
+                    bool allDig = true;
+                    for (int ci = pos + 1; ci < be; ++ci)
+                        if (!cl[i][ci].isDigit()) { allDig = false; break; }
+                    if (!allDig || be == pos + 1) { pos = be + 1; continue; }
+                    int after = be + 1;
+                    while (after < cl[i].size() && cl[i][after] == ' ') after++;
+                    if (after < cl[i].size() && cl[i][after] == '*') {
+                        cl[i].remove(pos, after - pos);
+                    } else {
+                        pos = be + 1;
+                    }
+                }
+            }
+            cleaned = cl.join('\n');
+        }
+        // Remove redundant double casts: (type)((type)(x)) → (type)(x)
+        {
+            int pos = 0;
+            while ((pos = cleaned.indexOf("((unsigned char)(", pos)) != -1) {
+                // Check if preceded by "(unsigned char)"
+                int outer = cleaned.lastIndexOf("(unsigned char)", pos);
+                if (outer >= 0 && outer + 15 == pos) {
+                    // Remove the outer cast: "(unsigned char)((unsigned char)(x))" → "(unsigned char)(x)"
+                    cleaned.remove(outer, 16); // remove "(unsigned char)("
+                    // Find matching close paren
+                    int depth = 1;
+                    int cp = outer;
+                    while (cp < cleaned.size() && depth > 0) {
+                        if (cleaned[cp] == '(') depth++;
+                        if (cleaned[cp] == ')') depth--;
+                        cp++;
+                    }
+                    if (cp > 0 && cp <= cleaned.size()) {
+                        cleaned.remove(cp - 1, 1); // remove extra close paren
+                    }
+                    continue;
+                }
+                pos += 1;
+            }
+        }
         // Fix variadic functions: detect va_list usage and fix signature + va_start
         {
             bool hasVaList = cleaned.contains("va_list ");
@@ -931,10 +1037,11 @@ public:
         }
         // Fix array element references: msg_OFFSET_ = 0 → msg[OFFSET] = 0
         {
-            // Find char arrays: "char NAME[SIZE]"
+            // Find byte/char arrays: "char/byte NAME[SIZE]"
+            for (auto &arrType : {"char ", "byte "}) {
             int pos = 0;
-            while ((pos = cleaned.indexOf("char ", pos)) != -1) {
-                int nameStart = pos + 5;
+            while ((pos = cleaned.indexOf(arrType, pos)) != -1) {
+                int nameStart = pos + (int)strlen(arrType);
                 int bracket = cleaned.indexOf('[', nameStart);
                 int semi = cleaned.indexOf(';', nameStart);
                 if (bracket > nameStart && bracket < semi) {
@@ -953,7 +1060,7 @@ public:
                                 while (numEnd < cleaned.size() && cleaned[numEnd].isDigit()) numEnd++;
                                 if (numEnd > numStart && numEnd < cleaned.size() && cleaned[numEnd] == '_') {
                                     int offset = cleaned.mid(numStart, numEnd - numStart).toInt();
-                                    if (offset > 0 && offset < arrSize) {
+                                    if (offset >= 0 && offset < arrSize) {
                                         QString oldPat = cleaned.mid(sp, numEnd + 1 - sp);
                                         QString newPat = arrName + "[" + QString::number(offset) + "]";
                                         cleaned.replace(sp, oldPat.size(), newPat);
@@ -970,11 +1077,207 @@ public:
                 }
                 pos = nameStart;
             }
+            } // for arrType
+        }
+        // Fix impossible nested conditions: if (x == V) { if (x != V) {
+        // The outer condition makes the inner always-false → dead code.
+        // Fix by inverting the outer condition.
+        // Also handle: if (V == x) { if (V != x) { (reversed operand order)
+        {
+            QStringList cl = cleaned.split('\n');
+            for (int i = 0; i < cl.size(); ++i) {
+                QString t = cl[i].trimmed();
+                if (!t.startsWith("if (") || !t.endsWith("{")) continue;
+                // Extract: if (EXPR == VALUE) or if (VALUE == EXPR)
+                int eqPos = t.indexOf(" == ");
+                if (eqPos < 0) continue;
+                QString lhs = t.mid(4, eqPos - 4).trimmed();
+                int bracePos = t.lastIndexOf('{');
+                QString rhs = t.mid(eqPos + 4, bracePos - eqPos - 4).trimmed().chopped(1).trimmed();
+                // rhs might have trailing ")"
+                while (rhs.endsWith(')') && lhs.count('(') <= lhs.count(')'))
+                    rhs.chop(1);
+
+                // Check next few lines for contradictory inner if
+                for (int j = i + 1; j < std::min(i + 4, (int)cl.size()); ++j) {
+                    QString t2 = cl[j].trimmed();
+                    // Inner condition contradicts outer
+                    if (t2.startsWith("if (") &&
+                        ((t2.contains(lhs) && t2.contains("!=")) ||
+                         (t2.contains(lhs) && (t2.contains("> ") || t2.contains("< "))))) {
+                        // Verify it's actually contradictory (same expression, different comparison)
+                        if (t2.contains(lhs + " != ") || t2.contains(lhs + " > ") || t2.contains(lhs + " < ") ||
+                            t2.contains("!= " + lhs) || t2.contains("> " + lhs) || t2.contains("< " + lhs)) {
+                            cl[i].replace(" == ", " != ");
+                            break;
+                        }
+                    }
+                    if (!t2.isEmpty() && t2 != "}" && !t2.startsWith("if (") && t2 != "return;")
+                        break;
+                }
+            }
+            cleaned = cl.join('\n');
+        }
+        // Fix hex integer constants used as float arguments in Dvar_Register* calls.
+        // The decompiler emits float bits as hex (0x3DCCCCCD) instead of float literals (0.1f).
+        // When passed to a function expecting float, this causes wrong values.
+        {
+            for (auto &fn : {"Dvar_RegisterFloat", "Dvar_RegisterColor",
+                             "Dvar_RegisterVec2", "Dvar_RegisterVec3", "Dvar_RegisterVec4"}) {
+                QString qfn = QString::fromUtf8(fn);
+                int pos = 0;
+                while ((pos = cleaned.indexOf(qfn + "(", pos)) != -1) {
+                    int paren = cleaned.indexOf('(', pos);
+                    if (paren < 0) { pos++; continue; }
+                    // Scan args for hex constants: 0xHHHHHHHH
+                    int depth = 0;
+                    for (int ci = paren; ci < cleaned.size(); ++ci) {
+                        if (cleaned[ci] == '(') depth++;
+                        if (cleaned[ci] == ')') { depth--; if (depth == 0) break; }
+                        // Match 0xHHHHHHHH (exactly 8 hex digits)
+                        if (cleaned[ci] == '0' && ci + 9 < cleaned.size() &&
+                            (cleaned[ci+1] == 'x' || cleaned[ci+1] == 'X')) {
+                            QString hex = cleaned.mid(ci, 10);
+                            // Check it's exactly 0x + 8 hex chars followed by non-alnum
+                            bool isHex8 = hex.size() == 10;
+                            for (int h = 2; h < 10 && isHex8; ++h)
+                                isHex8 = QString("0123456789ABCDEFabcdef").contains(hex[h]);
+                            if (isHex8 && (ci + 10 >= cleaned.size() || !cleaned[ci+10].isLetterOrNumber())) {
+                                bool ok;
+                                uint32_t bits = hex.toUInt(&ok, 16);
+                                if (ok && bits > 0x100) {
+                                    float fval;
+                                    memcpy(&fval, &bits, 4);
+                                    if (fval == fval && fval > -1e10f && fval < 1e10f) {
+                                        QString floatStr = QString::number((double)fval, 'g', 8) + "f";
+                                        cleaned.replace(ci, 10, floatStr);
+                                        ci += floatStr.size() - 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    pos = paren + 1;
+                }
+            }
+        }
+        // Fix integer 0 used as float argument: AngleDelta(0, ...) → AngleDelta(0.0f, ...)
+        // The compiler generates cvtsi2ss for int→float conversion, but the original
+        // uses raw 0 bits (same as float 0.0) with no conversion.
+        {
+            // Replace bare integer 0 in function calls where we know the param is float
+            // Pattern: known_float_func(... 0, ...) or (... 0)
+            for (auto &fn : {"AngleDelta", "AngleNormalize180", "AngleNormalize180Accurate",
+                             "BG_CheckProne"}) {
+                QString qfn = QString::fromUtf8(fn);
+                int pos = 0;
+                while ((pos = cleaned.indexOf(qfn + "(", pos)) != -1) {
+                    // Find the argument list and replace bare 0 with 0.0f
+                    int pstart = cleaned.indexOf('(', pos);
+                    if (pstart < 0) { pos++; continue; }
+                    int depth = 0;
+                    for (int ci = pstart; ci < cleaned.size(); ++ci) {
+                        if (cleaned[ci] == '(') depth++;
+                        if (cleaned[ci] == ')') {
+                            depth--;
+                            if (depth == 0) {
+                                // Replace ", 0)" and "(0," patterns within this call
+                                QString args = cleaned.mid(pstart, ci - pstart + 1);
+                                args.replace(", 0)", ", 0.0f)");
+                                args.replace(", 0,", ", 0.0f,");
+                                args.replace("(0,", "(0.0f,");
+                                args.replace("(0)", "(0.0f)");
+                                cleaned.replace(pstart, ci - pstart + 1, args);
+                                break;
+                            }
+                        }
+                    }
+                    pos = pstart + 1;
+                }
+            }
+        }
+        // Fix STABS int→float mismatch: when "int var_X" is assigned from a
+        // float-returning function (AngleDelta etc.) and used in float context,
+        // change declaration to "float var_X" to avoid spurious truncation.
+        {
+            static const char *floatFuncs[] = {
+                "AngleDelta", "AngleNormalize180", "AngleNormalize180Accurate",
+                "PitchForYawOnNormal", "Vec3Normalize", "Vec2Normalize",
+                "floorf", "sinf", "cosf", "sqrtf", "fminf", "fmaxf", nullptr
+            };
+            QStringList cl = cleaned.split('\n');
+            // Find int var_X declarations where all uses are float-like
+            for (int i = 0; i < cl.size(); ++i) {
+                QString t = cl[i].trimmed();
+                if (!t.startsWith("int var_")) continue;
+                int semi = t.indexOf(';');
+                if (semi < 0) continue;
+                QString varName = t.mid(4, semi - 4).trimmed();
+                if (varName.isEmpty()) continue;
+                // Check all lines for this variable's usage
+                bool assignedFromFloat = false;
+                bool usedAsInt = false;
+                for (int j = i + 1; j < cl.size(); ++j) {
+                    QString line = cl[j];
+                    if (!line.contains(varName)) continue;
+                    // Check if assigned from a float function
+                    if (line.contains(varName + " = ")) {
+                        for (int fi = 0; floatFuncs[fi]; ++fi) {
+                            if (line.contains(QString::fromUtf8(floatFuncs[fi]) + "(")) {
+                                assignedFromFloat = true;
+                                break;
+                            }
+                        }
+                    }
+                    // Check if used in float context (0.0f comparison, fabsf, etc.)
+                    if (line.contains(varName) &&
+                        (line.contains("0.0f") || line.contains("fabsf"))) {
+                        assignedFromFloat = true;
+                    }
+                    // Check if used as a pure integer (bit ops, array index, etc.)
+                    if (line.contains(varName + " &") || line.contains(varName + " |") ||
+                        line.contains(varName + " <<") || line.contains("[" + varName + "]")) {
+                        usedAsInt = true;
+                    }
+                }
+                if (assignedFromFloat && !usedAsInt) {
+                    cl[i].replace("int " + varName, "float " + varName);
+                }
+            }
+            cleaned = cl.join('\n');
+        }
+        // Fix duplicate nested conditions: if (X) { if (X) { → if (X) { if (1) {
+        // The inner condition is always true → replace with constant true.
+        {
+            QStringList cl = cleaned.split('\n');
+            for (int i = 0; i < cl.size() - 1; ++i) {
+                QString t = cl[i].trimmed();
+                if (!t.startsWith("if (") || !t.endsWith("{")) continue;
+                int j = i + 1;
+                while (j < cl.size() && cl[j].trimmed().isEmpty()) j++;
+                if (j < cl.size() && cl[j].trimmed() == t) {
+                    // Replace inner duplicate with if (1) — always true, no branch
+                    QString indent = cl[j];
+                    indent.truncate(cl[j].indexOf('i'));
+                    cl[j] = indent + "if (1) {";
+                }
+            }
+            cleaned = cl.join('\n');
         }
         QStringList lines = cleaned.split('\n');
         // Pass 1: Remove empty if blocks
         QStringList pass1;
         for (int i = 0; i < lines.size(); ++i) {
+            // Remove self-assignments: "x = x;"
+            {
+                QString t = lines[i].trimmed();
+                if (t.endsWith(';') && t.contains(" = ")) {
+                    int eq = t.indexOf(" = ");
+                    QString lhs = t.left(eq).trimmed();
+                    QString rhs = t.mid(eq + 3).chopped(1).trimmed(); // remove trailing ;
+                    if (lhs == rhs && !lhs.isEmpty()) continue;
+                }
+            }
             if (i + 1 < lines.size() &&
                 lines[i].trimmed().startsWith("if (") &&
                 lines[i].trimmed().endsWith("{") &&
@@ -1597,6 +1900,129 @@ private:
             return out;
         }
 
+        // Flat (goto-based) code generation: uses the structured mode's
+        // declarations + signature, but emits basic blocks in address order
+        // with explicit goto/if-goto. This preserves the original's block layout.
+        QString generateFlat(StructNode *root) {
+            // First, generate the structured output to get proper declarations
+            QString structOut = generate(root);
+            // Extract everything up to and including the opening brace + declarations
+            // Then replace the body with flat blocks
+            int bodyStart = structOut.indexOf("{\n") + 2;
+            // Find where declarations end (first line that's not a declaration or blank)
+            QStringList lines = structOut.split('\n');
+            int declEnd = 0;
+            bool pastBrace = false;
+            for (int i = 0; i < lines.size(); ++i) {
+                if (lines[i].trimmed() == "{") { pastBrace = true; continue; }
+                if (!pastBrace) continue;
+                QString t = lines[i].trimmed();
+                if (t.isEmpty()) { declEnd = i + 1; continue; }
+                // Declaration patterns
+                if (t.startsWith("int ") || t.startsWith("float ") || t.startsWith("char ") ||
+                    t.startsWith("char *") || t.startsWith("void *") || t.startsWith("const ") ||
+                    t.startsWith("register ") || t.startsWith("unsigned ") ||
+                    t.startsWith("playerState_t") || t.startsWith("qboolean") ||
+                    t.startsWith("struct ") || t.startsWith("vec_t") || t.startsWith("vec3_t") ||
+                    t.startsWith("OSStatus") || t.startsWith("Str255") || t.startsWith("MenuRef") ||
+                    t.startsWith("WindowRef") || t.startsWith("UInt32") || t.startsWith("size_t") ||
+                    t.startsWith("CGDirect") || t.startsWith("dvar_t") || t.startsWith("Bool") ||
+                    t.startsWith("byte ") || t.startsWith("cmd_function_t") ||
+                    t.startsWith("DObjAnimMat") || t.startsWith("XModel") || t.startsWith("short ")) {
+                    declEnd = i + 1;
+                    continue;
+                }
+                break;
+            }
+            // Build output: signature + declarations + flat body
+            QString out;
+            for (int i = 0; i < declEnd && i < lines.size(); ++i)
+                out += lines[i] + "\n";
+            // Helper: resolve a return expression through temp assignments.
+            // If "return TEMP" and TEMP was assigned EXPR in the same block, return EXPR.
+            auto resolveReturnExpr = [&](const BasicBlock &bb, int retIdx) -> std::string {
+                auto &retStmt = bb.stmts[retIdx];
+                if (!retStmt.expr) return "";
+                std::string retStr = emitExpr(retStmt.expr.get());
+                if (retStmt.expr->op == IROp::Temp && retIdx > 0) {
+                    auto &prev = bb.stmts[retIdx - 1];
+                    if (prev.kind == IRStmtKind::Assign &&
+                        prev.destTemp == retStmt.expr->tempId() && prev.expr) {
+                        return emitExpr(prev.expr.get());
+                    }
+                }
+                return retStr;
+            };
+            // Find canonical return blocks: blocks that end with a Return,
+            // preceded only by assignments (no side effects).
+            // Other blocks returning the same value can use "goto bb_X" instead,
+            // allowing the compiler to share the return path (tail merge).
+            std::map<std::string, int> canonicalReturn; // return expr string → block ID
+            for (int bbId = 0; bbId < (int)m_func.blocks.size(); ++bbId) {
+                auto &bb = m_func.blocks[bbId];
+                if (bb.stmts.empty()) continue;
+                auto &lastStmt = bb.stmts.back();
+                if (lastStmt.kind != IRStmtKind::Return) continue;
+                bool onlyAssigns = true;
+                for (int si = 0; si < (int)bb.stmts.size() - 1; ++si) {
+                    if (bb.stmts[si].kind != IRStmtKind::Assign) {
+                        onlyAssigns = false; break;
+                    }
+                }
+                if (!onlyAssigns) continue;
+                int retIdx = (int)bb.stmts.size() - 1;
+                std::string retExpr = resolveReturnExpr(bb, retIdx);
+                if (!canonicalReturn.count(retExpr))
+                    canonicalReturn[retExpr] = bbId;
+            }
+            // Emit flat blocks
+            for (int bbId = 0; bbId < (int)m_func.blocks.size(); ++bbId) {
+                auto &bb = m_func.blocks[bbId];
+                out += QString("bb_%1:\n").arg(bbId);
+                for (int si = 0; si < (int)bb.stmts.size(); ++si) {
+                    auto &stmt = bb.stmts[si];
+                    if (stmt.kind == IRStmtKind::Branch) {
+                        std::string cond = stmt.expr ? emitExpr(stmt.expr.get()) : "1";
+                        out += QString("    if (%1) goto bb_%2; else goto bb_%3;\n")
+                            .arg(QString::fromStdString(cond))
+                            .arg(stmt.trueTarget).arg(stmt.falseTarget);
+                    } else if (stmt.kind == IRStmtKind::Jump) {
+                        out += QString("    goto bb_%1;\n").arg(stmt.jumpTarget);
+                    } else if (stmt.kind == IRStmtKind::Return) {
+                        // Check if return can be redirected to a canonical return block
+                        std::string resolved = resolveReturnExpr(bb, si);
+                        auto cit = canonicalReturn.find(resolved);
+                        if (cit != canonicalReturn.end() && cit->second != bbId) {
+                            out += QString("    goto bb_%1;\n").arg(cit->second);
+                        } else {
+                            if (stmt.expr) {
+                                out += "    return " + QString::fromStdString(emitExpr(stmt.expr.get())) + ";\n";
+                            } else {
+                                out += "    return;\n";
+                            }
+                        }
+                    } else {
+                        // Skip assignments to temps that feed into a redirected return
+                        bool skipForReturn = false;
+                        if (stmt.kind == IRStmtKind::Assign && si + 1 < (int)bb.stmts.size()) {
+                            auto &next = bb.stmts[si + 1];
+                            if (next.kind == IRStmtKind::Return && next.expr &&
+                                next.expr->op == IROp::Temp && next.expr->tempId() == stmt.destTemp) {
+                                std::string resolved = resolveReturnExpr(bb, si + 1);
+                                auto cit = canonicalReturn.find(resolved);
+                                if (cit != canonicalReturn.end() && cit->second != bbId)
+                                    skipForReturn = true;
+                            }
+                        }
+                        if (!skipForReturn)
+                            emitStmt(out, stmt, 1);
+                    }
+                }
+            }
+            out += "}\n";
+            return out;
+        }
+
     private:
         const MachOFile      &m_mf;
         IRFunc               &m_func;
@@ -2006,9 +2432,7 @@ private:
                 // add __builtin_expect to preserve the original branch direction.
                 // Only for simple conditions (pointer != 0, func() != 0, etc.)
                 // to avoid changing complex control flow unnecessarily.
-                if (node->negated && !hasElse && !condTrue && !condFalse) {
-                    // Only add for simple integer zero-check conditions
-                    // (not float comparisons like "x == 0.0f")
+                if (!condTrue && !condFalse && !hasElse) {
                     bool isSimpleZeroCheck = false;
                     for (auto &sfx : {" != 0", " == 0", " > 0", " <= 0"}) {
                         size_t len = strlen(sfx);
@@ -2017,8 +2441,15 @@ private:
                             isSimpleZeroCheck = true; break;
                         }
                     }
-                    if (isSimpleZeroCheck)
-                        cond = "__builtin_expect(" + cond + ", 1)";
+                    if (isSimpleZeroCheck) {
+                        if (node->negated)
+                            cond = "__builtin_expect(" + cond + ", 1)";
+                        // Non-negated "== 0" conditions: these are typically
+                        // error/init checks where the == 0 path is unlikely.
+                        // Mark as unlikely to match the original's forward-branch-not-taken.
+                        else if (cond.find("== 0") != std::string::npos)
+                            cond = "__builtin_expect(" + cond + ", 0)";
+                    }
                 }
                 out += pad(indent) + "if (" + QString::fromStdString(cond) + ") {\n";
                 for (auto &child : node->children)
@@ -3179,14 +3610,63 @@ private:
             }
 
             case IROp::Call: {
-                result = cName(e->name) + "(";
-                for (size_t i = 0; i < e->kids.size(); ++i) {
-                    if (i) result += ", ";
-                    std::string arg = emitExpr(e->kids[i].get());
-                    // Sanitize any remaining non-C identifiers in arguments
-                    result += arg;
+                std::string funcName = cName(e->name);
+                // Function pointer table calls: fptable_ADDR_SCALE(index, args...)
+                // Emits: ((int(*)(void*))(((void**)TABLE)[index]))(args...)
+                // This produces: calll *TABLE(, %reg, SCALE)
+                if (e->name.compare(0, 8, "fptable_") == 0 && !e->kids.empty()) {
+                    // Parse table address and scale from name
+                    unsigned tableAddr = 0;
+                    int scale = 4;
+                    sscanf(e->name.c_str() + 8, "%X_%d", &tableAddr, &scale);
+                    std::string indexExpr = emitExpr(e->kids[0].get());
+                    // Build function pointer type with correct number of params
+                    int nargs = (int)e->kids.size() - 1; // first kid is index
+                    std::string fptype = "int(*)(";
+                    for (int p = 0; p < nargs; ++p) {
+                        if (p) fptype += ", ";
+                        fptype += "int";
+                    }
+                    fptype += ")";
+                    char buf[256];
+                    snprintf(buf, sizeof(buf),
+                        "((%s)(((void**)0x%X)[%s]))(",
+                        fptype.c_str(), tableAddr, indexExpr.c_str());
+                    result = buf;
+                    for (size_t i = 1; i < e->kids.size(); ++i) {
+                        if (i > 1) result += ", ";
+                        result += emitExpr(e->kids[i].get());
+                    }
+                    result += ")";
+                    break;
                 }
-                result += ")";
+                // Vtable calls: vfunc_N(this, ...) → indirect call through vtable
+                int vslot = -1;
+                if (e->name.compare(0, 6, "vfunc_") == 0) {
+                    vslot = atoi(e->name.c_str() + 6);
+                }
+                if (vslot >= 0 && !e->kids.empty()) {
+                    std::string thisArg = emitExpr(e->kids[0].get());
+                    // Use _Bool return type for vtable calls (most return bool,
+                    // and _Bool generates testb instead of testl for condition checks)
+                    char buf[128];
+                    snprintf(buf, sizeof(buf),
+                        "((_Bool(*)(void*))(((void**)(*(void**)%s))[%d]))(",
+                        thisArg.c_str(), vslot);
+                    result = buf;
+                    for (size_t i = 0; i < e->kids.size(); ++i) {
+                        if (i) result += ", ";
+                        result += emitExpr(e->kids[i].get());
+                    }
+                    result += ")";
+                } else {
+                    result = funcName + "(";
+                    for (size_t i = 0; i < e->kids.size(); ++i) {
+                        if (i) result += ", ";
+                        result += emitExpr(e->kids[i].get());
+                    }
+                    result += ")";
+                }
                 break;
             }
 
@@ -3419,14 +3899,41 @@ private:
                 if (outer == CastKind::FloatToInt && inner_k == CastKind::IntToFloat)
                     return emitExpr(inner_e->kids[0].get());
             }
+            // For ZeroExt/SignExt of Load expressions, use typed pointer dereference
+            // instead of casting the loaded value. This produces movzbl/movzwl (byte/word load)
+            // instead of movl + truncation.
+            if ((e->castKind == CastKind::ZeroExt8 || e->castKind == CastKind::Trunc8) &&
+                inner_e->op == IROp::Load && !inner_e->kids.empty()) {
+                m_addrDepth++;
+                std::string addr = emitExpr(inner_e->kids[0].get());
+                m_addrDepth--;
+                // Use (char*) cast for proper byte addressing when addr has pointer arithmetic
+                if (addr.find("_p + ") != std::string::npos || addr.find("_p)") != std::string::npos)
+                    return "*(unsigned char *)(" + addr + ")";
+                return "*(unsigned char *)((char *)" + addr + ")";
+            }
+            if ((e->castKind == CastKind::ZeroExt16 || e->castKind == CastKind::Trunc16) &&
+                inner_e->op == IROp::Load && !inner_e->kids.empty()) {
+                m_addrDepth++;
+                std::string addr = emitExpr(inner_e->kids[0].get());
+                m_addrDepth--;
+                if (addr.find("_p + ") != std::string::npos || addr.find("_p)") != std::string::npos)
+                    return "*(unsigned short *)(" + addr + ")";
+                return "*(unsigned short *)((char *)" + addr + ")";
+            }
             switch (e->castKind) {
             case CastKind::ZeroExt8:   return "(unsigned char)(" + inner + ")";
             case CastKind::ZeroExt16:  return "(unsigned short)(" + inner + ")";
             case CastKind::SignExt8:   return "(signed char)(" + inner + ")";
             case CastKind::SignExt16:  return "(short)(" + inner + ")";
             case CastKind::Trunc8:     return "(unsigned char)(" + inner + ")";
-            case CastKind::Trunc16:    return "(short)(" + inner + ")";
-            case CastKind::IntToFloat: return "(double)(" + inner + ")";
+            case CastKind::Trunc16:
+                // If inner is a variable (not an expression), use *(short*)&var
+                // to read the 16-bit value at the variable's address
+                if (inner_e->op == IROp::Var)
+                    return "*(short *)(&" + inner + ")";
+                return "(short)(" + inner + ")";
+            case CastKind::IntToFloat: return "(float)(" + inner + ")";
             case CastKind::FloatToInt: return "(int)(" + inner + ")";
             case CastKind::BitCast:    return inner;
             default: return inner;

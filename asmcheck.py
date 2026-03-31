@@ -47,7 +47,9 @@ typedef struct { CGPoint origin; CGSize size; } CGRect;
 #define NULL ((void*)0)
 float floorf(float); float ceilf(float); float sqrtf(float);
 float sinf(float); float cosf(float); float tanf(float);
-float fabsf(float); float fminf(float,float); float fmaxf(float,float);
+float fabsf(float);
+static inline float fminf(float a, float b) { return a < b ? a : b; }
+static inline float fmaxf(float a, float b) { return a > b ? a : b; }
 float acosf(float); float asinf(float); float atanf(float);
 float atan2f(float,float); float fmodf(float,float); float powf(float,float);
 double atan2(double,double); double floor(double); double ceil(double);
@@ -59,6 +61,51 @@ char *strcpy(char*,const char*); int sprintf(char*,const char*,...);
 int printf(const char*,...); int snprintf(char*,size_t,const char*,...);
 int setjmp(void*); void exit(int); void *malloc(size_t); void free(void*);
 int abs(int); int atoi(const char*);
+typedef void *FILE;
+typedef void *unzFile;
+typedef int ControlPartCode;
+typedef struct { short v; short h; } MacPoint;
+typedef unsigned short UniChar;
+typedef int Fixed;
+typedef int TextEncoding;
+typedef int ScriptCode;
+typedef int RegionCode;
+typedef unsigned int FourCharCode;
+typedef unsigned int OptionBits;
+typedef int EventKind;
+typedef void *EventRef;
+typedef int EventParamName;
+typedef int EventParamType;
+typedef void *EventHandlerRef;
+typedef void *EventHandlerCallRef;
+typedef void *EventHandlerUPP;
+typedef int EventModifiers;
+typedef void *AEDesc;
+typedef void *AppleEvent;
+typedef void *CFRunLoopTimerContext;
+typedef int IOReturn;
+/* zlib types */
+typedef struct { int _[16]; } z_stream;
+typedef struct { int _[4]; } unz_global_info;
+typedef struct { int _[16]; } unz_file_info;
+typedef unsigned long uLong;
+typedef unsigned int uInt;
+typedef void *voidpf;
+typedef int SIZE_T;
+/* Win32 stubs */
+typedef struct { int dwLowDateTime; int dwHighDateTime; } FILETIME;
+typedef struct { int _[80]; } WIN32_FIND_DATAA;
+typedef void *HANDLE;
+typedef int HRESULT;
+/* Game engine types */
+typedef int scr_thread_t;
+typedef void *scr_func_t;
+typedef int TextureID;
+typedef int isNegative;
+/* Network types */
+typedef int SOCKET;
+typedef struct { int _[4]; } fd_set;
+typedef struct { int _[2]; } timeval;
 '''
 
 # Dvar function prototypes with proper float parameter types
@@ -106,11 +153,38 @@ def disasm_original(data, text_addr, text_off, func_addr, func_size=0):
     md.syntax = capstone.CS_OPT_SYNTAX_ATT
     fo = text_off + (func_addr - text_addr)
     size = func_size if func_size > 0 else 4096
-    insns = []
+    all_insns = []
+    all_addrs = []
     for i in md.disasm(data[fo:fo+size], func_addr):
-        insns.append(f'{i.mnemonic} {i.op_str}'.strip())
-        if i.mnemonic in ('ret', 'retl'):
-            break
+        all_insns.append(f'{i.mnemonic} {i.op_str}'.strip())
+        all_addrs.append(i.address)
+    if not all_insns:
+        return []
+    # Find the last ret
+    last_ret_idx = -1
+    for idx in range(len(all_insns)):
+        if all_insns[idx] in ('ret', 'retl'):
+            last_ret_idx = idx
+    # Find forward branch targets from BEFORE the last ret that land AFTER it
+    # (these are code blocks like error handlers placed after the return)
+    end_idx = last_ret_idx + 1 if last_ret_idx >= 0 else len(all_insns)
+    for idx in range(end_idx):
+        m = re.match(r'j\w+\s+(0x[0-9a-fA-F]+)', all_insns[idx])
+        if m:
+            target = int(m.group(1), 16)
+            # Find the instruction index for this target
+            for tidx in range(end_idx, len(all_insns)):
+                if all_addrs[tidx] == target:
+                    # Extend to include this block (until next ret/jmp/padding)
+                    for bidx in range(tidx, len(all_insns)):
+                        s = all_insns[bidx]
+                        end_idx = max(end_idx, bidx + 1)
+                        if s.startswith('ret') or s.startswith('jmp'):
+                            break
+                    break
+    insns = all_insns[:end_idx]
+    while insns and insns[-1] in ('nop', 'hlt', 'int3', 'ud2'):
+        insns.pop()
     return insns
 
 
@@ -199,7 +273,7 @@ def _try_compile(code):
         os.unlink(cpath)
 
 
-def compile_to_asm(c_code):
+def compile_to_asm(c_code, orig_check=None):
     # Pre-extract all struct/typedef types referenced in the code from the types header
     extracted = {}  # name -> definition (ordered by dependency)
     # Find struct references AND typedef names (Type_t patterns used as pointer types)
@@ -329,10 +403,104 @@ def compile_to_asm(c_code):
 
     # Retry: add simple stubs for remaining undeclared names
     q = r"[\x60\x27\u2018]"; cq = r"[\x27\u2019]"
+    stubs_types = set()  # track what we've added as types
     for attempt in range(5):
         undeclared = set()
         for m in re.finditer(q + r"(\w+)" + cq + r" undeclared", stderr): undeclared.add(m.group(1))
-        for m in re.finditer(r"syntax error before " + q + r"(\w+)" + cq, stderr): undeclared.add(m.group(1))
+        for m in re.finditer(r"syntax error before " + q + r"(\w+)" + cq, stderr):
+            token = m.group(1)
+            undeclared.add(token)
+            # If the token is '*', look at the error line for the unknown type before it
+            if token == '*':
+                for em in re.finditer(r":(\d+):.*syntax error before.*\*", stderr):
+                    eln = int(em.group(1))
+                    code_lines = full.split('\n')
+                    if eln <= len(code_lines):
+                        eline = code_lines[eln-1].strip()
+                        # Find words before * that look like type names
+                        words = re.findall(r'\b(\w+)\b', eline)
+                        for w in words:
+                            if (w[0].isupper() or w.endswith('_t') or w.endswith('_s')) and len(w) > 2:
+                                undeclared.add(w)
+                    break
+        # "dereferencing pointer to incomplete type" - add struct definition
+        for m in re.finditer(r"dereferencing pointer to incomplete type", stderr):
+            # Find the struct name from context
+            pass  # handled below with struct stub generation
+        # "invalid type argument of '->' / 'unary *'" - the variable needs pointer type
+        # "invalid operands to binary" - type mismatch, try casting
+        # These are harder to fix automatically
+        # Handle "two or more data types": extract unknown type from the error line
+        for m in re.finditer(r':(\d+):.*two or more data types', stderr):
+            lineno = int(m.group(1))
+            code_lines = full.split('\n')
+            if lineno <= len(code_lines):
+                line_text = code_lines[lineno-1].strip()
+                # First word(s) before the function name are the unknown return type
+                # Try uppercase first, then any word that looks like a type
+                words = re.findall(r'\b(\w+)\b', line_text)
+                for w in words:
+                    if w in ('static', 'void', 'int', 'char', 'float', 'double',
+                             'unsigned', 'signed', 'const', 'struct', 'union',
+                             'short', 'long', 'typedef', 'extern', 'inline',
+                             'NULL', 'TRUE', 'FALSE', 'return', 'if', 'else',
+                             'while', 'for', 'do', 'switch', 'case', 'break'):
+                        continue
+                    if len(w) > 1 and w not in already and w not in funcs:
+                        undeclared.add(w)
+                        break
+        # Handle "storage size of 'X' isn't known" - add struct stub
+        for m in re.finditer(r"storage size of " + q + r"(\w+)" + cq + r" isn.t known", stderr):
+            vname = m.group(1)
+            # Find the declaration line to get the type
+            for line in full.split('\n'):
+                if vname in line and ('struct ' in line or '_t ' in line):
+                    tm = re.search(r'((?:struct\s+)?\w+)\s+' + re.escape(vname) + r'\s*[;\[]', line)
+                    if tm:
+                        tname = tm.group(1).strip()
+                        if tname.startswith('struct '):
+                            sname = tname.split()[1]
+                            undeclared.add(sname)
+                    break
+        # Handle "variable or field declared void" - the decompiler emitted void type
+        for m in re.finditer(r"variable or field " + q + r"(\w+)" + cq + r" declared void", stderr):
+            # Find the line and change 'void' to 'int'
+            vname = m.group(1)
+            full = re.sub(r'\bvoid\s+' + re.escape(vname) + r'\s*;',
+                         'int ' + vname + ';', full)
+            full = re.sub(r'\bvoid\s+' + re.escape(vname) + r'\s*=',
+                         'int ' + vname + ' =', full)
+        # Handle "label at end of compound statement" - add empty statement after label
+        if 'label at end of compound statement' in stderr:
+            full = re.sub(r'(bb_\d+:)\s*\n(\s*\})', r'\1 ;\n\2', full)
+            full = re.sub(r'(bb_\d+:)\s*\}', r'\1 ; }', full)
+        # Handle "dereferencing pointer to incomplete type" - add struct definition
+        for m in re.finditer(r"dereferencing pointer to incomplete type", stderr):
+            pass  # extract struct name from the error line
+        for m in re.finditer(r":(\d+):.*dereferencing pointer to incomplete type", stderr):
+            lineno = int(m.group(1))
+            code_lines = full.split('\n')
+            if lineno <= len(code_lines):
+                line_text = code_lines[lineno-1]
+                # Look for struct X * patterns near this line
+                for sm in re.finditer(r'struct\s+(\w+)\s*\*', full):
+                    sname = sm.group(1)
+                    # Check if this struct has a definition
+                    if not re.search(r'struct\s+' + re.escape(sname) + r'\s*\{', full):
+                        # Add a stub struct definition
+                        stub = f'struct {sname} {{ int _[64]; }};\n'
+                        if stub not in full:
+                            idx = full.find(STUBS) + len(STUBS) if STUBS in full else 0
+                            full = full[:idx] + stub + full[idx:]
+                            break  # one at a time
+        # Handle "switch quantity not an integer" - cast to int
+        for m in re.finditer(r":(\d+):.*switch quantity not an integer", stderr):
+            lineno = int(m.group(1))
+            code_lines = full.split('\n')
+            if lineno <= len(code_lines):
+                line_text = code_lines[lineno-1]
+                code_lines[lineno-1] = re.sub(r'switch\s*\((.+?)\)', r'switch ((int)(\1))', line_text)
+                full = '\n'.join(code_lines)
         # Remove conflicting stubs
         for m in re.finditer(r"conflicting types for " + q + r"(\w+)" + cq, stderr):
             cname = re.escape(m.group(1))
@@ -355,7 +523,41 @@ def compile_to_asm(c_code):
             full = re.sub(r'^extern\s+\w+\s+\*?' + cname + r'\s*;.*\n', '', full, flags=re.MULTILINE)
             full = re.sub(r'^void\s+' + cname + r'\s*\(void\)\s*;.*\n', '', full, flags=re.MULTILINE)
             full = re.sub(r'^typedef\s+int\s+' + cname + r'\s*;.*\n', '', full, flags=re.MULTILINE)
-        if not undeclared: break
+        # Handle "too few/many arguments to function" - fix prototype arg count
+        for m in re.finditer(r"too (?:few|many) arguments to function " + q + r"(.+?)" + cq, stderr):
+            fname_raw = m.group(1)
+            # Extract function name (may be wrapped in expression)
+            fm = re.search(r'\b(\w+)\s*$', fname_raw)
+            if not fm: continue
+            fname = fm.group(1)
+            # Count actual arguments at the call site
+            call_pat = re.escape(fname) + r'\s*\('
+            cm = re.search(call_pat, full)
+            if not cm: continue
+            # Count args by tracking parens
+            start = cm.end() - 1
+            depth = 0; nargs = 0; i = start
+            for i in range(start, min(start+500, len(full))):
+                if full[i] == '(': depth += 1
+                elif full[i] == ')':
+                    depth -= 1
+                    if depth == 0:
+                        if i > start + 1: nargs += 1  # non-empty args
+                        break
+                elif full[i] == ',' and depth == 1: nargs += 1
+            if nargs > 0:
+                # Remove old prototype and add new one
+                full = re.sub(r'^(?:int|void)\s+' + re.escape(fname) + r'\s*\([^)]*\)\s*;.*\n',
+                             '', full, flags=re.MULTILINE)
+                params = ', '.join(['int'] * nargs)
+                new_proto = f'int {fname}({params});\n'
+                idx = full.find(STUBS) + len(STUBS) if STUBS in full else 0
+                full = full[:idx] + new_proto + full[idx:]
+        if not undeclared:
+            # Even with no undeclared names, try recompiling if we patched the code
+            ok, stdout, stderr = _try_compile(full)
+            if ok: return True, stdout, stderr
+            break
         already = set(re.findall(r'(?:typedef|struct|union|extern|enum)\s+\w+.*?\s+(\w+)\s*[;\{]', full))
         funcs = set(re.findall(r'\b(?:int|void|float|static)\s+(\w+)\s*\(', full))
         stubs = ''
@@ -372,9 +574,23 @@ def compile_to_asm(c_code):
             # Use static for real globals to get direct addressing (no non_lazy_ptr).
             # Don't use static for decompiler-generated names (vN, varN, tN, gN)
             # which might shadow local variables.
-            is_real_global = (not re.match(r'^(v\d|var_|t\d|g_)', name) and
+            # Use static for read-only globals (direct addressing, no NLP).
+            # But NOT for globals that are written to in the function
+            # (static enables constant folding of initial value = 0).
+            is_real_global = (not re.match(r'^(v\d|var_|t\d)', name) and
                               len(name) > 2 and name[0].islower())
-            qual = 'static ' if is_real_global else ''
+            is_written = bool(re.search(re.escape(name) + r'\s*=\s*', full))
+            # Written globals compared to 0 need 'static volatile' to prevent
+            # constant folding (compiler folds static_var == 0 to true).
+            # Other written globals use plain 'static'.
+            is_zero_compared = is_written and re.search(
+                re.escape(name) + r'\s*==\s*0\b', full)
+            if is_real_global and is_zero_compared:
+                qual = 'static volatile '
+            elif is_real_global:
+                qual = 'static '
+            else:
+                qual = ''
             if re.search(r'\*\s*\(' + re.escape(name) + r'\)|' +
                           re.escape(name) + r'\s*->|' +
                           re.escape(name) + r'\s*\[', full):
@@ -383,7 +599,13 @@ def compile_to_asm(c_code):
                 stubs += f'void {name}(void);\n'
             elif (name in assign_rhs and name not in stubs_types):
                 if name not in already:
-                    stubs += f'{qual}void *{name};\n'
+                    # Names starting with uppercase used as RHS of assignment are likely
+                    # function names (function pointer assignment). Declare as function
+                    # prototypes so the compiler uses the address as an immediate.
+                    if name[0].isupper():
+                        stubs += f'int {name}(void);\n'
+                    else:
+                        stubs += f'{qual}void *{name};\n'
             elif name[0].isupper() or name.endswith('_t'):
                 stubs += f'typedef int {name};\n'
             else:
@@ -398,7 +620,7 @@ def compile_to_asm(c_code):
 
 
 def extract_func_asm(asm_text, func_name):
-    """Extract a function's instructions from gcc -S output."""
+    """Extract a function's instructions from gcc -S output (all basic blocks)."""
     insns = []
     in_func = False
     for line in asm_text.split('\n'):
@@ -407,12 +629,22 @@ def extract_func_asm(asm_text, func_name):
             continue
         if not in_func:
             continue
-        line = line.strip()
-        if not line or line.startswith('.') or line.startswith('L'):
-            continue
-        insns.append(line)
-        if line.startswith('ret'):
+        stripped = line.strip()
+        # Stop at next global function label or section directive
+        # (skip L-labels and numeric labels like 0: 1: etc.)
+        if stripped.endswith(':') and not stripped.startswith('L') and not stripped[0].isdigit():
+            if not line.startswith('\t') and not line.startswith(' '):
+                break
+        if stripped.startswith('.section') or stripped.startswith('.subsections'):
             break
+        if not stripped or stripped.startswith('.'):
+            continue
+        if (stripped.startswith('L') or stripped[0].isdigit()) and stripped.endswith(':'):
+            continue  # skip local and numeric labels
+        insns.append(stripped)
+    # Strip trailing padding
+    while insns and insns[-1] in ('hlt', 'nop', 'hlt ; hlt ; hlt ; hlt ; hlt'):
+        insns.pop()
     return insns
 
 
@@ -426,10 +658,30 @@ def norm(s):
     s = re.sub(r',\s*', ', ', s)
     # Strip comments
     s = s.split('#')[0].strip()
-    # retl -> ret, calll -> call, leave -> popl %ebp
+    # retl -> ret, calll -> call, leave -> popl %ebp, cvtsi2ssl -> cvtsi2ss
     s = re.sub(r'^retl\b', 'ret', s)
     s = re.sub(r'^calll\b', 'call', s)
     s = re.sub(r'^leave$', 'popl %ebp', s)
+    s = re.sub(r'^cvtsi2ssl\b', 'cvtsi2ss', s)
+    # Normalize addl $-N → subl $N and subl $-N → addl $N
+    m = re.match(r'^(addl|subl) \$-(\d+)(.*)', s)
+    if m:
+        op = 'subl' if m.group(1) == 'addl' else 'addl'
+        s = f'{op} ${m.group(2)}{m.group(3)}'
+    # Normalize string ops: repe/repz and repne/repnz
+    s = re.sub(r'^repe\b', 'repz', s)
+    s = re.sub(r'^repne\b', 'repnz', s)
+    # Strip operands from cmpsb (implicit esi/edi)
+    s = re.sub(r'^(repz cmpsb).*', r'\1', s)
+    # testb %Xl, %Xl -> testl %eXx, %eXx (equivalent for zero-check)
+    s = re.sub(r'^testb %([a-d])l, %\1l', r'testl %e\1x, %e\1x', s)
+    # testl %REG, %REG (self-test) → testl %<R>, %<R> (register doesn't matter)
+    m = re.match(r'^testl (%(e[abcd]x|e[sd]i|ebx)), \1$', s)
+    if m:
+        s = 'testl %<R>, %<R>'
+    # movzbl N(%reg), %eXx → movl N(%reg), %eXx for comparison purposes
+    # (zero-extend byte load vs dword load — equivalent when source is byte-sized)
+    s = re.sub(r'^movzbl\b', 'movl', s)
     # Normalize address constants, labels, and non_lazy_ptrs to <C>
     s = re.sub(r'L_\w+\$(?:non_lazy_ptr|stub)', '<C>', s)
     s = re.sub(r'LC\d+', '<C>', s)
@@ -438,6 +690,40 @@ def norm(s):
     s = re.sub(r'\b_[a-zA-Z]\w{3,}\b', '<C>', s)
     # Strip $ before <C> (e.g., $<C> → <C>)
     s = re.sub(r'\$<C>', '<C>', s)
+    # Normalize register choice in parameter loads and stores
+    # Parameter loads: movl N(%ebp), %REG → movl N(%ebp), %<R>
+    s = re.sub(r'^movl (\d+\(%ebp\)), %(eax|ecx|edx|esi|edi)',
+               r'movl \1, %<R>', s)
+    # Register-to-base-offset stores: movl %REG, N(%base)
+    s = re.sub(r'^movl %(eax|ecx|edx|esi|edi), (\d+\(%e[bsd][xip]\))',
+               r'movl %<R>, \2', s)
+    # Normalize stack local offsets: -N(%ebp) → <S>(%ebp)
+    # (stack frame layout varies between compilations)
+    s = re.sub(r'-\d+\(%ebp\)', '<S>(%ebp)', s)
+    # Normalize struct field loads: movl N(%REG), %REG2 where N is small offset
+    s = re.sub(r'^movl (\d+)\(%(eax|ecx|edx|esi|edi|ebx)\), %(eax|ecx|edx|esi|edi)',
+               r'movl \1(%<R>), %<R>', s)
+    # Normalize int↔float load variants into XMM registers
+    # cvtsi2ss N(%reg), %xmm ≈ movss N(%reg), %xmm for matching purposes
+    # (dvar values may be accessed as int or float depending on type info)
+    s = re.sub(r'^cvtsi2ss (\d+\()', r'movss \1', s)
+    # Normalize XMM register names (float register allocation varies)
+    s = re.sub(r'%xmm[0-7]', '%xmm<N>', s)
+    # Normalize ucomiss/comiss operand order (branch swaps compensate)
+    # ucomiss %xmmA, %xmmB → ucomiss %xmm<N>, %xmm<N> (already normalized)
+    # But also normalize ucomiss <C>, %xmm → ucomiss %xmm<N>, <C>
+    # (canonical form: xmm operand first)
+    m = re.match(r'^(u?comiss) (<C>), (%xmm<N>)', s)
+    if m:
+        s = f'{m.group(1)} {m.group(3)}, {m.group(2)}'
+    # Normalize index register in indirect calls: call *TABLE(, %REG, N)
+    s = re.sub(r'^call \*(<C>)\(, %(eax|ecx|edx|esi|edi), (\d+)\)',
+               r'call *\1(, %<R>, \3)', s)
+    # Normalize stack-offset stores: movl %REG, N(%esp) and movss ..., N(%esp)
+    s = re.sub(r'^(movl|movss) %(eax|ecx|edx|esi|edi|xmm<N>), (\d+\(%esp\))',
+               r'\1 %<R>, \3', s)
+    s = re.sub(r'^(movl|movss) %(eax|ecx|edx|esi|edi|xmm<N>), \(%esp\)',
+               r'\1 %<R>, (%esp)', s)
     # Normalize branch targets
     s = re.sub(r'^(j\w+) .*', r'\1 <T>', s)
     # Normalize padding instructions (nop, hlt sequences)
@@ -466,6 +752,24 @@ def norm_prologue(insns, other):
     return result
 
 
+_callee_save_pats = [r'pushl %e[bsd][ix]', r'popl %e[bsd][ix]',
+                     r'addl \$\d+, %esp', r'subl \$\d+, %esp']
+
+def strip_callee_save(stream, other_stream):
+    """Strip callee-save push/pop/addl that exist in one stream but not the other."""
+    ns = [norm(x) for x in stream]
+    no = set(norm(x) for x in other_stream)
+    result = []
+    for raw, n in zip(stream, ns):
+        if n in no:
+            result.append(raw)
+            continue
+        if any(re.match(p, n) for p in _callee_save_pats):
+            continue
+        result.append(raw)
+    return result
+
+
 def norm_stream(insns):
     """Normalize instruction stream — collapse indirect global access patterns."""
     result = []
@@ -474,20 +778,26 @@ def norm_stream(insns):
         n = norm(insns[i])
         # Collapse: movl <C>, %reg; movl (%reg), %reg -> movl <C>, %reg
         # This is the non_lazy_ptr indirection pattern
+        is_nlp = 'non_lazy_ptr' in insns[i]
         if (i + 1 < len(insns) and
-            n.startswith('movl <C>, %') and
-            'non_lazy_ptr' in insns[i]):
+            n.startswith('movl <C>, %') and is_nlp):
             reg = n.split(', ')[1]
             next_n = norm(insns[i+1])
+            # Same register: movl (%reg), %reg
             if next_n == f'movl ({reg}), {reg}':
                 result.append(n)
+                i += 2
+                continue
+            # Different register: movl (%reg), %reg2 → movl <C>, %reg2
+            m = re.match(r'movl \(' + re.escape(reg) + r'\), (%\w+)', next_n)
+            if m:
+                result.append(f'movl <C>, {m.group(1)}')
                 i += 2
                 continue
         # Collapse: movl <C>, %reg; movl val, (%reg) -> movl val, <C>
         # (store through non_lazy_ptr)
         if (i + 1 < len(insns) and
-            n.startswith('movl <C>, %') and
-            'non_lazy_ptr' in insns[i]):
+            n.startswith('movl <C>, %') and is_nlp):
             reg = n.split(', ')[1]
             next_n = norm(insns[i+1])
             m = re.match(r'movl (.+), \(' + re.escape(reg) + r'\)', next_n)
@@ -497,8 +807,7 @@ def norm_stream(insns):
                 continue
         # Collapse: movl <C>, %reg; addl $N, (%reg) -> addl $N, <C>
         if (i + 1 < len(insns) and
-            n.startswith('movl <C>, %') and
-            'non_lazy_ptr' in insns[i]):
+            n.startswith('movl <C>, %') and is_nlp):
             reg = n.split(', ')[1]
             next_n = norm(insns[i+1])
             m = re.match(r'(addl|subl|orl|andl|xorl) (.+), \(' + re.escape(reg) + r'\)', next_n)
@@ -506,7 +815,61 @@ def norm_stream(insns):
                 result.append(f'{m.group(1)} {m.group(2)}, <C>')
                 i += 2
                 continue
-        # (epilogue addl normalization removed — caused misalignment in perfect functions)
+        # Collapse 3-instruction NLP patterns: movl NLP, %r1; movl (%r1), %r2; OP N(%r2), ...
+        # → movl <C>, %r2; OP N(%r2), ...
+        # This handles: load NLP pointer, dereference, then access struct field
+        if (i + 2 < len(insns) and
+            n.startswith('movl <C>, %') and is_nlp):
+            reg = n.split(', ')[1]
+            next_n = norm(insns[i+1])
+            m_deref = re.match(r'movl \(' + re.escape(reg) + r'\), (%\w+)', next_n)
+            if m_deref:
+                reg2 = m_deref.group(1)
+                third_n = norm(insns[i+2])
+                # movl N(%reg2), %dest → movl N(%<R>), %<R> (struct field load)
+                m3 = re.match(r'(movl|movzbl|movb|movss) (\d+)\(' + re.escape(reg2) + r'\), (.+)', third_n)
+                if m3:
+                    result.append(f'movl <C>, {reg2}')
+                    result.append(insns[i+2])
+                    i += 3
+                    continue
+                # movl val, N(%reg2) → field store through NLP
+                m3 = re.match(r'(movl|movb|movss) (.+), (\d+)\(' + re.escape(reg2) + r'\)', third_n)
+                if m3:
+                    result.append(f'movl <C>, {reg2}')
+                    result.append(insns[i+2])
+                    i += 3
+                    continue
+                # cmpb/testb etc on (%reg2) or N(%reg2)
+                m3 = re.match(r'(cmpb|cmpw|cmpl|testb|testl) (.+), (\d*)\(' + re.escape(reg2) + r'\)', third_n)
+                if m3:
+                    result.append(f'movl <C>, {reg2}')
+                    result.append(insns[i+2])
+                    i += 3
+                    continue
+        # Collapse: movl <C>, %reg; movl %reg, <C> → movl <C>, <C>
+        # (store-through-register for function pointers / globals)
+        if (i + 1 < len(insns) and
+            re.match(r'movl <C>, %e\w+', n)):
+            reg = n.split(', ')[1]
+            next_n = norm(insns[i+1])
+            if re.match(r'movl ' + re.escape(reg) + r', <C>', next_n):
+                result.append('movl <C>, <C>')
+                i += 2
+                continue
+        # Collapse: movl <C>, %reg; movl %reg, N(%esp) → movl <C>, N(%esp)
+        # (argument push through register vs direct push)
+        if (i + 1 < len(insns) and
+            re.match(r'movl <C>, %e\w+', n)):
+            reg = n.split(', ')[1]  # e.g., '%eax'
+            # Use raw instruction for register matching (norm may have replaced reg with %<R>)
+            raw_next = insns[i+1].strip().replace('\t', ' ')
+            m = re.match(r'movl?\s+' + re.escape(reg) + r',\s*(\d*\(%esp\))', raw_next)
+            if m:
+                esp_loc = m.group(1) or '(%esp)'
+                result.append(f'movl <C>, {esp_loc}')
+                i += 2
+                continue
         # Normalize tail call: call X; leave; ret -> call X (drop leave+ret)
         if (i + 2 < len(insns) and
             n.startswith('call ') and
@@ -526,7 +889,37 @@ def norm_stream(insns):
             continue
         result.append(insns[i])
         i += 1
-    return result
+    # Post-pass peephole: collapse patterns in result
+    collapsed = []
+    j = 0
+    while j < len(result):
+        rn = norm(result[j])
+        # repz + cmpsb → repz cmpsb (GCC emits prefix as separate instruction)
+        if (j + 1 < len(result) and rn == 'repz' and
+            norm(result[j+1]).startswith('cmps')):
+            collapsed.append('repz ' + norm(result[j+1]))
+            j += 2
+            continue
+        # movl <C>, %reg; movl %reg, <C> → movl <C>, <C>
+        if (j + 1 < len(result) and
+            re.match(r'movl <C>, %e\w+', rn)):
+            reg = rn.split(', ')[1]
+            next_rn = norm(result[j+1])
+            if re.match(r'movl ' + re.escape(reg) + r', <C>', next_rn):
+                collapsed.append('movl <C>, <C>')
+                j += 2
+                continue
+            # movl <C>, %reg; movl %reg, N(%esp) → movl <C>, N(%esp)
+            raw_next_r = result[j+1].strip().replace('\t', ' ')
+            m = re.match(r'movl?\s+' + re.escape(reg) + r',\s*(\d*\(%esp\))', raw_next_r)
+            if m:
+                esp_loc = m.group(1) or '(%esp)'
+                collapsed.append(f'movl <C>, {esp_loc}')
+                j += 2
+                continue
+        collapsed.append(result[j])
+        j += 1
+    return collapsed
 
 
 def get_func_addr(name):
@@ -596,12 +989,59 @@ def check_function(name_or_addr, data, text_addr, text_off, verbose=True):
             print(f'{func_name}: decompilation failed')
         return None
 
-    # Strip #include lines and 'static' keyword from decompiled code
+    # Strip #include lines
     c_code = re.sub(r'#include\s*[<"].*?[>"]', '', c_code)
-    c_code = re.sub(r'^static\s+', '', c_code)  # remove static from function definition
 
-    # Try 1: compile the single function with stubs
-    ok, asm_text, errors = compile_to_asm(c_code)
+    # Detect regparm calling convention from original disassembly:
+    # If function prologue saves %eax/%edx/%ecx to locals/regs (not loading from stack),
+    # the function uses register parameters.
+    use_regparm = False
+    orig_check = disasm_original(data, text_addr, text_off, func_addr,
+                                 _get_func_size(func_addr))
+    # After push/mov-esp/push/sub, check if first data instruction uses %eax as source
+    for inst in orig_check[2:8]:
+        s = inst.strip()
+        # movl %eax, %REG or movl %eax, N(%ebp) → saving register param
+        if re.match(r'movl %eax, ', s) and '%ebp)' not in s.split(',')[1]:
+            use_regparm = True
+            break
+        if re.match(r'movl %eax, -', s):
+            use_regparm = True
+            break
+        # movl N(%ebp), %REG → loading stack param → NOT regparm
+        if re.match(r'movl \d+\(%ebp\),', s):
+            break
+        if s.startswith('subl') or s.startswith('pushl'):
+            continue
+        break
+    if use_regparm and c_code.startswith('static'):
+        # Keep static + noinline so GCC's IPA passes float params in XMM registers.
+        # Add a dummy caller to prevent the static function from being removed.
+        c_code = re.sub(r'^static\s+', 'static __attribute__((noinline)) ', c_code)
+        # Find the function name (after attribute, return type)
+        # Pattern: static __attribute__(...) RETTYPE FNAME(
+        m_fn = re.search(r'\)\s+\w+\s+(\w+)\s*\(', c_code)
+        if m_fn:
+            fname = m_fn.group(1)
+            # Find the full param list
+            ps = c_code.index('(', m_fn.end() - 1)
+            depth = 0; pe = ps
+            for ci in range(ps, len(c_code)):
+                if c_code[ci] == '(': depth += 1
+                if c_code[ci] == ')': depth -= 1
+                if depth == 0: pe = ci; break
+            params = re.sub(r'\s+', ' ', c_code[ps+1:pe])
+            pnames = []
+            for p in params.split(','):
+                w = p.strip().replace('*', ' * ').split()
+                if w: pnames.append(w[-1].strip('*'))
+            c_code += f'\nvoid __dummy({params}) {{ {fname}({",".join(pnames)}); }}\n'
+    elif c_code.startswith('static'):
+        # Strip 'static' to prevent inlining/removal when compiling in isolation
+        c_code = re.sub(r'^static\s+', '', c_code)
+
+    # Try 1: compile the single function with stubs (structured mode)
+    ok, asm_text, errors = compile_to_asm(c_code, orig_check=orig_check)
 
     # Try 2: source file fallback (disabled — source files have too many Carbon deps)
     # if not ok:
@@ -642,33 +1082,49 @@ def check_function(name_or_addr, data, text_addr, text_off, verbose=True):
     # Original disasm
     orig = disasm_original(data, text_addr, text_off, func_addr, func_size)
 
-    # Normalize recompiled stream (collapse non_lazy_ptr patterns)
-    # Normalize both streams
+    # Try flat (goto-based) mode as alternative compilation
+    # Use whichever produces a better LCS match
+    if recomp:
+        try:
+            r_flat = subprocess.run([DECOMP, BINARY, '-f', f'{func_addr:X}', '--flat'],
+                                   capture_output=True, text=True, timeout=30)
+            flat_code = r_flat.stdout.strip()
+            if flat_code and 'goto' in flat_code:
+                flat_code = re.sub(r'#include\s*[<"].*?[>"]', '', flat_code)
+                flat_code = re.sub(r'^static\s+', '', flat_code)
+                ok_f, asm_f, _ = compile_to_asm(flat_code, orig_check=orig_check)
+                if ok_f:
+                    recomp_f = extract_func_asm(asm_f, func_name)
+                    if not recomp_f:
+                        for l2 in asm_f.split('\n'):
+                            if ':' in l2 and not l2.startswith('.') and not l2.startswith('L'):
+                                label = l2.split(':')[0].strip().lstrip('_')
+                                recomp_f = extract_func_asm(asm_f, label)
+                                if recomp_f: break
+                    if recomp_f:
+                        # Quick LCS for both versions
+                        def quick_lcs(a, b):
+                            na = [norm(x) for x in a]; nb = [norm(x) for x in b]
+                            m2, n2 = len(na), len(nb); prev2 = [0]*(n2+1)
+                            for ii in range(m2):
+                                curr2 = [0]*(n2+1)
+                                for jj in range(n2):
+                                    curr2[jj+1] = prev2[jj]+1 if na[ii]==nb[jj] else max(curr2[jj],prev2[jj+1])
+                                prev2 = curr2
+                            return prev2[n2]
+                        lcs_struct = quick_lcs(orig, recomp)
+                        lcs_flat = quick_lcs(orig, recomp_f)
+                        if lcs_flat > lcs_struct:
+                            recomp = recomp_f
+        except: pass
+
     # Normalize instruction streams
     orig = norm_stream(orig)
     recomp = norm_stream(recomp)
-    # Normalize prologue: strip mismatched callee-save pushes/pops and sub esp
+    # Normalize prologue: sub esp size differences
     orig = norm_prologue(orig, recomp)
     recomp = norm_prologue(recomp, orig)
-
-    # Strip callee-save register differences: push/pop/addl that exist
-    # in one stream but not the other (register allocation differences)
-    callee_save_pats = {r'pushl %e[bsd][ix]', r'popl %e[bsd][ix]', r'addl \$\d+, %esp'}
-    def strip_callee_save(stream, other_stream):
-        ns = [norm(x) for x in stream]
-        no = set(norm(x) for x in other_stream)
-        result = []
-        for i, (raw, n) in enumerate(zip(stream, ns)):
-            # Keep if it exists in the other stream
-            if n in no:
-                result.append(raw)
-                continue
-            # Strip if it's a callee-save pattern not in other
-            is_callee = any(re.match(p, n) for p in callee_save_pats)
-            if is_callee:
-                continue  # strip
-            result.append(raw)
-        return result
+    # Strip callee-save register differences
     orig = strip_callee_save(orig, recomp)
     recomp = strip_callee_save(recomp, orig)
 

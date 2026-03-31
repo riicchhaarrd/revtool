@@ -781,6 +781,7 @@ private:
     // Call argument collection
     std::map<int, std::unique_ptr<IRExpr>> m_espArgs;
     std::vector<std::unique_ptr<IRExpr>>   m_pushArgs;
+    std::unique_ptr<IRExpr>                m_fpTableIndex; // index for fptable_ calls
 
     // FPU stack: tracks temp IDs for ST0..STn (index 0 = top of stack)
     std::vector<int> m_fpuStack;
@@ -1314,14 +1315,16 @@ private:
             else if (jmn == "jg"  || jmn == "jnle")  cmpOp = IROp::Sgt;
             else cmpOp = IROp::Ne;
         } else if (isTest) {
-            // test with different operands: condition is (lhs & rhs) vs 0
+            // test with different operands: condition is (lhs & rhs) vs 0 (OF=0)
             auto andExpr = IRExpr::mkBinary(IROp::And, std::move(lhs), std::move(rhs));
             lhs = std::move(andExpr);
             rhs = IRExpr::mkConst(0);
-            if      (jmn == "je"  || jmn == "jz")  cmpOp = IROp::Eq;
-            else if (jmn == "jne" || jmn == "jnz") cmpOp = IROp::Ne;
-            else if (jmn == "js")                   cmpOp = IROp::Slt;
-            else if (jmn == "jns")                  cmpOp = IROp::Sge;
+            if      (jmn == "je"  || jmn == "jz")   cmpOp = IROp::Eq;
+            else if (jmn == "jne" || jmn == "jnz")  cmpOp = IROp::Ne;
+            else if (jmn == "js"  || jmn == "jl" || jmn == "jnge")  cmpOp = IROp::Slt;
+            else if (jmn == "jns" || jmn == "jge" || jmn == "jnl")  cmpOp = IROp::Sge;
+            else if (jmn == "jle" || jmn == "jng")   cmpOp = IROp::Sle;
+            else if (jmn == "jg"  || jmn == "jnle")  cmpOp = IROp::Sgt;
             else cmpOp = IROp::Ne;
         } else {
             // cmp or sub-based flags
@@ -1620,9 +1623,11 @@ private:
         if (mn == "cmp" && n == 2) {
             m_flags.lhs = readOp(o[0]);
             m_flags.rhs = readOp(o[1]);
-            // Preserve byte-width for correct comparison codegen (memory operands only)
+            // Preserve sub-dword width for correct comparison codegen
             if (o[0].type == X86_OP_MEM && o[0].size == 1 && m_flags.lhs)
                 m_flags.lhs = IRExpr::mkCast(CastKind::Trunc8, std::move(m_flags.lhs));
+            if (o[0].type == X86_OP_MEM && o[0].size == 2 && m_flags.lhs)
+                m_flags.lhs = IRExpr::mkCast(CastKind::Trunc16, std::move(m_flags.lhs));
             m_flags.op = IROp::Sub;
             return;
         }
@@ -1650,10 +1655,12 @@ private:
                 auto *callee = m_mf.stabsFunctionAt(tgt);
                 if (!callee) callee = m_mf.stabsFunctionByName(target);
                 if (callee) retType = callee->returnType;
-                // Build tail call: return target(args) — reuse current function's params
+                // Build tail call: return target(args)
+                // Use callee's param count if known; otherwise reuse caller's params
                 std::vector<std::unique_ptr<IRExpr>> args;
-                for (auto &p : func.params)
-                    args.push_back(IRExpr::mkVar(p.name, p.typeRef));
+                int nCalleeParams = callee ? (int)callee->params.size() : (int)func.params.size();
+                for (int pi = 0; pi < std::min(nCalleeParams, (int)func.params.size()); ++pi)
+                    args.push_back(IRExpr::mkVar(func.params[pi].name, func.params[pi].typeRef));
                 auto callExpr = IRExpr::mkCall(target, std::move(args), retType);
                 bb.stmts.push_back(IRStmt::mkReturn(std::move(callExpr)));
             }
@@ -1794,9 +1801,11 @@ private:
                         target = buf;
                     } else if (mem.base == X86_REG_INVALID && mem.index != X86_REG_INVALID) {
                         // call [reg*4 + table_addr] — function pointer table
-                        char buf[64]; snprintf(buf, sizeof(buf), "fptable_%X",
-                            (unsigned)(uint32_t)mem.disp);
+                        char buf[64]; snprintf(buf, sizeof(buf), "fptable_%X_%d",
+                            (unsigned)(uint32_t)mem.disp, mem.scale);
                         target = buf;
+                        // Save index expression to prepend to args later
+                        m_fpTableIndex = readReg(mem.index);
                     } else {
                         auto tgt = readOp(o[0]);
                         int fpTemp = func.newTemp();
@@ -1826,6 +1835,11 @@ private:
             }
             m_espArgs.clear();
             m_pushArgs.clear();
+            // Prepend fptable index if present
+            if (m_fpTableIndex) {
+                args.insert(args.begin(), std::move(m_fpTableIndex));
+                m_fpTableIndex.reset();
+            }
 
             auto callExpr = IRExpr::mkCall(target, std::move(args), retType);
 
@@ -1923,7 +1937,7 @@ private:
             } else {
                 args.push_back(std::move(cnt));
             }
-            auto callExpr = IRExpr::mkCall("memcmp", std::move(args));
+            auto callExpr = IRExpr::mkCall("__builtin_memcmp", std::move(args));
             int t = func.newTemp();
             bb.stmts.push_back(IRStmt::mkAssign(t, std::move(callExpr)));
             m_flags.lhs = IRExpr::mkTemp(t);
