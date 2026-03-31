@@ -1040,6 +1040,28 @@ private:
             int bt = regTemp(m.base);
             if (bt >= 0) baseType = m_func->tempType(bt);
 
+            // Try resolving type from STABS for named globals
+            // readReg returns Temps, so follow temp→definition to find Var name
+            if (baseType == NullType && base && base->op == IROp::Temp) {
+                int tid = base->tempId();
+                // Search through all emitted BBs for the temp assignment
+                for (auto &blk : m_func->blocks) {
+                    for (auto &s : blk.stmts) {
+                        if (s.kind == IRStmtKind::Assign && s.destTemp == tid && s.expr) {
+                            IRExpr *def = s.expr.get();
+                            if (def->op == IROp::Var && !def->name.empty()) {
+                                auto *gn = m_types.globalByName(def->name);
+                                if (gn && gn->typeRef != NullType) {
+                                    auto *gt = m_types.resolveType(gn->typeRef);
+                                    if (gt && gt->kind == StabsTypeKind::Pointer)
+                                        baseType = gn->typeRef;
+                                }
+                            }
+                        }
+                    }
+                    if (baseType != NullType) break;
+                }
+            }
             // Try struct field resolution with array subscript support
             if (baseType != NullType && m_types.isStructPointer(baseType)) {
                 TypeRef structRef = m_types.getPointedStruct(baseType);

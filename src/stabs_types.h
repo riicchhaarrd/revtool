@@ -346,6 +346,7 @@ public:
         if (!t || (t->kind != StabsTypeKind::Struct && t->kind != StabsTypeKind::Union))
             return "";
         int bitTarget = byteOffset * 8;
+        (void)debug;
 
         // Check "inside larger field" FIRST — prefer array element access over
         // overlapping field exact matches
