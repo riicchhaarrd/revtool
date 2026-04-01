@@ -872,6 +872,111 @@ public:
                 pos += 2;
             }
         }
+        // Inline trivial pointer aliases: "TYPE *v = srcName;" → replace v with srcName
+        // Looks for declaration + assignment pattern and replaces all uses.
+        {
+            QStringList lines = cleaned.split('\n');
+            for (int i = 0; i < lines.size(); ++i) {
+                QString trimmed = lines[i].trimmed();
+                // Find assignment: "NAME = SOURCE;" as a standalone statement
+                int eq = trimmed.indexOf(" = ");
+                if (eq <= 0 || !trimmed.endsWith(';')) continue;
+                QString varName = trimmed.left(eq).trimmed();
+                QString srcName = trimmed.mid(eq + 3, trimmed.size() - eq - 4).trimmed();
+                // Both must be simple identifiers
+                if (varName.isEmpty() || srcName.isEmpty()) continue;
+                bool varOk = true, srcOk = true;
+                for (auto c : varName) if (!c.isLetterOrNumber() && c != '_') { varOk = false; break; }
+                for (auto c : srcName) if (!c.isLetterOrNumber() && c != '_') { srcOk = false; break; }
+                if (!varOk || !srcOk || srcName[0].isDigit()) continue;
+                if (varName == srcName) continue;
+                // Check: is there a declaration "TYPE *varName;" earlier in the function?
+                bool hasDecl = false;
+                int declLine = -1;
+                for (int j = 0; j < i; ++j) {
+                    QString dt = lines[j].trimmed();
+                    if (dt.endsWith("*" + varName + ";") || dt.endsWith("* " + varName + ";")) {
+                        hasDecl = true; declLine = j; break;
+                    }
+                }
+                if (!hasDecl) continue;
+                // Count uses after the assignment
+                int useCount = 0;
+                for (int j = i + 1; j < lines.size(); ++j)
+                    if (lines[j].contains(varName)) useCount++;
+                if (useCount == 0) continue;
+                // Replace all uses of varName with srcName (whole word)
+                for (int j = i + 1; j < lines.size(); ++j) {
+                    // Simple whole-word replacement
+                    int pos = 0;
+                    while ((pos = lines[j].indexOf(varName, pos)) >= 0) {
+                        bool before = (pos == 0 || !lines[j][pos-1].isLetterOrNumber());
+                        bool after = (pos + varName.size() >= lines[j].size() ||
+                                     !lines[j][pos + varName.size()].isLetterOrNumber());
+                        if (before && after) {
+                            lines[j].replace(pos, varName.size(), srcName);
+                            pos += srcName.size();
+                        } else {
+                            pos += varName.size();
+                        }
+                    }
+                }
+                // Remove declaration and assignment
+                lines.removeAt(i); // remove assignment
+                if (declLine < i) { lines.removeAt(declLine); i -= 2; }
+                else i--;
+            }
+            cleaned = lines.join('\n');
+        }
+        // Convert interior pointer offset accesses to array notation:
+        // Given "v = &expr[0];" then "*(TYPE *)((char *)v + 0xN)" → "v[N/sizeof]"
+        {
+            // Find interior pointer assignments: "NAME = &EXPR[0];"
+            std::map<QString, int> interiorPtrs; // name → element size (4 for float/int)
+            int pos2 = 0;
+            while ((pos2 = cleaned.indexOf("[0];", pos2)) != -1) {
+                // Walk back to find "NAME = &"
+                int lineStart = cleaned.lastIndexOf('\n', pos2) + 1;
+                QString line = cleaned.mid(lineStart, pos2 + 4 - lineStart).trimmed();
+                // Match: NAME = &EXPR[0];
+                int eqPos = line.indexOf(" = &");
+                if (eqPos > 0) {
+                    QString varName = line.left(eqPos).trimmed();
+                    // varName should be a simple identifier
+                    bool ok = !varName.isEmpty();
+                    for (auto c : varName) if (!c.isLetterOrNumber() && c != '_') { ok = false; break; }
+                    if (ok) interiorPtrs[varName] = 4;
+                }
+                pos2 += 4;
+            }
+            // Replace: *(TYPE *)((char *)NAME + 0xN) → NAME[N/elemSize]
+            for (auto &[name, elemSz] : interiorPtrs) {
+                for (auto &castType : {"*(int *)((char *)", "*(unsigned short *)((char *)",
+                                        "*(unsigned char *)((char *)", "*(char *)((char *)"}) {
+                    QString prefix = QString(castType) + name + " + 0x";
+                    int rp = 0;
+                    while ((rp = cleaned.indexOf(prefix, rp)) != -1) {
+                        int hexStart = rp + prefix.size();
+                        int hexEnd = hexStart;
+                        while (hexEnd < cleaned.size() && cleaned[hexEnd].isLetterOrNumber()) hexEnd++;
+                        // Must end with ) — the closing paren of the outer cast expression
+                        if (hexEnd < cleaned.size() && cleaned[hexEnd] == ')') {
+                            bool hexOk;
+                            int offset = cleaned.mid(hexStart, hexEnd - hexStart).toInt(&hexOk, 16);
+                            if (hexOk && offset > 0 && offset % elemSz == 0) {
+                                int idx = offset / elemSz;
+                                int exprEnd = hexEnd + 1; // past the closing )
+                                QString replacement = name + "[" + QString::number(idx) + "]";
+                                cleaned.replace(rp, exprEnd - rp, replacement);
+                                rp += replacement.size();
+                                continue;
+                            }
+                        }
+                        rp++;
+                    }
+                }
+            }
+        }
         // Optimize global struct access: when (char *)GLOBAL is used multiple times,
         // introduce a local pointer to force register-based access (matching original asm)
         {

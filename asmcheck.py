@@ -38,6 +38,13 @@ typedef unsigned char byte;
 typedef int OSStatus; typedef short OSErr; typedef int Boolean;
 typedef unsigned int OSType; typedef void *CursHandle;
 typedef void *WindowRef; typedef void *MenuRef; typedef void *CGrafPtr;
+typedef void *ControlRef; typedef void *ControlPartCode;
+typedef const char *LPCSTR; typedef const char *LPCTSTR;
+typedef char *LPSTR; typedef void *LARGE_INTEGER;
+typedef struct { short v; short h; } Point;
+typedef void *ControlHandle; typedef void *DialogRef;
+typedef int CGRect; extern CGRect CGRectZero;
+typedef int HCURSOR; typedef int HWND; typedef int HINSTANCE;
 typedef void *GDHandle; typedef void *CursPtr;
 typedef unsigned int CGDirectDisplayID;
 typedef unsigned char Str255[256];
@@ -557,6 +564,28 @@ def compile_to_asm(c_code, orig_check=None):
             full = re.sub(r'^extern\s+\w+\s+\*?' + cname + r'\s*;.*\n', '', full, flags=re.MULTILINE)
             full = re.sub(r'^void\s+' + cname + r'\s*\(void\)\s*;.*\n', '', full, flags=re.MULTILINE)
             full = re.sub(r'^typedef\s+int\s+' + cname + r'\s*;.*\n', '', full, flags=re.MULTILINE)
+        # Handle "incompatible types in return" — change return type to match
+        if 'incompatible types in return' in stderr:
+            # Find the function signature and change return type
+            # Most common: function returns int but code returns a pointer, or vice versa
+            func_m = re.search(r'^((?:static\s+)?)(int|void|float|char)\s+(\w+\s*\()', full, re.MULTILINE)
+            if func_m:
+                old_type = func_m.group(2)
+                if old_type == 'int':
+                    # Try void* (returning a pointer)
+                    full = full[:func_m.start(2)] + 'void *' + full[func_m.end(2):]
+                elif old_type == 'void':
+                    full = full[:func_m.start(2)] + 'int' + full[func_m.end(2):]
+        # Handle "void value not ignored" — change void func to int return
+        for m in re.finditer(r"void value not ignored as it ought to be", stderr):
+            # Find which void function is being used as a value
+            for vm in re.finditer(r"(\w+)\s*=\s*(\w+)\s*\(", full):
+                fname = vm.group(2)
+                # If the function is declared as void, change to int
+                old_proto = re.search(r'^void\s+' + re.escape(fname) + r'\s*\(', full, re.MULTILINE)
+                if old_proto:
+                    full = full[:old_proto.start()] + 'int ' + fname + full[old_proto.start()+5+len(fname):]
+                    break
         # Handle "too few/many arguments to function" - fix prototype arg count
         for m in re.finditer(r"too (?:few|many) arguments to function " + q + r"(.+?)" + cq, stderr):
             fname_raw = m.group(1)
