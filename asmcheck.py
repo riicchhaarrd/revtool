@@ -154,6 +154,8 @@ dvar_t *Dvar_RegisterColor(const char*,float,float,float,float,int);
 dvar_t *Dvar_RegisterVec2(const char*,float,float,float,float,int);
 dvar_t *Dvar_RegisterVec3(const char*,float,float,float,float,float,float,int);
 dvar_t *Dvar_RegisterVec4(const char*,float,float,float,float,float,float,float,float,int);
+int Scr_AddFloat(float);
+float Scr_GetFloat(int);
 #endif
 '''
 

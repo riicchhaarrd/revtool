@@ -468,12 +468,49 @@ public:
             }
         }
 
-        // ── Pass 6: merge duplicate SSE branches ─────────────────────
-        // SSE float compares (ucomisd) emit jp + jne to same target.
-        // Only merge when the second block has EXACTLY one Branch statement
-        // AND no preceding comparison instruction changed the flags.
-        // Disabled for now — the merge was incorrectly eating early-exit checks.
-        // TODO: re-enable with proper SSE pattern detection (check for ucomis* flag source)
+        // ── Pass 6: merge SSE float compare branches ─────────────────
+        // Pattern: BB_A ends with jp(NaN check) → BB_C; fallthrough → BB_B
+        //          BB_B has only one Branch: jb/jbe/ja/jae → BB_D
+        // This is ucomiss + jp + jcc. The jp handles NaN, jcc is the real compare.
+        // Merge: remove BB_A's jp branch, keep BB_B's comparison.
+        // The jp target (BB_C) must be BB_B's fallthrough (NaN skips the error check).
+        for (int bi = 0; bi < (int)func.blocks.size(); ++bi) {
+            auto &bbA = func.blocks[bi];
+            if (bbA.stmts.empty()) continue;
+            auto &brA = bbA.stmts.back();
+            if (brA.kind != IRStmtKind::Branch || !brA.expr) continue;
+            // Check if this is a jp(x != x) = NaN check
+            if (brA.expr->op != IROp::Ne) continue;
+            if (!brA.expr->kids[0] || !brA.expr->kids[1]) continue;
+            // x != x pattern (both sides are the same expression)
+            bool isNanCheck = false;
+            if (brA.expr->kids[0]->op == IROp::Temp && brA.expr->kids[1]->op == IROp::Temp &&
+                brA.expr->kids[0]->tempId() == brA.expr->kids[1]->tempId())
+                isNanCheck = true;
+            if (!isNanCheck) continue;
+
+            int jpTarget = brA.trueTarget;   // where NaN goes
+            int fallBB = brA.falseTarget;     // the real comparison BB
+            if (fallBB < 0 || fallBB >= (int)func.blocks.size()) continue;
+
+            auto &bbB = func.blocks[fallBB];
+            // BB_B must have exactly one statement: a Branch
+            if (bbB.stmts.size() != 1) continue;
+            auto &brB = bbB.stmts[0];
+            if (brB.kind != IRStmtKind::Branch) continue;
+
+            // BB_B's fallthrough should be the jp target (NaN skips to same place)
+            if (brB.falseTarget != jpTarget && brB.trueTarget != jpTarget) continue;
+
+            // Merge: replace BB_A's branch with BB_B's branch
+            // Remove the NaN check, keep the real float comparison
+            brA.expr = brB.expr->clone();
+            brA.trueTarget = brB.trueTarget;
+            brA.falseTarget = brB.falseTarget;
+            // Clear BB_B (now dead)
+            bbB.stmts.clear();
+            bbB.succs.clear();
+        }
 
 
         // ── Pass 6b: CSE — eliminate duplicate Loads within each block ──
@@ -771,6 +808,19 @@ private:
 
     // Register → temp mapping (current state)
     std::map<x86_reg, int> m_regTemps;
+
+    // Register → global struct source: tracks when a register was loaded from
+    // a global variable that is a struct with function pointer fields.
+    // Used to resolve indirect calls like call [reg + offset] → globalName.fieldName(args)
+    struct RegGlobalInfo {
+        std::string globalName;    // e.g. "ri"
+        TypeRef     typeRef;       // STABS type of the global
+    };
+    std::map<x86_reg, RegGlobalInfo> m_regGlobalSource;
+
+    // Register → resolved function name: when mov reg, [globalStruct + offset]
+    // resolves the field to a function pointer name, track it for call reg.
+    std::map<x86_reg, std::string> m_regFuncPtrName;
 
     // Flags state: which temp holds the flag result and what comparison produced it
     struct FlagsState {
@@ -1433,6 +1483,20 @@ private:
             else if (jmn == "jae" || jmn == "jnb")  cmpOp = IROp::Uge;
             else if (jmn == "js")                    cmpOp = IROp::Slt;
             else if (jmn == "jns")                   cmpOp = IROp::Sge;
+            // jp/jnp after ucomiss: parity = unordered (NaN)
+            // jp = "is NaN", jnp = "is not NaN"
+            // For float comparisons, jp means the operands are unordered.
+            // Emit as Ne/Eq against self (NaN != NaN is true)
+            else if (jmn == "jp") {
+                // isnan(x) ↔ x != x (NaN is the only value not equal to itself)
+                auto lhs2 = lhs->clone();
+                return IRExpr::mkBinary(IROp::Ne, std::move(lhs), std::move(lhs2));
+            }
+            else if (jmn == "jnp") {
+                // !isnan(x) ↔ x == x
+                auto lhs2 = lhs->clone();
+                return IRExpr::mkBinary(IROp::Eq, std::move(lhs), std::move(lhs2));
+            }
             else cmpOp = IROp::Ne;
         }
         return IRExpr::mkBinary(cmpOp, std::move(lhs), std::move(rhs));
@@ -1460,6 +1524,43 @@ private:
             auto src = readOp(o[1]);
             if (!src) return;
             TypeRef t = src->typeRef;
+            // Track register-to-global source for indirect call resolution.
+            if (o[0].type == X86_OP_REG) {
+                x86_reg canon = canonReg(o[0].reg);
+                m_regGlobalSource.erase(canon);
+                m_regFuncPtrName.erase(canon);
+
+                if (o[1].type == X86_OP_MEM) {
+                    auto &smem = o[1].mem;
+                    if (smem.base == X86_REG_INVALID && smem.index == X86_REG_INVALID &&
+                        smem.disp != 0) {
+                        // mov reg, [addr] — direct address load
+                        // Check if the loaded value is a named global with struct type
+                        if (src->op == IROp::Var && !src->name.empty()) {
+                            auto *g = m_types.globalByName(src->name);
+                            if (g && g->typeRef != NullType) {
+                                auto *gt = m_types.resolveType(g->typeRef);
+                                if (gt && (gt->kind == StabsTypeKind::Struct ||
+                                           gt->kind == StabsTypeKind::ForwardRef)) {
+                                    m_regGlobalSource[canon] = {src->name, g->typeRef};
+                                }
+                            }
+                        }
+                    } else if (smem.base != X86_REG_INVALID && smem.index == X86_REG_INVALID &&
+                               smem.disp >= 0) {
+                        // mov reg, [base + offset] — check if base is a global struct
+                        auto git = m_regGlobalSource.find(canonReg(smem.base));
+                        if (git != m_regGlobalSource.end()) {
+                            std::string fieldName = m_types.formatFieldAccess(
+                                git->second.typeRef, (int)smem.disp);
+                            if (!fieldName.empty()) {
+                                m_regFuncPtrName[canon] =
+                                    git->second.globalName + "." + fieldName;
+                            }
+                        }
+                    }
+                }
+            }
             writeOp(o[0], std::move(src), bb, t);
             return;
         }
@@ -1904,9 +2005,24 @@ private:
                     // where reg was loaded from [this] (i.e., vtable pointer)
                     auto &mem = o[0].mem;
                     if (mem.base != X86_REG_INVALID && mem.index == X86_REG_INVALID && mem.disp >= 0) {
-                        int slot = (int)mem.disp / 4;
-                        char buf[32]; snprintf(buf, sizeof(buf), "vfunc_%d", slot);
-                        target = buf;
+                        // Check if base register came from a known global struct
+                        // (e.g., ri = refimport_t with function pointer fields)
+                        bool resolved = false;
+                        auto git = m_regGlobalSource.find(canonReg(mem.base));
+                        if (git != m_regGlobalSource.end()) {
+                            // Look up field name at the given offset in the struct
+                            std::string fieldName = m_types.formatFieldAccess(
+                                git->second.typeRef, (int)mem.disp);
+                            if (!fieldName.empty()) {
+                                target = git->second.globalName + "." + fieldName;
+                                resolved = true;
+                            }
+                        }
+                        if (!resolved) {
+                            int slot = (int)mem.disp / 4;
+                            char buf[32]; snprintf(buf, sizeof(buf), "vfunc_%d", slot);
+                            target = buf;
+                        }
                     } else if (mem.base == X86_REG_INVALID && mem.index != X86_REG_INVALID) {
                         // call [reg*4 + table_addr] — function pointer table
                         char buf[64]; snprintf(buf, sizeof(buf), "fptable_%X_%d",
@@ -1922,10 +2038,16 @@ private:
                     }
                 } else if (o[0].type == X86_OP_REG) {
                     // call reg — function pointer in register
-                    auto tgt = readReg(o[0].reg);
-                    int fpTemp = func.newTemp();
-                    bb.stmts.push_back(IRStmt::mkAssign(fpTemp, std::move(tgt)));
-                    target = "t" + std::to_string(fpTemp);
+                    // Check if reg was loaded from a known global struct field
+                    auto fit = m_regFuncPtrName.find(canonReg(o[0].reg));
+                    if (fit != m_regFuncPtrName.end()) {
+                        target = fit->second;
+                    } else {
+                        auto tgt = readReg(o[0].reg);
+                        int fpTemp = func.newTemp();
+                        bb.stmts.push_back(IRStmt::mkAssign(fpTemp, std::move(tgt)));
+                        target = "t" + std::to_string(fpTemp);
+                    }
                 } else {
                     target = "???";
                 }

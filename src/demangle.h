@@ -13,8 +13,16 @@ inline std::string demangle(const std::string &name) {
 
     // Mach-O adds a leading '_' — strip it and try again
     if (name.size() > 1 && name[0] == '_') {
-        d = abi::__cxa_demangle(name.c_str() + 1, nullptr, nullptr, &status);
-        if (status == 0 && d) { std::string r(d); free(d); return r; }
+        const char *stripped = name.c_str() + 1;
+        // Only try demangling if it looks like a real C++ mangled name.
+        // Itanium ABI mangled names start with _Z (or Z after Mach-O underscore strip).
+        // Short names like "rg", "ri" are valid C symbols but happen to be valid
+        // Itanium ABI type manglings (rg = "__float128 restrict", ri = "int restrict"),
+        // causing false positive demanglings.
+        if (stripped[0] == 'Z' || (stripped[0] == '_' && stripped[1] == 'Z')) {
+            d = abi::__cxa_demangle(stripped, nullptr, nullptr, &status);
+            if (status == 0 && d) { std::string r(d); free(d); return r; }
+        }
         // Not mangled — just strip the Mach-O underscore
         return name.substr(1);
     }
