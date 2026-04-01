@@ -1536,6 +1536,7 @@ private:
                     if (smem.base == X86_REG_INVALID && smem.index == X86_REG_INVALID &&
                         smem.disp != 0) {
                         // mov reg, [addr] — direct address load
+                        uint32_t loadAddr = (uint32_t)smem.disp;
                         // Check if the loaded value is a named global with struct type
                         if (src->op == IROp::Var && !src->name.empty()) {
                             auto *g = m_types.globalByName(src->name);
@@ -1544,6 +1545,33 @@ private:
                                 if (gt && (gt->kind == StabsTypeKind::Struct ||
                                            gt->kind == StabsTypeKind::ForwardRef)) {
                                     m_regGlobalSource[canon] = {src->name, g->typeRef};
+                                    // Loading from struct base (offset 0) = first field
+                                    std::string f0 = m_types.formatFieldAccess(g->typeRef, 0);
+                                    if (!f0.empty())
+                                        m_regFuncPtrName[canon] = src->name + "." + f0;
+                                }
+                            }
+                        }
+                        // Also check if addr is within a known global struct
+                        // (e.g., mov eax, [re + 0x148] loads re.Shutdown)
+                        if (m_regFuncPtrName.find(canon) == m_regFuncPtrName.end()) {
+                            std::string nearest = m_mf.nearestSymbolName(loadAddr);
+                            if (!nearest.empty()) {
+                                size_t plus = nearest.find(" + 0x");
+                                if (plus != std::string::npos && nearest.front() == '(' && nearest.back() == ')') {
+                                    std::string gname = nearest.substr(1, plus - 1);
+                                    unsigned goff = 0;
+                                    sscanf(nearest.c_str() + plus + 3, "%x", &goff);
+                                    auto *g = m_types.globalByName(gname);
+                                    if (g && g->typeRef != NullType) {
+                                        auto *gt = m_types.resolveType(g->typeRef);
+                                        if (gt && (gt->kind == StabsTypeKind::Struct ||
+                                                   gt->kind == StabsTypeKind::Union)) {
+                                            std::string fieldName = m_types.formatFieldAccess(g->typeRef, (int)goff);
+                                            if (!fieldName.empty())
+                                                m_regFuncPtrName[canon] = gname + "." + fieldName;
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -2076,6 +2104,41 @@ private:
                         target = buf;
                         // Save index expression to prepend to args later
                         m_fpTableIndex = readReg(mem.index);
+                    } else if (mem.base == X86_REG_INVALID && mem.index == X86_REG_INVALID &&
+                               mem.disp != 0) {
+                        // call [direct_addr] — may be a function pointer in a global struct
+                        // Check if addr falls within a known global struct
+                        uint32_t callAddr = (uint32_t)mem.disp;
+                        std::string nearest = m_mf.nearestSymbolName(callAddr);
+                        bool resolved = false;
+                        if (!nearest.empty()) {
+                            // Parse "(name + 0xNN)" format
+                            size_t plus = nearest.find(" + 0x");
+                            if (plus != std::string::npos && nearest.front() == '(' && nearest.back() == ')') {
+                                std::string gname = nearest.substr(1, plus - 1);
+                                unsigned offset = 0;
+                                sscanf(nearest.c_str() + plus + 3, "%x", &offset);
+                                auto *g = m_types.globalByName(gname);
+                                if (g && g->typeRef != NullType) {
+                                    auto *gt = m_types.resolveType(g->typeRef);
+                                    if (gt && (gt->kind == StabsTypeKind::Struct ||
+                                               gt->kind == StabsTypeKind::Union)) {
+                                        std::string fieldName = m_types.formatFieldAccess(
+                                            g->typeRef, (int)offset);
+                                        if (!fieldName.empty()) {
+                                            target = gname + "." + fieldName;
+                                            resolved = true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if (!resolved) {
+                            auto tgt = readOp(o[0]);
+                            int fpTemp = func.newTemp();
+                            bb.stmts.push_back(IRStmt::mkAssign(fpTemp, std::move(tgt)));
+                            target = "t" + std::to_string(fpTemp);
+                        }
                     } else {
                         auto tgt = readOp(o[0]);
                         int fpTemp = func.newTemp();

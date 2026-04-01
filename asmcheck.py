@@ -155,7 +155,6 @@ dvar_t *Dvar_RegisterVec2(const char*,float,float,float,float,int);
 dvar_t *Dvar_RegisterVec3(const char*,float,float,float,float,float,float,int);
 dvar_t *Dvar_RegisterVec4(const char*,float,float,float,float,float,float,float,float,int);
 int Scr_AddFloat(float);
-float Scr_GetFloat(int);
 #endif
 '''
 
@@ -357,6 +356,12 @@ def compile_to_asm(c_code, orig_check=None):
         assigned_calls = set()
         for m in re.finditer(r'(\w+)\s*=\s*(\w+)\s*\(', c_code):
             assigned_calls.add(m.group(2))
+        # Also capture functions used as arguments to other functions
+        # (e.g., atanf(Scr_GetFloat(0)) — Scr_GetFloat's return type matters)
+        for m in re.finditer(r'\(\s*(\w+)\s*\(', c_code):
+            name = m.group(1)
+            if name not in ('if', 'while', 'for', 'switch', 'return', 'sizeof', 'void', 'int', 'float', 'char'):
+                assigned_calls.add(name)
         for line in lines:
             if '/* Function prototypes */' in line:
                 in_protos = True
