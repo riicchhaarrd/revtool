@@ -267,6 +267,41 @@ private:
                 // While: header has a branch, one arm is body, other is exit
                 if (!bb.stmts.empty() && bb.stmts.back().kind == IRStmtKind::Branch) {
                     auto &br = bb.stmts.back();
+
+                    // Check for constant loop condition (always true/false)
+                    if (br.expr && br.expr->kids.size() == 2 &&
+                        br.expr->kids[0] && br.expr->kids[1] &&
+                        br.expr->op >= IROp::Eq && br.expr->op <= IROp::Uge) {
+                        auto evalC = [&](IRExpr *e) -> std::pair<bool, int64_t> {
+                            if (e->isConst()) return {true, e->value};
+                            if (e->op == IROp::Temp) {
+                                for (auto &blk : m_func->blocks)
+                                    for (auto &s : blk.stmts)
+                                        if (s.kind == IRStmtKind::Assign && s.destTemp == e->tempId() &&
+                                            s.expr && s.expr->isConst())
+                                            return {true, s.expr->value};
+                            }
+                            return {false, 0};
+                        };
+                        auto [a1, v1] = evalC(br.expr->kids[0].get());
+                        auto [a2, v2] = evalC(br.expr->kids[1].get());
+                        if (a1 && a2) {
+                            bool res = false;
+                            switch (br.expr->op) {
+                            case IROp::Eq: res = (v1 == v2); break;
+                            case IROp::Ne: res = (v1 != v2); break;
+                            default: res = (v1 != v2); break;
+                            }
+                            // Fold: skip loop entirely or treat as unconditional
+                            int taken = res ? br.trueTarget : br.falseTarget;
+                            int stmtEnd2 = (int)bb.stmts.size() - 1;
+                            if (stmtEnd2 > 0)
+                                block->children.push_back(StructNode::mkSeq(cur, 0, stmtEnd2));
+                            cur = taken;
+                            continue;
+                        }
+                    }
+
                     int bodyTarget = -1;
                     bool negCond = false;
 
@@ -277,7 +312,6 @@ private:
                         bodyTarget = br.falseTarget;
                         negCond = true;
                     } else {
-                        // Can't determine structure — treat as loop with body=true
                         bodyTarget = br.trueTarget;
                         negCond = false;
                     }
@@ -459,6 +493,49 @@ private:
             auto &last = bb.stmts.back();
 
             if (last.kind == IRStmtKind::Branch) {
+                // Detect trivially constant conditions (e.g., "32 != 46" = always true)
+                // Fold to unconditional jump to eliminate dead code
+                if (last.expr && last.expr->kids.size() == 2 &&
+                    last.expr->kids[0] && last.expr->kids[1] &&
+                    last.expr->op >= IROp::Eq && last.expr->op <= IROp::Uge) {
+                    // Try to evaluate: follow temps to find constants
+                    auto evalConst = [&](IRExpr *e) -> std::pair<bool, int64_t> {
+                        if (e->isConst()) return {true, e->value};
+                        if (e->op == IROp::Temp) {
+                            for (auto &blk : m_func->blocks)
+                                for (auto &s : blk.stmts)
+                                    if (s.kind == IRStmtKind::Assign && s.destTemp == e->tempId() &&
+                                        s.expr && s.expr->isConst())
+                                        return {true, s.expr->value};
+                        }
+                        return {false, 0};
+                    };
+                    auto [aOk, aVal] = evalConst(last.expr->kids[0].get());
+                    auto [bOk, bVal] = evalConst(last.expr->kids[1].get());
+                    if (aOk && bOk) {
+                    int64_t a = aVal, b = bVal;
+                    bool result = false;
+                    switch (last.expr->op) {
+                    case IROp::Eq:  result = (a == b); break;
+                    case IROp::Ne:  result = (a != b); break;
+                    case IROp::Slt: result = (a < b); break;
+                    case IROp::Sle: result = (a <= b); break;
+                    case IROp::Sgt: result = (a > b); break;
+                    case IROp::Sge: result = (a >= b); break;
+                    case IROp::Ult: result = ((uint32_t)a < (uint32_t)b); break;
+                    case IROp::Ule: result = ((uint32_t)a <= (uint32_t)b); break;
+                    case IROp::Ugt: result = ((uint32_t)a > (uint32_t)b); break;
+                    case IROp::Uge: result = ((uint32_t)a >= (uint32_t)b); break;
+                    default: break;
+                    }
+                    // Fold: treat as unconditional jump to the taken branch
+                    if (numStmts > 1)
+                        block->children.push_back(StructNode::mkSeq(cur, 0, numStmts - 1));
+                    cur = result ? last.trueTarget : last.falseTarget;
+                    continue;
+                    }
+                }
+
                 // Emit pre-branch statements
                 if (numStmts > 1)
                     block->children.push_back(StructNode::mkSeq(cur, 0, numStmts - 1));
