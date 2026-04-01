@@ -1378,6 +1378,22 @@ public:
                          line.contains("57.29") || line.contains("Scr_AddFloat"))) {
                         assignedFromFloat = true;
                     }
+                    // Check if assigned from a float-typed variable
+                    if (line.contains(varName + " = ") &&
+                        (line.contains("= v") || line.contains("= (v"))) {
+                        // Check if the RHS variable is declared as float
+                        for (int k = 0; k < i; ++k) {
+                            if (cl[k].trimmed().startsWith("float ") &&
+                                line.contains(cl[k].trimmed().mid(6).split(';').first().trimmed())) {
+                                assignedFromFloat = true;
+                                break;
+                            }
+                        }
+                    }
+                    // Check if returned and function returns float
+                    if (line.trimmed().startsWith("return " + varName)) {
+                        assignedFromFloat = true;
+                    }
                     // Check if used as a pure integer (bit ops, array index, etc.)
                     if (line.contains(varName + " &") || line.contains(varName + " |") ||
                         line.contains(varName + " <<") || line.contains("[" + varName + "]")) {

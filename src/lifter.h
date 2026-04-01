@@ -1971,12 +1971,10 @@ private:
 
         // ── Return ──────────────────────────────────────────────────
         if (mn == "ret") {
-            fprintf(stderr, "RET_LIFTER: retType=%d fpuStack=%d lastFpuTop=%d\n",
-                    m_func->returnType, (int)m_fpuStack.size(), m_lastFpuTop);
+            // Return handling
             // Check if return type is void (including through typedef chains)
             if (m_func->returnType != NullType) {
                 auto *rt = m_types.resolveType(m_func->returnType);
-                fprintf(stderr, "RET_LIFTER2: rt=%p kind=%d\n", (void*)rt, rt ? (int)rt->kind : -1);
                 if (rt && rt->kind == StabsTypeKind::Void) {
                     bb.stmts.push_back(IRStmt::mkReturn());
                     return;
@@ -1987,15 +1985,18 @@ private:
                     bb.stmts.push_back(IRStmt::mkReturn());
                     return;
                 }
-                // Float/double return → use ST0 from FPU stack, or last popped value
+                // FPU stack has a value → return it as float, regardless of declared type.
+                // The presence of a value on the FPU stack at ret is the strongest signal
+                // for float return. STABS type refs can be wrong (e.g., CU-scoped int
+                // when the actual type is const float from a different CU).
+                if (!m_fpuStack.empty()) {
+                    bb.stmts.push_back(IRStmt::mkReturn(fpuRead(0)));
+                    return;
+                }
+                // Float/double return → use last popped FPU value
                 if (rt && (rt->kind == StabsTypeKind::Float ||
                            rt->kind == StabsTypeKind::Double ||
                            rt->kind == StabsTypeKind::LongDouble)) {
-                    // If FPU stack has a value, use ST0 directly
-                    if (!m_fpuStack.empty()) {
-                        bb.stmts.push_back(IRStmt::mkReturn(fpuRead(0)));
-                        return;
-                    }
                     // Use the last value that was on the FPU stack top before pop
                     // (common pattern: fstp stores result then ret returns it)
                     if (m_lastFpuTop >= 0) {
@@ -2487,6 +2488,20 @@ private:
                 } else {
                     // fld loads a float from memory — no int-to-float cast needed
                     auto src = readOp(o[0]);
+                    // If loading from a local variable, ensure it's typed as float
+                    // (flds always loads a float, so the local IS a float)
+                    if (o[0].type == X86_OP_MEM && o[0].mem.base == X86_REG_EBP &&
+                        o[0].mem.index == X86_REG_INVALID && o[0].mem.disp < 0) {
+                        auto it = m_localByOffset.find((int)o[0].mem.disp);
+                        if (it != m_localByOffset.end()) {
+                            auto *rt = m_types.resolveType(it->second->typeRef);
+                            if (!rt || rt->kind == StabsTypeKind::Int ||
+                                rt->kind == StabsTypeKind::UInt) {
+                                // Override int → float for this local
+                                const_cast<StabsTypedVar*>(it->second)->typeRef = getFloatTypeRef();
+                            }
+                        }
+                    }
                     fpuPush(std::move(src), bb);
                 }
             }
