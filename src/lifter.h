@@ -2,6 +2,7 @@
 #include "ir.h"
 #include "macho.h"
 #include <capstone/capstone.h>
+#include <list>
 #include <map>
 #include <set>
 #include <string>
@@ -329,13 +330,80 @@ public:
         m_flags = {-1, IROp::Eq, nullptr, nullptr};
 
         // Inject register parameter initializations.
-        // Scan the first few instructions for "mov REGPARAM_DEST, SRC" patterns
-        // where DEST is a regparam register. Pre-bind the SRC register to the
-        // parameter name since the calling convention delivers the value there.
+        // Regparm args arrive in EAX, EDX, ECX. Detection:
+        // 1. STABS N_RSYM with descriptor 'P' (explicit register param)
+        // 2. Prologue pattern: mov [ebp-N], eax/edx/ecx where a STABS param exists
+        //    at that stack offset (param saved to stack in prologue)
+        m_regParamLocals.clear();
+
+        // Detect additional regparm params from prologue save patterns.
+        // If we see "mov [ebp-N], eax/edx/ecx" and STABS has a param at offset N,
+        // the param is regparm (arrived in register, saved to stack).
+        if (sfn && !func.blocks.empty()) {
+            static const x86_reg regparmRegs[] = {X86_REG_EAX, X86_REG_EDX, X86_REG_ECX};
+            for (size_t pi = 0; pi < std::min(funcEndIdx, (size_t)15); ++pi) {
+                auto &pin = insn[pi];
+                std::string pmn = pin.mnemonic;
+                if (pmn != "mov") continue;
+                if (pin.detail->x86.op_count != 2) continue;
+                auto &dst = pin.detail->x86.operands[0];
+                auto &src = pin.detail->x86.operands[1];
+                if (src.type != X86_OP_REG) continue;
+                x86_reg srcR = canonReg(src.reg);
+                bool isRegparm = false;
+                for (auto rr : regparmRegs) if (srcR == rr) { isRegparm = true; break; }
+                if (!isRegparm) continue;
+                if (m_regParamRegs.count(srcR)) continue;  // already detected
+
+                if (dst.type == X86_OP_MEM &&
+                    dst.mem.base == X86_REG_EBP && dst.mem.index == X86_REG_INVALID &&
+                    (int)dst.mem.disp < 0) {
+                    // Pattern 1: mov [ebp-N], eax/edx/ecx — save to stack
+                    int off = (int)dst.mem.disp;
+                    for (auto &p : sfn->params) {
+                        if (p.stackOffset == off && p.regNum < 0) {
+                            m_regParamRegs[srcR] = &p;
+                            break;
+                        }
+                    }
+                } else if (dst.type == X86_OP_REG) {
+                    // Pattern 2: mov REG_DEST, eax/edx/ecx — save to callee-saved reg
+                    // Check if STABS has a param with regNum matching DEST
+                    x86_reg dstR = canonReg(dst.reg);
+                    int stabsReg = -1;
+                    switch (dstR) {
+                        case X86_REG_EAX: stabsReg = 0; break;
+                        case X86_REG_ECX: stabsReg = 1; break;
+                        case X86_REG_EDX: stabsReg = 2; break;
+                        case X86_REG_EBX: stabsReg = 3; break;
+                        case X86_REG_ESI: stabsReg = 6; break;
+                        case X86_REG_EDI: stabsReg = 7; break;
+                        default: break;
+                    }
+                    if (stabsReg >= 0) {
+                        for (auto &p : sfn->params) {
+                            if (p.regNum == stabsReg) {
+                                m_regParamRegs[srcR] = &p;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         if (!func.blocks.empty() && !m_regParamRegs.empty()) {
             auto &bb0 = func.blocks[0];
-            // First, scan prologue instructions to find source registers
-            std::set<x86_reg> sourcesHandled;
+
+            // Bind the regparam registers to parameter names
+            for (auto &[xr, param] : m_regParamRegs) {
+                int t = func.newTemp(param->typeRef);
+                bb0.stmts.push_back(IRStmt::mkAssign(t,
+                    IRExpr::mkVar(param->name, param->typeRef), param->typeRef));
+                m_regTemps[xr] = t;
+            }
+
+            // Scan prologue for instructions that SAVE regparam values.
             for (size_t pi = 0; pi < std::min(funcEndIdx, (size_t)20); ++pi) {
                 auto &pin = insn[pi];
                 std::string pmn = pin.mnemonic;
@@ -343,27 +411,27 @@ public:
                 if (pin.detail->x86.op_count != 2) continue;
                 auto &dst = pin.detail->x86.operands[0];
                 auto &src = pin.detail->x86.operands[1];
-                if (dst.type != X86_OP_REG || src.type != X86_OP_REG) continue;
-                x86_reg dstR = canonReg(dst.reg);
+                if (src.type != X86_OP_REG) continue;
                 x86_reg srcR = canonReg(src.reg);
-                auto pit = m_regParamRegs.find(dstR);
+                auto pit = m_regParamRegs.find(srcR);
                 if (pit == m_regParamRegs.end()) continue;
-                if (sourcesHandled.count(srcR)) continue;
-                sourcesHandled.insert(srcR);
-                // Pre-bind the source register to the parameter
+
                 auto *param = pit->second;
-                int t = func.newTemp(param->typeRef);
-                bb0.stmts.push_back(IRStmt::mkAssign(t,
-                    IRExpr::mkVar(param->name, param->typeRef), param->typeRef));
-                m_regTemps[srcR] = t;
-            }
-            // Also bind the regparam registers themselves (for direct use)
-            for (auto &[xr, param] : m_regParamRegs) {
-                if (m_regTemps.count(xr)) continue; // already bound via source
-                int t = func.newTemp(param->typeRef);
-                bb0.stmts.push_back(IRStmt::mkAssign(t,
-                    IRExpr::mkVar(param->name, param->typeRef), param->typeRef));
-                m_regTemps[xr] = t;
+                if (dst.type == X86_OP_REG) {
+                    x86_reg dstR = canonReg(dst.reg);
+                    if (dstR == srcR) continue;
+                    if (m_regTemps.count(dstR)) continue;
+                    m_regTemps[dstR] = m_regTemps[srcR];
+                } else if (dst.type == X86_OP_MEM &&
+                           dst.mem.base == X86_REG_EBP &&
+                           dst.mem.index == X86_REG_INVALID &&
+                           (int)dst.mem.disp < 0) {
+                    int off = (int)dst.mem.disp;
+                    if (m_localByOffset.find(off) == m_localByOffset.end()) {
+                        m_regParamLocals.push_back({param->name, param->typeRef, off, -1});
+                        m_localByOffset[off] = &m_regParamLocals.back();
+                    }
+                }
             }
         }
 
@@ -803,6 +871,7 @@ private:
     std::map<int, const StabsTypedVar*> m_localByOffset;
     std::map<x86_reg, const StabsTypedVar*> m_regParamRegs;  // register params (regparm)
     std::set<x86_reg> m_regParamInjected;  // which reg params we've already injected
+    std::list<StabsTypedVar> m_regParamLocals;  // stable storage for regparm stack locals
     std::set<uint32_t> m_floatReturnAddrs;   // call target addresses known to return float
     std::set<uint32_t> m_floatRetCallSites;  // instruction addresses of float-returning calls
 
