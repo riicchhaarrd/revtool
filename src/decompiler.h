@@ -4010,13 +4010,26 @@ private:
                     }
                 }
 
-                // For unsigned comparisons (Ult/Ule/Ugt/Uge), add (unsigned) cast
-                // to ensure GCC generates unsigned comparison instructions (ja/jb/setbe etc.)
+                // For unsigned comparisons (Ult/Ule/Ugt/Uge) against small constants,
+                // add (unsigned) cast to generate unsigned instructions (setbe etc.)
+                // Only apply when: rhs is a small constant AND lhs looks like an
+                // integer expression (not a float or function call result).
                 bool isUnsigned = (cmp == IROp::Ult || cmp == IROp::Ule ||
                                    cmp == IROp::Ugt || cmp == IROp::Uge);
-                if (isUnsigned && !lhs.empty() &&
+                bool addUnsignedCast = false;
+                if (isUnsigned && e->kids[1] && e->kids[1]->isConst() &&
+                    e->kids[1]->value >= 0 && e->kids[1]->value <= 0xFFFF &&
                     lhs.find("(unsigned)") == std::string::npos &&
-                    lhs.find("(unsigned int)") == std::string::npos) {
+                    lhs.find("0.") == std::string::npos &&
+                    lhs.find("0f") == std::string::npos) {
+                    // Only cast when lhs is arithmetic (contains - or +),
+                    // indicating a range check pattern like (x - N) <= M
+                    if (lhs.find(" - ") != std::string::npos ||
+                        lhs.find(" + ") != std::string::npos) {
+                        addUnsignedCast = true;
+                    }
+                }
+                if (addUnsignedCast) {
                     result = "(unsigned)(" + lhs + ")" + op + rhs;
                 } else {
                     result = lhs + op + rhs;
