@@ -92,6 +92,12 @@ typedef unsigned long uLong;
 typedef unsigned int uInt;
 typedef void *voidpf;
 typedef int SIZE_T;
+typedef int INT32;
+typedef unsigned int UINT32;
+typedef short INT16;
+typedef unsigned short UINT16;
+typedef void *LPVOID;
+typedef int LONG;
 /* Win32 stubs */
 typedef struct { int dwLowDateTime; int dwHighDateTime; } FILETIME;
 typedef struct { int _[80]; } WIN32_FIND_DATAA;
@@ -613,7 +619,21 @@ def compile_to_asm(c_code, orig_check=None):
             if re.search(r'\*\s*\(' + re.escape(name) + r'\)|' +
                           re.escape(name) + r'\s*->|' +
                           re.escape(name) + r'\s*\[', full):
-                stubs += f'{qual}int *{name};\n'
+                # If used with -> and a field name, try to find the struct type
+                arrow_field = re.search(re.escape(name) + r'\s*->\s*(\w+)', full)
+                struct_type = None
+                if arrow_field:
+                    field_name = arrow_field.group(1)
+                    # Search extracted struct definitions for this field
+                    for tname, tdef in extracted.items():
+                        if re.search(r'\b' + re.escape(field_name) + r'\b', tdef) and \
+                           'struct' in tdef:
+                            struct_type = tname
+                            break
+                if struct_type:
+                    stubs += f'{qual}{struct_type} *{name};\n'
+                else:
+                    stubs += f'{qual}int *{name};\n'
             elif name.endswith('_f'):
                 stubs += f'void {name}(void);\n'
             elif (name in assign_rhs and name not in stubs_types):

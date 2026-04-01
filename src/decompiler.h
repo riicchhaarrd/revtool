@@ -3180,57 +3180,50 @@ private:
                     addr->kids[1]->isConst() &&
                     (int64_t)addr->kids[1]->value != 0 &&
                     std::abs((int64_t)addr->kids[1]->value) < 0x10000 &&
-                    (addr->kids[0]->op == IROp::Var || addr->kids[0]->op == IROp::Temp)) {
+                    (addr->kids[0]->op == IROp::Var || addr->kids[0]->op == IROp::Temp ||
+                     addr->kids[0]->op == IROp::Load)) {
                     std::string base = emitExpr(addr->kids[0].get());
                     int64_t off = (int64_t)addr->kids[1]->value;
                     // Try type-aware struct field access
                     TypeRef baseType = exprType(addr->kids[0].get());
-                    // For untyped expressions, try resolving type from STABS globals
-                    // Handles: Load(Add(Load(Var("global")), offset)) → global->field
+                    // For untyped expressions, try resolving type from STABS globals.
+                    // Handles two patterns:
+                    //   Load(Add(Var("global_ptr"), offset)) → global_ptr->field
+                    //   Load(Add(Load(Var("global_ptr")), offset)) → (*global_ptr)->field (NLP)
                     if (baseType == NullType) {
-                        // Direct Var or Temp→Var/Load(Var)
-                        IRExpr *baseExpr = addr->kids[0].get();
-                        // Follow through Temp definitions to find the source
-                        if (baseExpr->op == IROp::Temp) {
-                            auto dit = m_tempDef.find(baseExpr->tempId());
-                            if (dit != m_tempDef.end() && dit->second)
-                                baseExpr = dit->second;
+                        // Walk through temp defs and loads to find the source global name
+                        IRExpr *src = addr->kids[0].get();
+                        // Follow temp chain (up to 3 levels)
+                        for (int depth = 0; depth < 3 && src; ++depth) {
+                            if (src->op == IROp::Temp) {
+                                auto dit = m_tempDef.find(src->tempId());
+                                if (dit != m_tempDef.end() && dit->second)
+                                    src = dit->second;
+                                else break;
+                            } else break;
                         }
-                        // Check for Load(Var("global")) pattern — dereference of a global pointer
+                        // Extract global name
                         std::string gname;
-                        if (baseExpr->op == IROp::Var && !baseExpr->name.empty())
-                            gname = baseExpr->name;
-                        else if (baseExpr->op == IROp::Load && !baseExpr->kids.empty() &&
-                                 baseExpr->kids[0]->op == IROp::Var)
-                            gname = baseExpr->kids[0]->name;
+                        if (src && src->op == IROp::Var && !src->name.empty())
+                            gname = src->name;
+                        else if (src && src->op == IROp::Load && !src->kids.empty()) {
+                            // Load(Var) = dereference of a global pointer
+                            IRExpr *inner = src->kids[0].get();
+                            for (int d = 0; d < 3 && inner && inner->op == IROp::Temp; ++d) {
+                                auto dit = m_tempDef.find(inner->tempId());
+                                if (dit != m_tempDef.end() && dit->second)
+                                    inner = dit->second;
+                                else break;
+                            }
+                            if (inner && inner->op == IROp::Var && !inner->name.empty())
+                                gname = inner->name;
+                        }
                         if (!gname.empty()) {
                             auto *gn = m_types.globalByName(gname);
                             if (gn && gn->typeRef != NullType) {
                                 auto *gt = m_types.resolveType(gn->typeRef);
-                                if (gt && gt->kind == StabsTypeKind::Pointer)
+                                if (gt && gt->kind == StabsTypeKind::Pointer) {
                                     baseType = gn->typeRef;
-                            }
-                        } else if (addr->kids[0]->op == IROp::Temp) {
-                            // Temp def might not be in m_tempDef (phi temps, etc.)
-                            // Try resolving the emitted base string as a global name
-                            // Strip casts to extract the bare name
-                            std::string baseName = base;
-                            // Remove *(int *)((char *)( ... ))
-                            size_t p;
-                            if ((p = baseName.find("*(int *)((char *)(")) != std::string::npos)
-                                baseName = baseName.substr(p + 18);
-                            else if ((p = baseName.find("*(")) != std::string::npos)
-                                baseName = baseName.substr(p + 2);
-                            // Remove trailing ))
-                            while (!baseName.empty() && baseName.back() == ')')
-                                baseName.pop_back();
-                            // Check if it's a known global
-                            if (!baseName.empty() && baseName.find(' ') == std::string::npos) {
-                                auto *gn = m_types.globalByName(baseName);
-                                if (gn && gn->typeRef != NullType) {
-                                    auto *gt = m_types.resolveType(gn->typeRef);
-                                    if (gt && gt->kind == StabsTypeKind::Pointer)
-                                        baseType = gn->typeRef;
                                 }
                             }
                         }

@@ -1096,7 +1096,15 @@ private:
             if (!s.empty()) return IRExpr::mkString(s);
             // Try nlist symbol table for named globals
             std::string symName = m_mf.symbolNameAtAddress(addr);
-            if (!symName.empty()) return IRExpr::mkVar(symName);
+            if (!symName.empty()) {
+                auto *gn = m_types.globalByName(symName);
+                if (gn && gn->typeRef != NullType) {
+                    auto *gt = m_types.resolveType(gn->typeRef);
+                    if (gt && gt->kind == StabsTypeKind::Pointer)
+                        return IRExpr::mkVar(symName, gn->typeRef);
+                }
+                return IRExpr::mkVar(symName);
+            }
             // Try nearest symbol for base+offset access
             { std::string nearest = m_mf.nearestSymbolName(addr);
               if (!nearest.empty()) return IRExpr::mkVar(nearest); }
@@ -1174,13 +1182,13 @@ private:
             bb.stmts.push_back(IRStmt::mkVarSet(buf, std::move(val)));
             return;
         }
-        // Struct field write (including offset 0)
+        // Struct field write (skip offset 0: [reg+0] = *reg, not field access)
         if (m.base != X86_REG_INVALID && m.index == X86_REG_INVALID) {
             auto base = readReg(m.base);
             TypeRef baseType = NullType;
             int bt = regTemp(m.base);
             if (bt >= 0) baseType = m_func->tempType(bt);
-            if (baseType != NullType && m_types.isStructPointer(baseType)) {
+            if (m.disp != 0 && baseType != NullType && m_types.isStructPointer(baseType)) {
                 TypeRef structRef = m_types.getPointedStruct(baseType);
                 if (structRef != NullType) {
                     std::string access = m_types.formatFieldAccess(structRef, (int)m.disp);
