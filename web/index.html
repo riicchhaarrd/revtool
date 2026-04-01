@@ -214,13 +214,16 @@ body.light #icon-moon { display: none; }
 #open-btn:hover { background: rgba(255,255,255,.25); }
 #file-input { display: none; }
 
-#ssa-label {
+#decomp-options {
+  display: flex; align-items: center; gap: 10px; flex-shrink: 0;
+}
+.option-label {
   display: flex; align-items: center; gap: 5px;
   color: rgba(255,255,255,.8); font: 12px/1 inherit; cursor: pointer;
-  user-select: none; flex-shrink: 0;
+  user-select: none;
 }
-#ssa-label:hover { color: #fff; }
-#ssa-cb { cursor: pointer; }
+.option-label:hover { color: #fff; }
+.option-cb { cursor: pointer; }
 
 /* ── Layout ───────────────────────────────────────────────────────── */
 #body { display: flex; flex: 1; overflow: hidden; }
@@ -482,9 +485,14 @@ body:not(.light) .toast.ok  { color: #4ec9b0; }
       <line x1="3.9"  y1="10.1" x2="2.9" y2="11.1" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
     </svg>
   </button>
-  <label id="ssa-label" title="Use SSA-based IR simplification">
-    <input type="checkbox" id="ssa-cb" checked> SSA
-  </label>
+  <div id="decomp-options">
+    <label class="option-label" title="Use SSA-based IR simplification">
+      <input type="checkbox" class="option-cb" id="ssa-cb" data-decomp-option checked> SSA
+    </label>
+    <label class="option-label" title="Emit flat control flow without structuring">
+      <input type="checkbox" class="option-cb" id="flat-cb" data-decomp-option> Flat
+    </label>
+  </div>
   <button id="open-btn" onclick="document.getElementById('file-input').click()">
     <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
       <path d="M6.5 1v7.5M3 5 6.5 1.5 10 5" stroke="#fff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
@@ -642,11 +650,37 @@ let activeId = null;
 let curCode  = '';
 let allFns   = [];
 let allSrcs  = [];
+let decompVersion = 0;
+
+function applyDecompilerOptions() {
+  if (!mod) return;
+  mod.setUseSSA(document.getElementById('ssa-cb').checked);
+  mod.setFlatMode(document.getElementById('flat-cb').checked);
+}
+
+function decompileTab(tab) {
+  return tab.kind === 'fn'
+    ? mod.decompileFunction(tab.addr)
+    : mod.decompileSourceFile(tab.srcIdx);
+}
+
+function refreshTab(tab, statusPrefix) {
+  if (!mod || !tab) return;
+  spin(true);
+  sbMsg((statusPrefix || 'Decompiling') + ' ' + tab.label + '…');
+  setTimeout(() => {
+    tab.code = decompileTab(tab);
+    tab.version = decompVersion;
+    spin(false);
+    if (activeId === tab.id) showCode(tab.code);
+    sbMsg(tab.label + ' · ' + countLines(tab.code) + ' lines');
+  }, 10);
+}
 
 // ── WASM init ────────────────────────────────────────────────────────
 createDisModule().then(m => {
   mod = m;
-  mod.setUseSSA(true); // SSA on by default in web UI
+  applyDecompilerOptions();
   document.getElementById('spinner').classList.remove('on');
   document.getElementById('hdr-txt').textContent = 'Ready';
   sbMsg('Drop a Mach-O binary to get started');
@@ -660,20 +694,13 @@ createDisModule().then(m => {
 document.getElementById('file-input').addEventListener('change', function() {
   if (this.files[0]) loadFile(this.files[0]);
 });
-document.getElementById('ssa-cb').addEventListener('change', function() {
-  if (!mod) return;
-  mod.setUseSSA(this.checked);
-  // Re-decompile the active tab so the output reflects the new setting
-  const tab = tabs.find(t => t.id === activeId);
-  if (!tab) return;
-  spin(true);
-  setTimeout(() => {
-    tab.code = tab.kind === 'fn'
-      ? mod.decompileFunction(tab.addr)
-      : mod.decompileSourceFile(tab.srcIdx);
-    spin(false);
-    showCode(tab.code);
-  }, 10);
+document.querySelectorAll('[data-decomp-option]').forEach(el => {
+  el.addEventListener('change', function() {
+    if (!mod) return;
+    decompVersion++;
+    applyDecompilerOptions();
+    refreshTab(tabs.find(t => t.id === activeId), 'Refreshing');
+  });
 });
 document.addEventListener('dragenter', e => {
   if (e.dataTransfer.types.includes('Files'))
@@ -798,10 +825,11 @@ function openFn(addr, el) {
   const label = info ? fnShort(info.name) : '0x'+addr.toString(16);
   spin(true); sbMsg('Decompiling '+label+'…');
   setTimeout(() => {
-    const code = mod.decompileFunction(addr);
+    const tab = { id:'fn_'+addr.toString(16), label, kind:'fn', addr, version: decompVersion };
+    tab.code = decompileTab(tab);
     spin(false);
-    addTab({ id:'fn_'+addr.toString(16), label, code, kind:'fn', addr });
-    sbMsg(label+' · '+countLines(code)+' lines');
+    addTab(tab);
+    sbMsg(label+' · '+countLines(tab.code)+' lines');
   }, 10);
 }
 
@@ -813,10 +841,11 @@ function openSrc(idx, el) {
   const label = info ? basename(info.path) : 'src-'+idx;
   spin(true); sbMsg('Decompiling '+label+'…');
   setTimeout(() => {
-    const code = mod.decompileSourceFile(idx);
+    const tab = { id:'src_'+idx, label, kind:'src', srcIdx:idx, version: decompVersion };
+    tab.code = decompileTab(tab);
     spin(false);
-    addTab({ id:'src_'+idx, label, code, kind:'src', srcIdx:idx });
-    sbMsg(label+' · '+countLines(code)+' lines');
+    addTab(tab);
+    sbMsg(label+' · '+countLines(tab.code)+' lines');
   }, 10);
 }
 
@@ -828,9 +857,14 @@ function activateTab(id) {
   activeId = id;
   const tab = tabs.find(t => t.id===id);
   if (!tab) return;
-  renderTabBar(); showCode(tab.code);
+  renderTabBar();
   if (tab.kind==='fn')  markActive('fn-list',  'data-addr', tab.addr);
   if (tab.kind==='src') markActive('src-list', 'data-idx',  tab.srcIdx);
+  if (tab.version !== decompVersion) {
+    refreshTab(tab, 'Refreshing');
+    return;
+  }
+  showCode(tab.code);
 }
 function closeTab(id, e) {
   e && e.stopPropagation();

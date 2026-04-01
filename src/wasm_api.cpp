@@ -93,6 +93,10 @@ void setUseSSA(bool enabled) {
     Decompiler::s_useSSA = enabled;
 }
 
+void setFlatMode(bool enabled) {
+    Decompiler::s_flatMode = enabled;
+}
+
 EMSCRIPTEN_BINDINGS(dis) {
     emscripten::function("loadBinaryPtr",     &loadBinaryPtr,
                          emscripten::allow_raw_pointers());
@@ -101,4 +105,5 @@ EMSCRIPTEN_BINDINGS(dis) {
     emscripten::function("decompileFunction", &decompileFunction);
     emscripten::function("decompileSourceFile", &decompileSourceFile);
     emscripten::function("setUseSSA",           &setUseSSA);
+    emscripten::function("setFlatMode",         &setFlatMode);
 }
