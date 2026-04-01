@@ -541,12 +541,12 @@ def compile_to_asm(c_code, orig_check=None):
             full = re.sub(r'^extern\s+\w+\s+\*?' + cname + r'\s*;.*\n', '', full, flags=re.MULTILINE)
             full = re.sub(r'^void\s+' + cname + r'\s*\(void\)\s*;.*\n', '', full, flags=re.MULTILINE)
             full = re.sub(r'^typedef\s+int\s+' + cname + r'\s*;.*\n', '', full, flags=re.MULTILINE)
-        # Also handle "redefinition of 'struct X'" — remove the duplicate
-        for m in re.finditer(r"redefinition of " + q + r"struct\s+(\w+)" + cq, stderr):
+        # Also handle "redefinition of 'struct/union X'" — remove the duplicate
+        for m in re.finditer(r"redefinition of " + q + r"(?:struct|union)\s+(\w+)" + cq, stderr):
             cname = re.escape(m.group(1))
             # Remove the SECOND definition (keep the first from pre-extraction)
             # Find all occurrences and remove all but the first
-            pattern = r'struct ' + cname + r' \{[^}]*\};\n'
+            pattern = r'(?:struct|union) ' + cname + r' \{[^}]*\};\n'
             matches = list(re.finditer(pattern, full))
             if len(matches) > 1:
                 # Remove from the end to preserve indices

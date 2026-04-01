@@ -2759,26 +2759,25 @@ private:
                         "*(" + storeCast + " *)((char *)(" + emitExpr(a) + ")) = " + val) + ";\n";
                 }
                 else if (a->op == IROp::Var || a->op == IROp::Temp) {
-                    // For scalar pointers (float*, int*), use base[0] = val
+                    std::string addrS = emitExpr(a);
                     TypeRef at = exprType(a);
                     auto *atInfo = (at != NullType) ? m_types.resolveType(at) : nullptr;
                     if (atInfo && atInfo->kind == StabsTypeKind::Pointer) {
                         auto *tgt = m_types.resolveType(atInfo->targetType);
+                        // Scalar pointer (float*, int*): use ptr[0] = val
                         if (tgt && tgt->sizeBytes > 0 && tgt->sizeBytes <= 8 &&
-                            tgt->kind != StabsTypeKind::Struct && tgt->kind != StabsTypeKind::Union) {
+                            tgt->kind != StabsTypeKind::Struct &&
+                            tgt->kind != StabsTypeKind::Union) {
                             out += pad(indent) + QString::fromStdString(
-                                emitExpr(a) + "[0] = " + val) + ";\n";
-                            break;
+                                addrS + "[0] = " + val) + ";\n";
+                        } else {
+                            out += pad(indent) + QString::fromStdString(
+                                "*(" + storeCast + " *)(" + addrS + ") = " + val) + ";\n";
                         }
-                    }
-                    std::string addrS = emitExpr(a);
-                    bool aIsPtr = (atInfo && atInfo->kind == StabsTypeKind::Pointer);
-                    if (aIsPtr)
-                        out += pad(indent) + QString::fromStdString(
-                            "*(" + storeCast + " *)(" + addrS + ") = " + val) + ";\n";
-                    else
+                    } else {
                         out += pad(indent) + QString::fromStdString(
                             "*(" + storeCast + " *)((char *)(" + addrS + ")) = " + val) + ";\n";
+                    }
                 } else {
                     std::string addrS = emitExpr(a);
                     out += pad(indent) + QString::fromStdString(

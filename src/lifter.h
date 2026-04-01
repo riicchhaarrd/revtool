@@ -1052,7 +1052,7 @@ private:
             if (bt >= 0) baseType = m_func->tempType(bt);
 
             // Try struct field resolution with array subscript support
-            // Skip offset 0: [reg+0] is just *reg, not a field access
+            // Skip offset 0 for struct pointers: [reg+0] is *reg, not reg->field
             if (m.disp != 0 && baseType != NullType && m_types.isStructPointer(baseType)) {
                 TypeRef structRef = m_types.getPointedStruct(baseType);
                 if (structRef != NullType) {
@@ -1234,6 +1234,11 @@ private:
                         return;
                     }
                 }
+            }
+            // Scalar pointer store at offset 0: [reg+0] = *reg
+            if (m.disp == 0) {
+                bb.stmts.push_back(IRStmt::mkStore(std::move(base), std::move(val), storeSize));
+                return;
             }
         }
         // Direct address store: [disp] with no base/index
