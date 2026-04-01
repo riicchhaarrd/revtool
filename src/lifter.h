@@ -1433,6 +1433,17 @@ private:
             // LEA: compute address, don't load
             auto addr = readMem_addr(o[1].mem);
             if (!addr) addr = IRExpr::mkConst(0);
+            // Clear struct pointer type when LEA computes an interior pointer
+            // (base + nonzero offset). This prevents [reg+N] from resolving as
+            // a field of the original struct when reg points into its middle.
+            if (o[1].mem.disp != 0 && o[1].mem.base != X86_REG_INVALID) {
+                int bt = regTemp(o[1].mem.base);
+                if (bt >= 0) {
+                    TypeRef btype = m_func->tempType(bt);
+                    if (btype != NullType && m_types.isStructPointer(btype))
+                        addr->typeRef = NullType;  // clear inherited struct type
+                }
+            }
 
             // Check if this is just loading address of a stack var
             if (o[1].mem.base == X86_REG_EBP && o[1].mem.index == X86_REG_INVALID) {

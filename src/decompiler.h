@@ -1033,8 +1033,48 @@ public:
         }
         // Fix array element references: msg_OFFSET_ = 0 → msg[OFFSET] = 0
         {
-            // Find byte/char arrays: "char/byte NAME[SIZE]"
-            for (auto &arrType : {"char ", "byte "}) {
+            // Find arrays: "TYPE NAME[SIZE]" or "vecN_t NAME" (typedef'd arrays)
+            // For vecN_t types, derive the array size from the typedef
+            std::map<QString, int> vecTypeSizes = {
+                {"vec2_t", 2}, {"vec3_t", 3}, {"vec4_t", 4}
+            };
+            // First handle vecN_t variables: "vec3_t name;" → name is float[3]
+            for (auto &[vecType, vecSize] : vecTypeSizes) {
+                int vp = 0;
+                while ((vp = cleaned.indexOf(vecType + " ", vp)) != -1) {
+                    int ns = vp + vecType.size() + 1;
+                    while (ns < cleaned.size() && cleaned[ns] == ' ') ns++;
+                    int ne = ns;
+                    while (ne < cleaned.size() && (cleaned[ne].isLetterOrNumber() || cleaned[ne] == '_')) ne++;
+                    if (ne > ns) {
+                        QString arrName = cleaned.mid(ns, ne - ns).trimmed();
+                        // Replace arrName_N_ with arrName[N] for N < vecSize
+                        QString prefix = arrName + "_";
+                        int sp = 0;
+                        while ((sp = cleaned.indexOf(prefix, sp)) != -1) {
+                            // Don't match inside other identifiers
+                            if (sp > 0 && (cleaned[sp-1].isLetterOrNumber() || cleaned[sp-1] == '_'))
+                                { sp++; continue; }
+                            int numStart = sp + prefix.size();
+                            int numEnd = numStart;
+                            while (numEnd < cleaned.size() && cleaned[numEnd].isDigit()) numEnd++;
+                            if (numEnd > numStart && numEnd < cleaned.size() && cleaned[numEnd] == '_') {
+                                int idx = cleaned.mid(numStart, numEnd - numStart).toInt();
+                                if (idx >= 0 && idx < vecSize) {
+                                    QString oldPat = cleaned.mid(sp, numEnd + 1 - sp);
+                                    QString newPat = arrName + "[" + QString::number(idx) + "]";
+                                    cleaned.replace(sp, oldPat.size(), newPat);
+                                    sp += newPat.size();
+                                    continue;
+                                }
+                            }
+                            sp++;
+                        }
+                    }
+                    vp = ns;
+                }
+            }
+            for (auto &arrType : {"char ", "byte ", "int ", "float ", "short ", "unsigned char "}) {
             int pos = 0;
             while ((pos = cleaned.indexOf(arrType, pos)) != -1) {
                 int nameStart = pos + (int)strlen(arrType);
@@ -2038,6 +2078,7 @@ private:
         const StabsTypeTable &m_types;
         std::map<int, int>    m_tempUseCount;
         std::map<int, IRExpr*> m_tempDef;
+        std::set<std::string> m_interiorPtrVars; // vars assigned from AddrOf(Field) — interior pointers
         std::set<int>         m_copyPropagated; // temps eliminated by copy prop
         // Copy prop: temp → replacement name
         std::map<int, std::string> m_copyMap;
@@ -2230,6 +2271,19 @@ private:
             for (auto &a : stmt.args) countInExpr(a.get());
             if (stmt.kind == IRStmtKind::Assign) {
                 m_tempDef[stmt.destTemp] = stmt.expr.get();
+            }
+            // Track variables assigned from AddrOf (interior pointers into structs)
+            if (stmt.kind == IRStmtKind::VarSet && stmt.expr &&
+                stmt.expr->op == IROp::AddrOf && !stmt.expr->kids.empty() &&
+                stmt.expr->kids[0]->op == IROp::Field) {
+                m_interiorPtrVars.insert(stmt.destVar);
+            }
+            // Also for Assign→Temp→VarSet chain
+            if (stmt.kind == IRStmtKind::Assign && stmt.expr &&
+                stmt.expr->op == IROp::AddrOf && !stmt.expr->kids.empty() &&
+                stmt.expr->kids[0]->op == IROp::Field) {
+                // The temp might be copied to a var later via copy prop
+                m_interiorPtrVars.insert("__temp_" + std::to_string(stmt.destTemp));
             }
         }
 
@@ -3227,17 +3281,36 @@ private:
                             }
                         }
                     }
-                    if (baseType != NullType && m_types.isStructPointer(baseType)) {
+                    // Skip struct field resolution for interior pointers
+                    // (vars assigned from &struct->field — they point into the middle)
+                    bool isInterior = false;
+                    if (addr->kids[0]->op == IROp::Var && !addr->kids[0]->name.empty())
+                        isInterior = m_interiorPtrVars.count(addr->kids[0]->name) > 0;
+                    else if (addr->kids[0]->op == IROp::Temp)
+                        isInterior = m_interiorPtrVars.count("__temp_" + std::to_string(addr->kids[0]->tempId())) > 0;
+                    if (baseType != NullType && m_types.isStructPointer(baseType) && !isInterior) {
                         TypeRef structRef = m_types.getPointedStruct(baseType);
                         std::string access = structRef != NullType ?
                             m_types.formatFieldAccess(structRef, (int)off) : "";
                         // Debug: trace incorrect field resolution
-                        if (!access.empty() && access.find("[") != std::string::npos &&
-                            access.find("arr_") == std::string::npos) {
-                            // Subscript on a non-array field is likely wrong —
-                            // the field resolver is treating a pointer field as an array.
-                            // Fall through to the generic *(type*)((char*)base + off) path.
-                            access.clear();
+                        if (!access.empty()) {
+                            // Check if the resolved field makes sense for this access:
+                            // 1. Subscript on non-array field is wrong
+                            if (access.find("[") != std::string::npos &&
+                                access.find("arr_") == std::string::npos)
+                                access.clear();
+                            // 2. Accessing a struct/union field as a scalar read is wrong
+                            //    (e.g., entity->s where s is entityState_t but we're loading 4 bytes)
+                            if (!access.empty()) {
+                                auto *field = m_types.findFieldAtOffset(structRef, (int)off);
+                                if (field && field->typeRef != NullType) {
+                                    auto *ft = m_types.resolveType(field->typeRef);
+                                    if (ft && (ft->kind == StabsTypeKind::Struct ||
+                                               ft->kind == StabsTypeKind::Union) &&
+                                        ft->sizeBytes > 4)
+                                        access.clear(); // reading into large struct — likely interior pointer
+                                }
+                            }
                         }
                         if (!access.empty()) {
                             result = base + "->" + access;
