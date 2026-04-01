@@ -183,7 +183,7 @@ public:
         return it != m_types.end() ? &it->second : nullptr;
     }
 
-    // Resolve through typedefs, const, volatile to the underlying type
+    // Resolve through typedefs, const, volatile, and forward refs to the underlying type
     const StabsTypeInfo* resolveType(TypeRef ref, int depth = 0) const {
         if (depth > 20 || ref == NullType) return nullptr;
         auto *t = getType(ref);
@@ -192,6 +192,16 @@ public:
             t->kind == StabsTypeKind::Volatile) {
             if (t->targetType != NullType && t->targetType != ref)
                 return resolveType(t->targetType, depth + 1);
+        }
+        // Resolve forward references by searching for a struct/union with the same tag
+        if (t->kind == StabsTypeKind::ForwardRef && !t->forwardTag.empty()) {
+            for (auto &[tref, ti] : m_types) {
+                if (tref == ref) continue;
+                if ((ti.kind == StabsTypeKind::Struct || ti.kind == StabsTypeKind::Union) &&
+                    ti.name == t->forwardTag && !ti.fields.empty()) {
+                    return &ti;
+                }
+            }
         }
         return t;
     }

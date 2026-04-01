@@ -1142,7 +1142,8 @@ private:
             // Type is the struct itself, accessed via [base + disp] = base.field
             if (m.disp != 0 && baseType != NullType) {
                 auto *bt = m_types.resolveType(baseType);
-                if (bt && (bt->kind == StabsTypeKind::Struct || bt->kind == StabsTypeKind::Union)) {
+                if (bt && (bt->kind == StabsTypeKind::Struct || bt->kind == StabsTypeKind::Union ||
+                           bt->kind == StabsTypeKind::ForwardRef)) {
                     std::string access = m_types.formatFieldAccess(baseType, (int)m.disp);
                     if (!access.empty()) {
                         auto *field = m_types.findFieldAtOffset(baseType, (int)m.disp);
@@ -1568,15 +1569,34 @@ private:
             // LEA: compute address, don't load
             auto addr = readMem_addr(o[1].mem);
             if (!addr) addr = IRExpr::mkConst(0);
-            // Clear struct pointer type when LEA computes an interior pointer
-            // (base + nonzero offset). This prevents [reg+N] from resolving as
-            // a field of the original struct when reg points into its middle.
+            // When LEA computes an interior pointer (base + nonzero offset),
+            // try to resolve the field type so subsequent accesses through this
+            // pointer can resolve sub-struct fields (e.g., &world->sunParse → SunLightParseParams*).
             if (o[1].mem.disp != 0 && o[1].mem.base != X86_REG_INVALID) {
                 int bt = regTemp(o[1].mem.base);
                 if (bt >= 0) {
                     TypeRef btype = m_func->tempType(bt);
-                    if (btype != NullType && m_types.isStructPointer(btype))
-                        addr->typeRef = NullType;  // clear inherited struct type
+                    if (btype != NullType && m_types.isStructPointer(btype)) {
+                        TypeRef structRef = m_types.getPointedStruct(btype);
+                        if (structRef != NullType) {
+                            auto *field = m_types.findFieldAtOffset(structRef, (int)o[1].mem.disp);
+                            if (field && field->typeRef != NullType) {
+                                auto *ft = m_types.resolveType(field->typeRef);
+                                if (ft && (ft->kind == StabsTypeKind::Struct ||
+                                           ft->kind == StabsTypeKind::Union ||
+                                           ft->kind == StabsTypeKind::ForwardRef)) {
+                                    // Field is a struct/union — result is pointer to it
+                                    addr->typeRef = field->typeRef;
+                                } else {
+                                    addr->typeRef = NullType;
+                                }
+                            } else {
+                                addr->typeRef = NullType;
+                            }
+                        } else {
+                            addr->typeRef = NullType;
+                        }
+                    }
                 }
             }
 
@@ -1620,7 +1640,10 @@ private:
                     }
                 }
             }
-            writeOp(o[0], std::move(addr), bb);
+            {
+                TypeRef leaType = addr ? addr->typeRef : NullType;
+                writeOp(o[0], std::move(addr), bb, leaType);
+            }
             return;
         }
         if (mn == "movzx" && n == 2) {
@@ -1726,8 +1749,31 @@ private:
             auto lhs = readOp(o[0]);
             auto rhs = readOp(o[1]);
             if (lhs && rhs) {
+                TypeRef resultType = NullType;
+                // For add reg, const: if reg is a struct pointer, resolve the
+                // sub-struct field type so interior pointer accesses work
+                if (mn == "add" && o[0].type == X86_OP_REG && o[1].type == X86_OP_IMM &&
+                    o[1].imm > 0) {
+                    int bt = regTemp(o[0].reg);
+                    if (bt >= 0) {
+                        TypeRef btype = m_func->tempType(bt);
+                        if (btype != NullType && m_types.isStructPointer(btype)) {
+                            TypeRef structRef = m_types.getPointedStruct(btype);
+                            if (structRef != NullType) {
+                                auto *field = m_types.findFieldAtOffset(structRef, (int)o[1].imm);
+                                if (field && field->typeRef != NullType) {
+                                    auto *ft = m_types.resolveType(field->typeRef);
+                                    if (ft && (ft->kind == StabsTypeKind::Struct ||
+                                               ft->kind == StabsTypeKind::Union ||
+                                               ft->kind == StabsTypeKind::ForwardRef))
+                                        resultType = field->typeRef;
+                                }
+                            }
+                        }
+                    }
+                }
                 auto res = IRExpr::mkBinary(irop, std::move(lhs), std::move(rhs));
-                writeOp(o[0], std::move(res), bb);
+                writeOp(o[0], std::move(res), bb, resultType);
             }
             return;
         }
