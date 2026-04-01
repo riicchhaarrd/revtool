@@ -119,7 +119,114 @@ public:
 
         // Structure from the entry block (using bitvector for fast set ops)
         std::vector<bool> visited(n, false);
-        return structureRegion(0, -1, visited);
+        auto tree = structureRegion(0, -1, visited);
+
+        // Post-pass: merge if(A){X} else {if(B){X}} → if(A||B){X}
+        mergeIfElseOr(tree.get());
+        return tree;
+    }
+
+    // Merge nested if-else-if patterns where both branches have identical bodies
+    // into a single if with || condition.
+    // Pattern: if(cond1) { BODY } else { if(cond2) { BODY } }
+    // Result:  if(cond1 || cond2) { BODY }
+    void mergeIfElseOr(StructNode *node) {
+        if (!node) return;
+        // Recurse into children first
+        for (auto &child : node->children) mergeIfElseOr(child.get());
+        if (node->elseNode) mergeIfElseOr(node->elseNode.get());
+
+        // Check: this node is an If with an else
+        if (node->kind != StructKind::If || !node->elseNode || !node->cond) return;
+
+        // The else must contain exactly one child which is another If (no else on inner)
+        auto *elsNode = node->elseNode.get();
+        StructNode *innerIf = nullptr;
+        if (elsNode->kind == StructKind::If) {
+            innerIf = elsNode;
+        } else if (elsNode->kind == StructKind::Block && elsNode->children.size() == 1 &&
+                   elsNode->children[0]->kind == StructKind::If) {
+            innerIf = elsNode->children[0].get();
+        }
+        if (!innerIf || !innerIf->cond) return;
+        if (innerIf->elseNode) return; // inner if has else → don't merge
+
+        // Both must have exactly one child (the body)
+        if (node->children.size() != 1 || innerIf->children.size() != 1) return;
+
+        // Compare bodies: both must be Seq nodes referencing the same BB with same stmt range
+        auto *body1 = node->children[0].get();
+        auto *body2 = innerIf->children[0].get();
+        // For simple bodies (single Seq or Block with single Seq), check if they match
+        auto getSeq = [](StructNode *n) -> StructNode* {
+            if (n->kind == StructKind::Seq) return n;
+            if (n->kind == StructKind::Block && n->children.size() == 1 &&
+                n->children[0]->kind == StructKind::Seq)
+                return n->children[0].get();
+            return nullptr;
+        };
+        auto *seq1 = getSeq(body1);
+        auto *seq2 = getSeq(body2);
+        if (!seq1 || !seq2) return;
+        // Both must reference the same basic block with the same statement range
+        // OR have equivalent statement content (same function calls)
+        if (seq1->bbId != seq2->bbId || seq1->stmtStart != seq2->stmtStart ||
+            seq1->stmtEnd != seq2->stmtEnd) {
+            // Different BBs but maybe same content — check if both are single-stmt
+            // function calls to the same function with same args
+            if (seq1->bbId < 0 || seq2->bbId < 0) return;
+            auto &stmts1 = m_func->blocks[seq1->bbId].stmts;
+            auto &stmts2 = m_func->blocks[seq2->bbId].stmts;
+            int n1 = seq1->stmtEnd - seq1->stmtStart;
+            int n2 = seq2->stmtEnd - seq2->stmtStart;
+            if (n1 != n2 || n1 == 0) return;
+            // Check each statement matches (using IR text comparison)
+            for (int i = 0; i < n1; ++i) {
+                auto &s1 = stmts1[seq1->stmtStart + i];
+                auto &s2 = stmts2[seq2->stmtStart + i];
+                if (s1.kind != s2.kind) return;
+                // For calls, compare function name
+                if (s1.kind == IRStmtKind::Call && s1.expr && s2.expr) {
+                    if (s1.expr->op != s2.expr->op) return;
+                    if (s1.expr->name != s2.expr->name) return;
+                } else return; // non-trivial statement
+            }
+        }
+
+        // Merge: create cond1 || cond2
+        // Handle negation: if either condition was negated by the structurer,
+        // we need to invert it before merging
+        auto makeCond = [](IRExpr *cond, bool negated) -> std::unique_ptr<IRExpr> {
+            auto c = cond->clone();
+            if (!negated) return c;
+            // Negate comparison ops: < → >=, > → <=, etc.
+            switch (c->op) {
+            case IROp::Eq:  c->op = IROp::Ne; break;
+            case IROp::Ne:  c->op = IROp::Eq; break;
+            case IROp::Slt: c->op = IROp::Sge; break;
+            case IROp::Sge: c->op = IROp::Slt; break;
+            case IROp::Sgt: c->op = IROp::Sle; break;
+            case IROp::Sle: c->op = IROp::Sgt; break;
+            case IROp::Ult: c->op = IROp::Uge; break;
+            case IROp::Uge: c->op = IROp::Ult; break;
+            case IROp::Ugt: c->op = IROp::Ule; break;
+            case IROp::Ule: c->op = IROp::Ugt; break;
+            default: break;
+            }
+            return c;
+        };
+        auto c1 = makeCond(node->cond, node->negated);
+        auto c2 = makeCond(innerIf->cond, innerIf->negated);
+        auto orExpr = IRExpr::mkBinary(IROp::Or, std::move(c1), std::move(c2));
+        // Stash the or expr in the function's block to keep it alive
+        int poolBB = node->children[0]->bbId >= 0 ? node->children[0]->bbId : 0;
+        if (poolBB >= 0 && poolBB < (int)m_func->blocks.size()) {
+            m_func->blocks[poolBB].stmts.push_back(
+                IRStmt::mkAssign(-1, std::move(orExpr)));
+            node->cond = m_func->blocks[poolBB].stmts.back().expr.get();
+            node->negated = false;
+            node->elseNode.reset();
+        }
     }
 
 private:

@@ -3941,7 +3941,13 @@ private:
                 case IROp::Sar: op = " >> "; break;
                 case IROp::Shr:  op = " >> "; break; // handled below with unsigned cast
                 case IROp::And:  op = " & "; break;
-                case IROp::Or:   op = " | "; break;
+                case IROp::Or: {
+                    // Use logical || when both sides are comparisons (boolean context)
+                    bool lhsBool = e->kids[0] && (e->kids[0]->op >= IROp::Eq && e->kids[0]->op <= IROp::Uge);
+                    bool rhsBool = e->kids[1] && (e->kids[1]->op >= IROp::Eq && e->kids[1]->op <= IROp::Uge);
+                    op = (lhsBool && rhsBool) ? " || " : " | ";
+                    break;
+                }
                 case IROp::Xor:  op = " ^ "; break;
                 default: op = " + "; break;
                 }
