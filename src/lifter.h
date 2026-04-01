@@ -468,12 +468,49 @@ public:
             }
         }
 
-        // ── Pass 6: merge duplicate SSE branches ─────────────────────
-        // SSE float compares (ucomisd) emit jp + jne to same target.
-        // Only merge when the second block has EXACTLY one Branch statement
-        // AND no preceding comparison instruction changed the flags.
-        // Disabled for now — the merge was incorrectly eating early-exit checks.
-        // TODO: re-enable with proper SSE pattern detection (check for ucomis* flag source)
+        // ── Pass 6: merge SSE float compare branches ─────────────────
+        // Pattern: BB_A ends with jp(NaN check) → BB_C; fallthrough → BB_B
+        //          BB_B has only one Branch: jb/jbe/ja/jae → BB_D
+        // This is ucomiss + jp + jcc. The jp handles NaN, jcc is the real compare.
+        // Merge: remove BB_A's jp branch, keep BB_B's comparison.
+        // The jp target (BB_C) must be BB_B's fallthrough (NaN skips the error check).
+        for (int bi = 0; bi < (int)func.blocks.size(); ++bi) {
+            auto &bbA = func.blocks[bi];
+            if (bbA.stmts.empty()) continue;
+            auto &brA = bbA.stmts.back();
+            if (brA.kind != IRStmtKind::Branch || !brA.expr) continue;
+            // Check if this is a jp(x != x) = NaN check
+            if (brA.expr->op != IROp::Ne) continue;
+            if (!brA.expr->kids[0] || !brA.expr->kids[1]) continue;
+            // x != x pattern (both sides are the same expression)
+            bool isNanCheck = false;
+            if (brA.expr->kids[0]->op == IROp::Temp && brA.expr->kids[1]->op == IROp::Temp &&
+                brA.expr->kids[0]->tempId() == brA.expr->kids[1]->tempId())
+                isNanCheck = true;
+            if (!isNanCheck) continue;
+
+            int jpTarget = brA.trueTarget;   // where NaN goes
+            int fallBB = brA.falseTarget;     // the real comparison BB
+            if (fallBB < 0 || fallBB >= (int)func.blocks.size()) continue;
+
+            auto &bbB = func.blocks[fallBB];
+            // BB_B must have exactly one statement: a Branch
+            if (bbB.stmts.size() != 1) continue;
+            auto &brB = bbB.stmts[0];
+            if (brB.kind != IRStmtKind::Branch) continue;
+
+            // BB_B's fallthrough should be the jp target (NaN skips to same place)
+            if (brB.falseTarget != jpTarget && brB.trueTarget != jpTarget) continue;
+
+            // Merge: replace BB_A's branch with BB_B's branch
+            // Remove the NaN check, keep the real float comparison
+            brA.expr = brB.expr->clone();
+            brA.trueTarget = brB.trueTarget;
+            brA.falseTarget = brB.falseTarget;
+            // Clear BB_B (now dead)
+            bbB.stmts.clear();
+            bbB.succs.clear();
+        }
 
 
         // ── Pass 6b: CSE — eliminate duplicate Loads within each block ──
@@ -1433,6 +1470,20 @@ private:
             else if (jmn == "jae" || jmn == "jnb")  cmpOp = IROp::Uge;
             else if (jmn == "js")                    cmpOp = IROp::Slt;
             else if (jmn == "jns")                   cmpOp = IROp::Sge;
+            // jp/jnp after ucomiss: parity = unordered (NaN)
+            // jp = "is NaN", jnp = "is not NaN"
+            // For float comparisons, jp means the operands are unordered.
+            // Emit as Ne/Eq against self (NaN != NaN is true)
+            else if (jmn == "jp") {
+                // isnan(x) ↔ x != x (NaN is the only value not equal to itself)
+                auto lhs2 = lhs->clone();
+                return IRExpr::mkBinary(IROp::Ne, std::move(lhs), std::move(lhs2));
+            }
+            else if (jmn == "jnp") {
+                // !isnan(x) ↔ x == x
+                auto lhs2 = lhs->clone();
+                return IRExpr::mkBinary(IROp::Eq, std::move(lhs), std::move(lhs2));
+            }
             else cmpOp = IROp::Ne;
         }
         return IRExpr::mkBinary(cmpOp, std::move(lhs), std::move(rhs));
