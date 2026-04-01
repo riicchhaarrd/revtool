@@ -1142,7 +1142,8 @@ private:
             // Type is the struct itself, accessed via [base + disp] = base.field
             if (m.disp != 0 && baseType != NullType) {
                 auto *bt = m_types.resolveType(baseType);
-                if (bt && (bt->kind == StabsTypeKind::Struct || bt->kind == StabsTypeKind::Union)) {
+                if (bt && (bt->kind == StabsTypeKind::Struct || bt->kind == StabsTypeKind::Union ||
+                           bt->kind == StabsTypeKind::ForwardRef)) {
                     std::string access = m_types.formatFieldAccess(baseType, (int)m.disp);
                     if (!access.empty()) {
                         auto *field = m_types.findFieldAtOffset(baseType, (int)m.disp);
@@ -1535,6 +1536,7 @@ private:
                     if (smem.base == X86_REG_INVALID && smem.index == X86_REG_INVALID &&
                         smem.disp != 0) {
                         // mov reg, [addr] — direct address load
+                        uint32_t loadAddr = (uint32_t)smem.disp;
                         // Check if the loaded value is a named global with struct type
                         if (src->op == IROp::Var && !src->name.empty()) {
                             auto *g = m_types.globalByName(src->name);
@@ -1543,6 +1545,33 @@ private:
                                 if (gt && (gt->kind == StabsTypeKind::Struct ||
                                            gt->kind == StabsTypeKind::ForwardRef)) {
                                     m_regGlobalSource[canon] = {src->name, g->typeRef};
+                                    // Loading from struct base (offset 0) = first field
+                                    std::string f0 = m_types.formatFieldAccess(g->typeRef, 0);
+                                    if (!f0.empty())
+                                        m_regFuncPtrName[canon] = src->name + "." + f0;
+                                }
+                            }
+                        }
+                        // Also check if addr is within a known global struct
+                        // (e.g., mov eax, [re + 0x148] loads re.Shutdown)
+                        if (m_regFuncPtrName.find(canon) == m_regFuncPtrName.end()) {
+                            std::string nearest = m_mf.nearestSymbolName(loadAddr);
+                            if (!nearest.empty()) {
+                                size_t plus = nearest.find(" + 0x");
+                                if (plus != std::string::npos && nearest.front() == '(' && nearest.back() == ')') {
+                                    std::string gname = nearest.substr(1, plus - 1);
+                                    unsigned goff = 0;
+                                    sscanf(nearest.c_str() + plus + 3, "%x", &goff);
+                                    auto *g = m_types.globalByName(gname);
+                                    if (g && g->typeRef != NullType) {
+                                        auto *gt = m_types.resolveType(g->typeRef);
+                                        if (gt && (gt->kind == StabsTypeKind::Struct ||
+                                                   gt->kind == StabsTypeKind::Union)) {
+                                            std::string fieldName = m_types.formatFieldAccess(g->typeRef, (int)goff);
+                                            if (!fieldName.empty())
+                                                m_regFuncPtrName[canon] = gname + "." + fieldName;
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -1568,15 +1597,34 @@ private:
             // LEA: compute address, don't load
             auto addr = readMem_addr(o[1].mem);
             if (!addr) addr = IRExpr::mkConst(0);
-            // Clear struct pointer type when LEA computes an interior pointer
-            // (base + nonzero offset). This prevents [reg+N] from resolving as
-            // a field of the original struct when reg points into its middle.
+            // When LEA computes an interior pointer (base + nonzero offset),
+            // try to resolve the field type so subsequent accesses through this
+            // pointer can resolve sub-struct fields (e.g., &world->sunParse → SunLightParseParams*).
             if (o[1].mem.disp != 0 && o[1].mem.base != X86_REG_INVALID) {
                 int bt = regTemp(o[1].mem.base);
                 if (bt >= 0) {
                     TypeRef btype = m_func->tempType(bt);
-                    if (btype != NullType && m_types.isStructPointer(btype))
-                        addr->typeRef = NullType;  // clear inherited struct type
+                    if (btype != NullType && m_types.isStructPointer(btype)) {
+                        TypeRef structRef = m_types.getPointedStruct(btype);
+                        if (structRef != NullType) {
+                            auto *field = m_types.findFieldAtOffset(structRef, (int)o[1].mem.disp);
+                            if (field && field->typeRef != NullType) {
+                                auto *ft = m_types.resolveType(field->typeRef);
+                                if (ft && (ft->kind == StabsTypeKind::Struct ||
+                                           ft->kind == StabsTypeKind::Union ||
+                                           ft->kind == StabsTypeKind::ForwardRef)) {
+                                    // Field is a struct/union — result is pointer to it
+                                    addr->typeRef = field->typeRef;
+                                } else {
+                                    addr->typeRef = NullType;
+                                }
+                            } else {
+                                addr->typeRef = NullType;
+                            }
+                        } else {
+                            addr->typeRef = NullType;
+                        }
+                    }
                 }
             }
 
@@ -1620,7 +1668,10 @@ private:
                     }
                 }
             }
-            writeOp(o[0], std::move(addr), bb);
+            {
+                TypeRef leaType = addr ? addr->typeRef : NullType;
+                writeOp(o[0], std::move(addr), bb, leaType);
+            }
             return;
         }
         if (mn == "movzx" && n == 2) {
@@ -1726,8 +1777,31 @@ private:
             auto lhs = readOp(o[0]);
             auto rhs = readOp(o[1]);
             if (lhs && rhs) {
+                TypeRef resultType = NullType;
+                // For add reg, const: if reg is a struct pointer, resolve the
+                // sub-struct field type so interior pointer accesses work
+                if (mn == "add" && o[0].type == X86_OP_REG && o[1].type == X86_OP_IMM &&
+                    o[1].imm > 0) {
+                    int bt = regTemp(o[0].reg);
+                    if (bt >= 0) {
+                        TypeRef btype = m_func->tempType(bt);
+                        if (btype != NullType && m_types.isStructPointer(btype)) {
+                            TypeRef structRef = m_types.getPointedStruct(btype);
+                            if (structRef != NullType) {
+                                auto *field = m_types.findFieldAtOffset(structRef, (int)o[1].imm);
+                                if (field && field->typeRef != NullType) {
+                                    auto *ft = m_types.resolveType(field->typeRef);
+                                    if (ft && (ft->kind == StabsTypeKind::Struct ||
+                                               ft->kind == StabsTypeKind::Union ||
+                                               ft->kind == StabsTypeKind::ForwardRef))
+                                        resultType = field->typeRef;
+                                }
+                            }
+                        }
+                    }
+                }
                 auto res = IRExpr::mkBinary(irop, std::move(lhs), std::move(rhs));
-                writeOp(o[0], std::move(res), bb);
+                writeOp(o[0], std::move(res), bb, resultType);
             }
             return;
         }
@@ -1897,12 +1971,10 @@ private:
 
         // ── Return ──────────────────────────────────────────────────
         if (mn == "ret") {
-            fprintf(stderr, "RET_LIFTER: retType=%d fpuStack=%d lastFpuTop=%d\n",
-                    m_func->returnType, (int)m_fpuStack.size(), m_lastFpuTop);
+            // Return handling
             // Check if return type is void (including through typedef chains)
             if (m_func->returnType != NullType) {
                 auto *rt = m_types.resolveType(m_func->returnType);
-                fprintf(stderr, "RET_LIFTER2: rt=%p kind=%d\n", (void*)rt, rt ? (int)rt->kind : -1);
                 if (rt && rt->kind == StabsTypeKind::Void) {
                     bb.stmts.push_back(IRStmt::mkReturn());
                     return;
@@ -1913,15 +1985,18 @@ private:
                     bb.stmts.push_back(IRStmt::mkReturn());
                     return;
                 }
-                // Float/double return → use ST0 from FPU stack, or last popped value
+                // FPU stack has a value → return it as float, regardless of declared type.
+                // The presence of a value on the FPU stack at ret is the strongest signal
+                // for float return. STABS type refs can be wrong (e.g., CU-scoped int
+                // when the actual type is const float from a different CU).
+                if (!m_fpuStack.empty()) {
+                    bb.stmts.push_back(IRStmt::mkReturn(fpuRead(0)));
+                    return;
+                }
+                // Float/double return → use last popped FPU value
                 if (rt && (rt->kind == StabsTypeKind::Float ||
                            rt->kind == StabsTypeKind::Double ||
                            rt->kind == StabsTypeKind::LongDouble)) {
-                    // If FPU stack has a value, use ST0 directly
-                    if (!m_fpuStack.empty()) {
-                        bb.stmts.push_back(IRStmt::mkReturn(fpuRead(0)));
-                        return;
-                    }
                     // Use the last value that was on the FPU stack top before pop
                     // (common pattern: fstp stores result then ret returns it)
                     if (m_lastFpuTop >= 0) {
@@ -2030,6 +2105,41 @@ private:
                         target = buf;
                         // Save index expression to prepend to args later
                         m_fpTableIndex = readReg(mem.index);
+                    } else if (mem.base == X86_REG_INVALID && mem.index == X86_REG_INVALID &&
+                               mem.disp != 0) {
+                        // call [direct_addr] — may be a function pointer in a global struct
+                        // Check if addr falls within a known global struct
+                        uint32_t callAddr = (uint32_t)mem.disp;
+                        std::string nearest = m_mf.nearestSymbolName(callAddr);
+                        bool resolved = false;
+                        if (!nearest.empty()) {
+                            // Parse "(name + 0xNN)" format
+                            size_t plus = nearest.find(" + 0x");
+                            if (plus != std::string::npos && nearest.front() == '(' && nearest.back() == ')') {
+                                std::string gname = nearest.substr(1, plus - 1);
+                                unsigned offset = 0;
+                                sscanf(nearest.c_str() + plus + 3, "%x", &offset);
+                                auto *g = m_types.globalByName(gname);
+                                if (g && g->typeRef != NullType) {
+                                    auto *gt = m_types.resolveType(g->typeRef);
+                                    if (gt && (gt->kind == StabsTypeKind::Struct ||
+                                               gt->kind == StabsTypeKind::Union)) {
+                                        std::string fieldName = m_types.formatFieldAccess(
+                                            g->typeRef, (int)offset);
+                                        if (!fieldName.empty()) {
+                                            target = gname + "." + fieldName;
+                                            resolved = true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if (!resolved) {
+                            auto tgt = readOp(o[0]);
+                            int fpTemp = func.newTemp();
+                            bb.stmts.push_back(IRStmt::mkAssign(fpTemp, std::move(tgt)));
+                            target = "t" + std::to_string(fpTemp);
+                        }
                     } else {
                         auto tgt = readOp(o[0]);
                         int fpTemp = func.newTemp();
@@ -2378,6 +2488,20 @@ private:
                 } else {
                     // fld loads a float from memory — no int-to-float cast needed
                     auto src = readOp(o[0]);
+                    // If loading from a local variable, ensure it's typed as float
+                    // (flds always loads a float, so the local IS a float)
+                    if (o[0].type == X86_OP_MEM && o[0].mem.base == X86_REG_EBP &&
+                        o[0].mem.index == X86_REG_INVALID && o[0].mem.disp < 0) {
+                        auto it = m_localByOffset.find((int)o[0].mem.disp);
+                        if (it != m_localByOffset.end()) {
+                            auto *rt = m_types.resolveType(it->second->typeRef);
+                            if (!rt || rt->kind == StabsTypeKind::Int ||
+                                rt->kind == StabsTypeKind::UInt) {
+                                // Override int → float for this local
+                                const_cast<StabsTypedVar*>(it->second)->typeRef = getFloatTypeRef();
+                            }
+                        }
+                    }
                     fpuPush(std::move(src), bb);
                 }
             }

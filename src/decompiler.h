@@ -1382,6 +1382,22 @@ public:
                          line.contains("57.29") || line.contains("Scr_AddFloat"))) {
                         assignedFromFloat = true;
                     }
+                    // Check if assigned from a float-typed variable
+                    if (line.contains(varName + " = ") &&
+                        (line.contains("= v") || line.contains("= (v"))) {
+                        // Check if the RHS variable is declared as float
+                        for (int k = 0; k < i; ++k) {
+                            if (cl[k].trimmed().startsWith("float ") &&
+                                line.contains(cl[k].trimmed().mid(6).split(';').first().trimmed())) {
+                                assignedFromFloat = true;
+                                break;
+                            }
+                        }
+                    }
+                    // Check if returned and function returns float
+                    if (line.trimmed().startsWith("return " + varName)) {
+                        assignedFromFloat = true;
+                    }
                     // Check if used as a pure integer (bit ops, array index, etc.)
                     if (line.contains(varName + " &") || line.contains(varName + " |") ||
                         line.contains(varName + " <<") || line.contains("[" + varName + "]")) {
@@ -4018,7 +4034,30 @@ private:
                     }
                 }
 
-                result = lhs + op + rhs;
+                // For unsigned comparisons (Ult/Ule/Ugt/Uge) against small constants,
+                // add (unsigned) cast to generate unsigned instructions (setbe etc.)
+                // Only apply when: rhs is a small constant AND lhs looks like an
+                // integer expression (not a float or function call result).
+                bool isUnsigned = (cmp == IROp::Ult || cmp == IROp::Ule ||
+                                   cmp == IROp::Ugt || cmp == IROp::Uge);
+                bool addUnsignedCast = false;
+                if (isUnsigned && e->kids[1] && e->kids[1]->isConst() &&
+                    e->kids[1]->value >= 0 && e->kids[1]->value <= 0xFFFF &&
+                    lhs.find("(unsigned)") == std::string::npos &&
+                    lhs.find("0.") == std::string::npos &&
+                    lhs.find("0f") == std::string::npos) {
+                    // Only cast when lhs is arithmetic (contains - or +),
+                    // indicating a range check pattern like (x - N) <= M
+                    if (lhs.find(" - ") != std::string::npos ||
+                        lhs.find(" + ") != std::string::npos) {
+                        addUnsignedCast = true;
+                    }
+                }
+                if (addUnsignedCast) {
+                    result = "(unsigned)(" + lhs + ")" + op + rhs;
+                } else {
+                    result = lhs + op + rhs;
+                }
                 if (negate) negate = false; // already handled
                 break;
             }
