@@ -2682,6 +2682,12 @@ private:
             }
             case IRStmtKind::Store: {
                 std::string val = stmt.expr ? emitExpr(stmt.expr.get()) : "0";
+                // When storing from an array variable, use [0] to get first element
+                if (stmt.expr && stmt.expr->op == IROp::Var && stmt.expr->typeRef != NullType) {
+                    auto *vt = m_types.resolveType(stmt.expr->typeRef);
+                    if (vt && vt->kind == StabsTypeKind::Array)
+                        val += "[0]";
+                }
                 if (!stmt.addr) break;
                 auto *a = stmt.addr.get();
                 struct AddrGuard { int &d; AddrGuard(int &d):d(d){d++;} ~AddrGuard(){d--;} } _ag(m_addrDepth);
@@ -2832,7 +2838,6 @@ private:
                     auto *atInfo = (at != NullType) ? m_types.resolveType(at) : nullptr;
                     if (atInfo && atInfo->kind == StabsTypeKind::Pointer) {
                         auto *tgt = m_types.resolveType(atInfo->targetType);
-                        // Scalar pointer (float*, int*): use ptr[0] = val
                         if (tgt && tgt->sizeBytes > 0 && tgt->sizeBytes <= 8 &&
                             tgt->kind != StabsTypeKind::Struct &&
                             tgt->kind != StabsTypeKind::Union) {
@@ -2842,6 +2847,10 @@ private:
                             out += pad(indent) + QString::fromStdString(
                                 "*(" + storeCast + " *)(" + addrS + ") = " + val) + ";\n";
                         }
+                    } else if (atInfo && atInfo->kind == StabsTypeKind::Array) {
+                        // Array at offset 0: arr[0] = val
+                        out += pad(indent) + QString::fromStdString(
+                            addrS + "[0] = " + val) + ";\n";
                     } else {
                         out += pad(indent) + QString::fromStdString(
                             "*(" + storeCast + " *)((char *)(" + addrS + ")) = " + val) + ";\n";
@@ -3173,15 +3182,11 @@ private:
                 break;
             }
             case IROp::Var: {
-                // Only sanitize names that aren't numeric literals or expressions
                 std::string vn = e->name;
                 if (!vn.empty() && (isdigit(vn[0]) || vn[0] == '-' || vn[0] == '"' || vn[0] == '('))
                     result = vn;
                 else
                     result = cName(vn);
-                // Don't add [0] here — array-typed Vars used in expressions are
-                // handled by the caller (Store/Load/VarSet) or by context.
-                // Adding [0] unconditionally breaks synthetic stack vars.
                 break;
             }
             case IROp::String: result = e->name; break;
@@ -3359,6 +3364,9 @@ private:
                                 result = emitExpr(addr) + "[0]";
                             else
                                 result = "*(" + emitExpr(addr) + ")";
+                        } else if (at && at->kind == StabsTypeKind::Array) {
+                            // Array variable at offset 0: arr[0]
+                            result = emitExpr(addr) + "[0]";
                         } else {
                             result = "*(" + emitExpr(addr) + ")";
                         }
