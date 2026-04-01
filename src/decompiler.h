@@ -2762,8 +2762,9 @@ private:
                             TypeRef structRef = m_types.getPointedStruct(stBaseType);
                             if (structRef != NullType)
                                 access = m_types.formatFieldAccess(structRef, off);
-                            // Validate: don't resolve to a large struct field (interior pointer)
-                            if (!access.empty()) {
+                            // Validate: don't resolve to bare large struct field
+                            if (!access.empty() && access.find('.') == std::string::npos &&
+                                access.find('[') == std::string::npos) {
                                 auto *field = m_types.findFieldAtOffset(structRef, off);
                                 if (field && field->typeRef != NullType) {
                                     auto *ft = m_types.resolveType(field->typeRef);
@@ -3325,14 +3326,15 @@ private:
                                 access.clear();
                             // 2. Accessing a struct/union field as a scalar read is wrong
                             //    (e.g., entity->s where s is entityState_t but we're loading 4 bytes)
-                            if (!access.empty()) {
+                            if (!access.empty() && access.find('.') == std::string::npos &&
+                                access.find('[') == std::string::npos) {
                                 auto *field = m_types.findFieldAtOffset(structRef, (int)off);
                                 if (field && field->typeRef != NullType) {
                                     auto *ft = m_types.resolveType(field->typeRef);
                                     if (ft && (ft->kind == StabsTypeKind::Struct ||
                                                ft->kind == StabsTypeKind::Union) &&
                                         ft->sizeBytes > 4)
-                                        access.clear(); // reading into large struct — likely interior pointer
+                                        access.clear();
                                 }
                             }
                         }

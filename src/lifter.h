@@ -1061,20 +1061,20 @@ private:
                     if (!access.empty()) {
                         auto *field = m_types.findFieldAtOffset(structRef, (int)m.disp);
                         TypeRef ft = field ? field->typeRef : NullType;
-                        // Skip if field is a large struct/union — accessing it as
-                        // scalar means we're reading INTO the sub-struct, not the
-                        // struct itself. Fall through to generic access.
-                        if (ft != NullType) {
+                        // Skip ONLY if the field is a large struct/union AND the access
+                        // didn't drill deeper (no '.' or '[' in the access string).
+                        // If formatFieldAccess drilled into a sub-struct (access contains '.')
+                        // then it reached a scalar — that's a valid access.
+                        bool skipField = false;
+                        if (ft != NullType && access.find('.') == std::string::npos &&
+                            access.find('[') == std::string::npos) {
                             auto *fti = m_types.resolveType(ft);
                             if (fti && (fti->kind == StabsTypeKind::Struct ||
                                         fti->kind == StabsTypeKind::Union) &&
-                                fti->sizeBytes > 4) {
-                                // Sub-struct access — skip
-                            } else {
-                                base->typeRef = baseType;
-                                return IRExpr::mkField(std::move(base), access, (int)m.disp, ft);
-                            }
-                        } else {
+                                fti->sizeBytes > 4)
+                                skipField = true;
+                        }
+                        if (!skipField) {
                             base->typeRef = baseType;
                             return IRExpr::mkField(std::move(base), access, (int)m.disp, ft);
                         }
@@ -1231,9 +1231,10 @@ private:
                     if (!access.empty()) {
                         auto *field = m_types.findFieldAtOffset(structRef, (int)m.disp);
                         TypeRef ft = field ? field->typeRef : NullType;
-                        // Skip sub-struct fields (store is into the sub-struct, not to it)
+                        // Skip sub-struct fields ONLY if the access didn't drill deeper
                         bool skip = false;
-                        if (ft != NullType) {
+                        if (ft != NullType && access.find('.') == std::string::npos &&
+                            access.find('[') == std::string::npos) {
                             auto *fti = m_types.resolveType(ft);
                             if (fti && (fti->kind == StabsTypeKind::Struct ||
                                         fti->kind == StabsTypeKind::Union) && fti->sizeBytes > 4)
