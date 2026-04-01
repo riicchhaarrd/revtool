@@ -868,6 +868,62 @@ public:
                 pos += 2;
             }
         }
+        // Inline trivial pointer aliases: "TYPE *v = srcName;" → replace v with srcName
+        // Looks for declaration + assignment pattern and replaces all uses.
+        {
+            QStringList lines = cleaned.split('\n');
+            for (int i = 0; i < lines.size(); ++i) {
+                QString trimmed = lines[i].trimmed();
+                // Find assignment: "NAME = SOURCE;" as a standalone statement
+                int eq = trimmed.indexOf(" = ");
+                if (eq <= 0 || !trimmed.endsWith(';')) continue;
+                QString varName = trimmed.left(eq).trimmed();
+                QString srcName = trimmed.mid(eq + 3, trimmed.size() - eq - 4).trimmed();
+                // Both must be simple identifiers
+                if (varName.isEmpty() || srcName.isEmpty()) continue;
+                bool varOk = true, srcOk = true;
+                for (auto c : varName) if (!c.isLetterOrNumber() && c != '_') { varOk = false; break; }
+                for (auto c : srcName) if (!c.isLetterOrNumber() && c != '_') { srcOk = false; break; }
+                if (!varOk || !srcOk || srcName[0].isDigit()) continue;
+                if (varName == srcName) continue;
+                // Check: is there a declaration "TYPE *varName;" earlier in the function?
+                bool hasDecl = false;
+                int declLine = -1;
+                for (int j = 0; j < i; ++j) {
+                    QString dt = lines[j].trimmed();
+                    if (dt.endsWith("*" + varName + ";") || dt.endsWith("* " + varName + ";")) {
+                        hasDecl = true; declLine = j; break;
+                    }
+                }
+                if (!hasDecl) continue;
+                // Count uses after the assignment
+                int useCount = 0;
+                for (int j = i + 1; j < lines.size(); ++j)
+                    if (lines[j].contains(varName)) useCount++;
+                if (useCount == 0) continue;
+                // Replace all uses of varName with srcName (whole word)
+                for (int j = i + 1; j < lines.size(); ++j) {
+                    // Simple whole-word replacement
+                    int pos = 0;
+                    while ((pos = lines[j].indexOf(varName, pos)) >= 0) {
+                        bool before = (pos == 0 || !lines[j][pos-1].isLetterOrNumber());
+                        bool after = (pos + varName.size() >= lines[j].size() ||
+                                     !lines[j][pos + varName.size()].isLetterOrNumber());
+                        if (before && after) {
+                            lines[j].replace(pos, varName.size(), srcName);
+                            pos += srcName.size();
+                        } else {
+                            pos += varName.size();
+                        }
+                    }
+                }
+                // Remove declaration and assignment
+                lines.removeAt(i); // remove assignment
+                if (declLine < i) { lines.removeAt(declLine); i -= 2; }
+                else i--;
+            }
+            cleaned = lines.join('\n');
+        }
         // Optimize global struct access: when (char *)GLOBAL is used multiple times,
         // introduce a local pointer to force register-based access (matching original asm)
         {
