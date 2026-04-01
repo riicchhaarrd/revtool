@@ -1052,7 +1052,7 @@ private:
             if (bt >= 0) baseType = m_func->tempType(bt);
 
             // Try struct field resolution with array subscript support
-            // Skip offset 0: [reg+0] is just *reg, not a field access
+            // Skip offset 0 for struct pointers: [reg+0] is *reg, not reg->field
             if (m.disp != 0 && baseType != NullType && m_types.isStructPointer(baseType)) {
                 TypeRef structRef = m_types.getPointedStruct(baseType);
                 if (structRef != NullType) {
@@ -1060,7 +1060,20 @@ private:
                     if (!access.empty()) {
                         auto *field = m_types.findFieldAtOffset(structRef, (int)m.disp);
                         TypeRef ft = field ? field->typeRef : NullType;
-                        // Annotate the base with the struct pointer type for type inference
+                        base->typeRef = baseType;
+                        return IRExpr::mkField(std::move(base), access, (int)m.disp, ft);
+                    }
+                }
+            }
+            // Struct-by-value: base holds address of struct (not pointer to pointer).
+            // Type is the struct itself, accessed via [base + disp] = base.field
+            if (m.disp != 0 && baseType != NullType) {
+                auto *bt = m_types.resolveType(baseType);
+                if (bt && (bt->kind == StabsTypeKind::Struct || bt->kind == StabsTypeKind::Union)) {
+                    std::string access = m_types.formatFieldAccess(baseType, (int)m.disp);
+                    if (!access.empty()) {
+                        auto *field = m_types.findFieldAtOffset(baseType, (int)m.disp);
+                        TypeRef ft = field ? field->typeRef : NullType;
                         base->typeRef = baseType;
                         return IRExpr::mkField(std::move(base), access, (int)m.disp, ft);
                     }
@@ -1096,7 +1109,22 @@ private:
             if (!s.empty()) return IRExpr::mkString(s);
             // Try nlist symbol table for named globals
             std::string symName = m_mf.symbolNameAtAddress(addr);
-            if (!symName.empty()) return IRExpr::mkVar(symName);
+            if (!symName.empty()) {
+                auto *gn = m_types.globalByName(symName);
+                if (gn && gn->typeRef != NullType) {
+                    auto *gt = m_types.resolveType(gn->typeRef);
+                    if (gt && gt->kind == StabsTypeKind::Pointer)
+                        return IRExpr::mkVar(symName, gn->typeRef);
+                    // For NLP (IMPORT segment), struct types = pointer to struct
+                    if (gt && (gt->kind == StabsTypeKind::Struct ||
+                               gt->kind == StabsTypeKind::Union)) {
+                        const Section *sec = m_mf.sectionForAddress(addr);
+                        if (sec && sec->segname == "__IMPORT")
+                            return IRExpr::mkVar(symName, gn->typeRef);
+                    }
+                }
+                return IRExpr::mkVar(symName);
+            }
             // Try nearest symbol for base+offset access
             { std::string nearest = m_mf.nearestSymbolName(addr);
               if (!nearest.empty()) return IRExpr::mkVar(nearest); }
@@ -1174,13 +1202,13 @@ private:
             bb.stmts.push_back(IRStmt::mkVarSet(buf, std::move(val)));
             return;
         }
-        // Struct field write (including offset 0)
+        // Struct field write (skip offset 0: [reg+0] = *reg, not field access)
         if (m.base != X86_REG_INVALID && m.index == X86_REG_INVALID) {
             auto base = readReg(m.base);
             TypeRef baseType = NullType;
             int bt = regTemp(m.base);
             if (bt >= 0) baseType = m_func->tempType(bt);
-            if (baseType != NullType && m_types.isStructPointer(baseType)) {
+            if (m.disp != 0 && baseType != NullType && m_types.isStructPointer(baseType)) {
                 TypeRef structRef = m_types.getPointedStruct(baseType);
                 if (structRef != NullType) {
                     std::string access = m_types.formatFieldAccess(structRef, (int)m.disp);
@@ -1188,10 +1216,29 @@ private:
                         auto *field = m_types.findFieldAtOffset(structRef, (int)m.disp);
                         TypeRef ft = field ? field->typeRef : NullType;
                         auto fld = IRExpr::mkField(std::move(base), access, (int)m.disp, ft);
-                        bb.stmts.push_back(IRStmt::mkStore(std::move(fld), std::move(val)));
+                        bb.stmts.push_back(IRStmt::mkStore(std::move(fld), std::move(val), storeSize));
                         return;
                     }
                 }
+            }
+            // Struct-by-value store: base.field = value
+            if (m.disp != 0 && baseType != NullType) {
+                auto *btt = m_types.resolveType(baseType);
+                if (btt && (btt->kind == StabsTypeKind::Struct || btt->kind == StabsTypeKind::Union)) {
+                    std::string access = m_types.formatFieldAccess(baseType, (int)m.disp);
+                    if (!access.empty()) {
+                        auto *field = m_types.findFieldAtOffset(baseType, (int)m.disp);
+                        TypeRef ft = field ? field->typeRef : NullType;
+                        auto fld = IRExpr::mkField(std::move(base), access, (int)m.disp, ft);
+                        bb.stmts.push_back(IRStmt::mkStore(std::move(fld), std::move(val), storeSize));
+                        return;
+                    }
+                }
+            }
+            // Scalar pointer store at offset 0: [reg+0] = *reg
+            if (m.disp == 0) {
+                bb.stmts.push_back(IRStmt::mkStore(std::move(base), std::move(val), storeSize));
+                return;
             }
         }
         // Direct address store: [disp] with no base/index

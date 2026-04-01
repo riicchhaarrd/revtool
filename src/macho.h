@@ -630,6 +630,44 @@ private:
                 break;
             }
         }
+
+        // Recover orphaned global type info: scan STABS strings for "name:G(CU,ID)"
+        // patterns that weren't processed as N_GSYM entries. Match against nlist symbols
+        // to get the address. This handles binaries where N_GSYM entries are missing.
+        {   // Recover orphaned global type info from STABS string table
+            // Build nlist symbol name → address map (strip leading underscore)
+            std::map<std::string, uint32_t> nlSyms;
+            for (auto &sym : m_symbols) {
+                if (sym.n_type & N_STAB) continue;
+                if ((sym.n_type & N_TYPE) == N_SECT || (sym.n_type & N_TYPE) == N_ABS) {
+                    std::string name = sym.name;
+                    if (!name.empty() && name[0] == '_') name = name.substr(1);
+                    if (!name.empty()) nlSyms[name] = sym.n_value;
+                }
+            }
+            // Scan the string table for "name:G(" or "name:S(" entries
+            // Use m_stroff (string table start in file)
+            for (uint32_t spos = 0; spos < m_strsize; ) {
+                std::string entry = stringAt(m_stroff, spos);
+                uint32_t slen = (uint32_t)entry.size();
+                if (slen == 0) { spos++; continue; }
+                // Check for "name:G(" or "name:S(" pattern
+                auto gpos = entry.find(":G(");
+                auto spos2 = entry.find(":S(");
+                auto cpos = (gpos != std::string::npos) ? gpos :
+                            (spos2 != std::string::npos) ? spos2 : std::string::npos;
+                if (cpos != std::string::npos && cpos > 0 && cpos < 60) {
+                    std::string gname = entry.substr(0, cpos);
+                    auto it = nlSyms.find(gname);
+                    if (it != nlSyms.end()) {
+                        auto parsed = m_typeTable.parseSymbol(entry);
+                        if (parsed.typeRef != NullType)
+                            m_typeTable.addGlobal(gname, it->second, parsed.typeRef, false);
+                    }
+                }
+                spos += slen + 1;
+            }
+        }
     }
 
     void buildFunctionMap() {

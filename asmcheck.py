@@ -92,6 +92,12 @@ typedef unsigned long uLong;
 typedef unsigned int uInt;
 typedef void *voidpf;
 typedef int SIZE_T;
+typedef int INT32;
+typedef unsigned int UINT32;
+typedef short INT16;
+typedef unsigned short UINT16;
+typedef void *LPVOID;
+typedef int LONG;
 /* Win32 stubs */
 typedef struct { int dwLowDateTime; int dwHighDateTime; } FILETIME;
 typedef struct { int _[80]; } WIN32_FIND_DATAA;
@@ -115,6 +121,11 @@ typedef int JDIMENSION; typedef int JSAMPLE; typedef short JCOEF;
 typedef int boolean;
 typedef short DCTELEM;
 typedef int *JSAMPARRAY; typedef int *JSAMPROW; typedef int *JBLOCKROW;
+/* Dvar struct types (needed for -> field access) */
+union DvarValue { int enabled; int integer; float value; float *vector; const char *string; unsigned char color[4]; };
+union DvarLimits { struct { int min; int max; } integer; struct { float min; float max; } value; int enumCount; };
+struct dvar_s { const char *name; unsigned short flags; unsigned char type; int modified; union DvarValue current; union DvarValue latched; union DvarValue reset; union DvarLimits domain; struct dvar_s *next; struct dvar_s *hashNext; };
+typedef struct dvar_s dvar_t;
 /* Misc missing */
 typedef int scr_anim_t;
 typedef struct { int _[32]; } SpeexBits;
@@ -127,7 +138,6 @@ typedef struct { int _[64]; } inflate_state;
 DVAR_PROTOS = '''
 #ifndef DVAR_PROTOS_DEFINED
 #define DVAR_PROTOS_DEFINED
-typedef int dvar_t;
 dvar_t *Dvar_RegisterBool(const char*,int,int);
 dvar_t *Dvar_RegisterInt(const char*,int,int,int,int);
 dvar_t *Dvar_RegisterFloat(const char*,float,float,float,int);
@@ -409,8 +419,13 @@ def compile_to_asm(c_code, orig_check=None):
     for name in extracted:
         emit_type(name)
     types_block = '\n'.join(ordered)
-    # Add Dvar prototypes only if no dvar_t struct is already extracted
-    dvar_block = DVAR_PROTOS if 'dvar_t' not in extracted else ''
+    # Always include Dvar function prototypes.
+    # Only include the 'typedef int dvar_t' stub if the real dvar_t isn't extracted.
+    # dvar_t struct is defined in STUBS. Always include DVAR_PROTOS for
+    # the Dvar function prototypes (the typedef was removed from DVAR_PROTOS).
+    dvar_block = DVAR_PROTOS
+    # Remove any Dvar function prototypes from types_block/func_protos to avoid conflicts
+    func_protos = re.sub(r'^.*\bDvar_\w+\b.*\n', '', func_protos, flags=re.MULTILINE)
     full = STUBS + '\n' + dvar_block + '\n' + types_block + '\n' + func_protos + '\n' + c_code
 
     # Try compile with extracted types
@@ -526,12 +541,12 @@ def compile_to_asm(c_code, orig_check=None):
             full = re.sub(r'^extern\s+\w+\s+\*?' + cname + r'\s*;.*\n', '', full, flags=re.MULTILINE)
             full = re.sub(r'^void\s+' + cname + r'\s*\(void\)\s*;.*\n', '', full, flags=re.MULTILINE)
             full = re.sub(r'^typedef\s+int\s+' + cname + r'\s*;.*\n', '', full, flags=re.MULTILINE)
-        # Also handle "redefinition of 'struct X'" — remove the duplicate
-        for m in re.finditer(r"redefinition of " + q + r"struct\s+(\w+)" + cq, stderr):
+        # Also handle "redefinition of 'struct/union X'" — remove the duplicate
+        for m in re.finditer(r"redefinition of " + q + r"(?:struct|union)\s+(\w+)" + cq, stderr):
             cname = re.escape(m.group(1))
             # Remove the SECOND definition (keep the first from pre-extraction)
             # Find all occurrences and remove all but the first
-            pattern = r'struct ' + cname + r' \{[^}]*\};\n'
+            pattern = r'(?:struct|union) ' + cname + r' \{[^}]*\};\n'
             matches = list(re.finditer(pattern, full))
             if len(matches) > 1:
                 # Remove from the end to preserve indices
@@ -613,7 +628,27 @@ def compile_to_asm(c_code, orig_check=None):
             if re.search(r'\*\s*\(' + re.escape(name) + r'\)|' +
                           re.escape(name) + r'\s*->|' +
                           re.escape(name) + r'\s*\[', full):
-                stubs += f'{qual}int *{name};\n'
+                # If used with -> and a field name, try to find the struct type
+                arrow_field = re.search(re.escape(name) + r'\s*->\s*(\w+)', full)
+                struct_type = None
+                if arrow_field:
+                    field_name = arrow_field.group(1)
+                    # Search for this field in extracted types AND STUBS
+                    # Check STUBS first (dvar_s is defined there)
+                    for struct_m in re.finditer(r'struct\s+(\w+)\s*\{([^}]+)\}', STUBS):
+                        if re.search(r'\b' + re.escape(field_name) + r'\b', struct_m.group(2)):
+                            struct_type = 'struct ' + struct_m.group(1)
+                            break
+                    if not struct_type:
+                        for tname, tdef in extracted.items():
+                            if re.search(r'\b' + re.escape(field_name) + r'\b', tdef) and \
+                               'struct' in tdef:
+                                struct_type = tname
+                                break
+                if struct_type:
+                    stubs += f'{qual}{struct_type} *{name};\n'
+                else:
+                    stubs += f'{qual}int *{name};\n'
             elif name.endswith('_f'):
                 stubs += f'void {name}(void);\n'
             elif (name in assign_rhs and name not in stubs_types):
