@@ -2746,12 +2746,26 @@ private:
                     }
                     if (!usedArrayNotation) {
                         // Try type-aware struct field access
+                        // Skip for interior pointers (vars from &struct->field)
                         TypeRef stBaseType = exprType(a->kids[0].get());
+                        bool stIsInterior = false;
+                        if (a->kids[0]->op == IROp::Var && !a->kids[0]->name.empty())
+                            stIsInterior = m_interiorPtrVars.count(a->kids[0]->name) > 0;
                         std::string access;
-                        if (stBaseType != NullType && m_types.isStructPointer(stBaseType)) {
+                        if (!stIsInterior && stBaseType != NullType && m_types.isStructPointer(stBaseType)) {
                             TypeRef structRef = m_types.getPointedStruct(stBaseType);
                             if (structRef != NullType)
                                 access = m_types.formatFieldAccess(structRef, off);
+                            // Validate: don't resolve to a large struct field (interior pointer)
+                            if (!access.empty()) {
+                                auto *field = m_types.findFieldAtOffset(structRef, off);
+                                if (field && field->typeRef != NullType) {
+                                    auto *ft = m_types.resolveType(field->typeRef);
+                                    if (ft && (ft->kind == StabsTypeKind::Struct ||
+                                               ft->kind == StabsTypeKind::Union) && ft->sizeBytes > 4)
+                                        access.clear();
+                                }
+                            }
                         }
                         if (!access.empty()) {
                             out += pad(indent) + QString::fromStdString(
@@ -3405,7 +3419,20 @@ private:
                         }
                     }
                 } else {
-                    result = "&" + emitExpr(inner);
+                    // For array variables, &array == array (same address)
+                    // Skip the & to avoid producing float(*)[3] instead of float*
+                    bool isArray = false;
+                    if (inner && inner->op == IROp::Var && !inner->name.empty()) {
+                        TypeRef vt = exprType(inner);
+                        if (vt != NullType) {
+                            auto *vti = m_types.resolveType(vt);
+                            isArray = vti && vti->kind == StabsTypeKind::Array;
+                        }
+                    }
+                    if (isArray)
+                        result = emitExpr(inner);
+                    else
+                        result = "&" + emitExpr(inner);
                 }
                 break;
             }
