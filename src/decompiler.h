@@ -2684,8 +2684,8 @@ private:
                 std::string val = stmt.expr ? emitExpr(stmt.expr.get()) : "0";
                 // When storing from an array variable, use [0] to get first element
                 if (stmt.expr && stmt.expr->op == IROp::Var && stmt.expr->typeRef != NullType) {
-                    auto *vt = m_types.resolveType(stmt.expr->typeRef);
-                    if (vt && vt->kind == StabsTypeKind::Array)
+                    auto *vti = m_types.resolveType(stmt.expr->typeRef);
+                    if (vti && vti->kind == StabsTypeKind::Array)
                         val += "[0]";
                 }
                 if (!stmt.addr) break;
@@ -2864,6 +2864,11 @@ private:
             }
             case IRStmtKind::VarSet: {
                 std::string val = stmt.expr ? emitExpr(stmt.expr.get()) : "0";
+                // Array var as value source → add [0] (only for direct Vars, not temps)
+                if (stmt.expr && stmt.expr->op == IROp::Var && stmt.expr->typeRef != NullType) {
+                    auto *vsti = m_types.resolveType(stmt.expr->typeRef);
+                    if (vsti && vsti->kind == StabsTypeKind::Array) val += "[0]";
+                }
                 std::string dest = stmt.destVar;
                 // Suppress parameter slot reuse when assigning a string literal to a param
                 // (clear indicator of Com_Error/Com_Printf call argument setup)
@@ -3847,6 +3852,17 @@ private:
             case IROp::Ult: case IROp::Ule: case IROp::Ugt: case IROp::Uge: {
                 std::string lhs = emitExpr(e->kids[0].get());
                 std::string rhs = emitExpr(e->kids[1].get());
+                // Array-typed Vars in arithmetic should use [0] (first element)
+                auto fixArrayVar = [&](std::string &s, IRExpr *kid) {
+                    if (!kid) return;
+                    if (kid->op == IROp::Var && kid->typeRef != NullType) {
+                        auto *kt = m_types.resolveType(kid->typeRef);
+                        if (kt && kt->kind == StabsTypeKind::Array)
+                            s += "[0]";
+                    }
+                };
+                fixArrayVar(lhs, e->kids[0].get());
+                fixArrayVar(rhs, e->kids[1].get());
                 std::string op;
                 IROp cmp = negate ? negateOp(e->op) : e->op;
                 switch (cmp) {
