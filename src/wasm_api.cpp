@@ -89,6 +89,10 @@ std::string decompileSourceFile(int idx) {
     return Decompiler::decompileFile(g_mf, idx).toStdString();
 }
 
+void setUseSSA(bool enabled) {
+    Decompiler::s_useSSA = enabled;
+}
+
 EMSCRIPTEN_BINDINGS(dis) {
     emscripten::function("loadBinaryPtr",     &loadBinaryPtr,
                          emscripten::allow_raw_pointers());
@@ -96,4 +100,5 @@ EMSCRIPTEN_BINDINGS(dis) {
     emscripten::function("listFunctions",     &listFunctions);
     emscripten::function("decompileFunction", &decompileFunction);
     emscripten::function("decompileSourceFile", &decompileSourceFile);
+    emscripten::function("setUseSSA",           &setUseSSA);
 }

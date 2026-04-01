@@ -10,15 +10,161 @@
 html, body { height: 100%; overflow: hidden; }
 body {
   display: flex; flex-direction: column;
-  background: #1e1e1e; color: #cccccc;
+  background: var(--bg); color: var(--text);
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   font-size: 13px;
+}
+
+/* ── Dark theme (default) ─────────────────────────────────────────── */
+:root {
+  --bg:              #1e1e1e;
+  --bg-sidebar:      #252526;
+  --bg-header:       #323233;
+  --bg-tabbar:       #2d2d2d;
+  --bg-tab-active:   #1e1e1e;
+  --bg-tab-inactive: #2d2d2d;
+  --bg-tab-hover:    #333333;
+  --bg-hover:        #2a2d2e;
+  --bg-active:       #04395e;
+  --bg-input:        #3c3c3c;
+  --bg-copy:         #2e2e2e;
+  --bg-toast:        #2d2d2d;
+
+  --border:          #1a1a1a;
+  --border-sidebar:  #1a1a1a;
+  --border-input:    #555555;
+  --border-code:     #2a2a2a;
+  --border-copy:     #484848;
+  --border-bin:      #1f1f1f;
+
+  --text:            #cccccc;
+  --text-dim:        #888888;
+  --text-bright:     #ffffff;
+  --text-active:     #ffffff;
+  --text-tab:        #888888;
+  --text-tab-active: #ffffff;
+  --text-tab-hover:  #bbbbbb;
+  --text-placeholder:#555555;
+  --text-welcome:    #555555;
+  --text-welcome2:   #444444;
+  --text-bi-lbl:     #666666;
+  --text-bi-val:     #9cdcfe;
+  --text-bin-ph:     #555555;
+
+  --accent:          #007acc;
+  --accent-hover:    #1177bb;
+
+  --linenum-color:   #495565;
+
+  --scrollbar-thumb: #424242;
+  --scrollbar-hover: #555555;
+  --scrollbar-track: #1e1e1e;
+
+  --statusbar-bg:    #007acc;
+  --statusbar-text:  rgba(255,255,255,.9);
+
+  --sb-head:         #888888;
+  --sb-head-hover:   #bbbbbb;
+  --badge-bg:        #333333;
+  --badge-fg:        #777777;
+
+  --drop-border:     #383838;
+  --drop-hover:      #555555;
+  --drop-text:       #555555;
+  --drop-text2:      #444444;
+
+  --toast-border:    #555555;
+  --toast-text:      #cccccc;
+
+  --tab-x-hover:     rgba(255,255,255,.2);
+
+  /* Syntax — VS Dark (dark theme) */
+  --c-kw:   #569cd6;
+  --c-type: #4ec9b0;
+  --c-fn:   #dcdcaa;
+  --c-str:  #ce9178;
+  --c-num:  #b5cea8;
+  --c-cmt:  #6a9955;
+  --c-pp:   #c586c0;
+}
+
+/* ── Light theme — Visual Studio Blue ────────────────────────────── */
+body.light {
+  --bg:              #ffffff;
+  --bg-sidebar:      #f3f3f3;
+  --bg-header:       #003b8e;   /* VS deep-navy title bar */
+  --bg-tabbar:       #ececf0;
+  --bg-tab-active:   #ffffff;
+  --bg-tab-inactive: #ececf0;
+  --bg-tab-hover:    #d9ebff;
+  --bg-hover:        #c9def4;
+  --bg-active:       #add6ff;
+  --bg-input:        #ffffff;
+  --bg-copy:         #f0f0f0;
+  --bg-toast:        #f8f8f8;
+
+  --border:          #cccedb;
+  --border-sidebar:  #cccedb;
+  --border-input:    #9da5b4;
+  --border-code:     #d8d8d8;
+  --border-copy:     #c8c8c8;
+  --border-bin:      #e0e0e0;
+
+  --text:            #1e1e1e;
+  --text-dim:        #717171;
+  --text-bright:     #1e1e1e;
+  --text-active:     #000000;
+  --text-tab:        #6f6f6f;
+  --text-tab-active: #1e1e1e;
+  --text-tab-hover:  #1e1e1e;
+  --text-placeholder:#888888;
+  --text-welcome:    #a0a0a0;
+  --text-welcome2:   #b8b8b8;
+  --text-bi-lbl:     #717171;
+  --text-bi-val:     #1750b0;   /* VS blue for values */
+  --text-bin-ph:     #9a9a9a;
+
+  --accent:          #0071bc;
+  --accent-hover:    #005fa3;
+
+  --linenum-color:   #2b91af;   /* VS teal line numbers */
+
+  --scrollbar-thumb: #c4c4c4;
+  --scrollbar-hover: #a8a8a8;
+  --scrollbar-track: #f0f0f0;
+
+  --statusbar-bg:    #007acc;   /* VS blue status bar */
+  --statusbar-text:  rgba(255,255,255,.95);
+
+  --sb-head:         #6f6f6f;
+  --sb-head-hover:   #333333;
+  --badge-bg:        #dce6f5;
+  --badge-fg:        #1750b0;
+
+  --drop-border:     #c8c8c8;
+  --drop-hover:      #aaaaaa;
+  --drop-text:       #aaaaaa;
+  --drop-text2:      #c0c0c0;
+
+  --toast-border:    #cccedb;
+  --toast-text:      #1e1e1e;
+
+  --tab-x-hover:     rgba(0,0,0,.12);
+
+  /* Syntax — Visual Studio "Blue" light theme */
+  --c-kw:   #0000ff;   /* keywords: bright blue */
+  --c-type: #2b91af;   /* user types: VS teal */
+  --c-fn:   #795e26;   /* function calls: VS brown */
+  --c-str:  #a31515;   /* strings: dark red */
+  --c-num:  #098658;   /* numbers: VS green */
+  --c-cmt:  #008000;   /* comments: green */
+  --c-pp:   #af00db;   /* preprocessor: purple */
 }
 
 /* ── Header ───────────────────────────────────────────────────────── */
 #header {
   height: 40px; flex-shrink: 0; z-index: 20;
-  background: #323233; border-bottom: 1px solid #111;
+  background: var(--bg-header); border-bottom: 1px solid rgba(0,0,0,.3);
   display: flex; align-items: center; padding: 0 14px; gap: 10px;
 }
 #logo {
@@ -27,24 +173,54 @@ body {
   text-decoration: none;
 }
 #logo svg { flex-shrink: 0; }
-#header-tagline { font-size: 12px; color: #666; padding-left: 4px; border-left: 1px solid #555; }
+#header-tagline {
+  font-size: 12px; color: rgba(255,255,255,.45);
+  padding-left: 6px; border-left: 1px solid rgba(255,255,255,.2);
+}
 #header-gap { flex: 1; }
-#hdr-status { font-size: 12px; color: #888; display: flex; align-items: center; gap: 6px; max-width: 320px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+#hdr-status {
+  font-size: 12px; color: rgba(255,255,255,.55);
+  display: flex; align-items: center; gap: 6px;
+  max-width: 320px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+}
 .spinner {
   width: 13px; height: 13px; flex-shrink: 0;
-  border: 2px solid #444; border-top-color: #007acc;
+  border: 2px solid rgba(255,255,255,.25); border-top-color: #fff;
   border-radius: 50%; animation: spin .6s linear infinite; display: none;
 }
 .spinner.on { display: inline-block; }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* Theme toggle */
+#theme-btn {
+  display: flex; align-items: center; justify-content: center;
+  width: 30px; height: 30px; background: transparent;
+  border: 1px solid rgba(255,255,255,.25); border-radius: 4px;
+  color: rgba(255,255,255,.7); cursor: pointer; transition: border-color .15s, color .15s;
+  flex-shrink: 0;
+}
+#theme-btn:hover { border-color: rgba(255,255,255,.6); color: #fff; }
+#icon-sun  { display: none; }
+#icon-moon { display: block; }
+body.light #icon-sun  { display: block; }
+body.light #icon-moon { display: none; }
+
 #open-btn {
   display: flex; align-items: center; gap: 5px;
-  background: #0e639c; color: #fff; border: none;
+  background: rgba(255,255,255,.15); color: #fff; border: 1px solid rgba(255,255,255,.3);
   padding: 5px 13px; border-radius: 3px; cursor: pointer;
   font: 500 12px/1 inherit; transition: background .1s;
 }
-#open-btn:hover { background: #1177bb; }
+#open-btn:hover { background: rgba(255,255,255,.25); }
 #file-input { display: none; }
+
+#ssa-label {
+  display: flex; align-items: center; gap: 5px;
+  color: rgba(255,255,255,.8); font: 12px/1 inherit; cursor: pointer;
+  user-select: none; flex-shrink: 0;
+}
+#ssa-label:hover { color: #fff; }
+#ssa-cb { cursor: pointer; }
 
 /* ── Layout ───────────────────────────────────────────────────────── */
 #body { display: flex; flex: 1; overflow: hidden; }
@@ -52,14 +228,14 @@ body {
 /* ── Sidebar ──────────────────────────────────────────────────────── */
 #sidebar {
   width: 260px; min-width: 150px; max-width: 520px;
-  background: #252526; border-right: 1px solid #1a1a1a;
+  background: var(--bg-sidebar); border-right: 1px solid var(--border-sidebar);
   display: flex; flex-direction: column; overflow: hidden; flex-shrink: 0;
 }
 #resize-gutter {
   width: 4px; flex-shrink: 0; cursor: col-resize; background: transparent;
   transition: background .15s; position: relative; z-index: 5;
 }
-#resize-gutter:hover, #resize-gutter.drag { background: #007acc; }
+#resize-gutter:hover, #resize-gutter.drag { background: var(--accent); }
 
 /* Sidebar sections */
 .sb-section { display: flex; flex-direction: column; overflow: hidden; }
@@ -68,16 +244,14 @@ body {
   display: flex; align-items: center; gap: 4px;
   padding: 5px 10px 5px 12px; cursor: pointer; flex-shrink: 0;
   font-size: 11px; font-weight: 700; text-transform: uppercase;
-  letter-spacing: .8px; color: #888; user-select: none;
+  letter-spacing: .8px; color: var(--sb-head); user-select: none;
 }
-.sb-head:hover { color: #bbb; }
+.sb-head:hover { color: var(--sb-head-hover); }
 .sb-head .badge {
   font-size: 10px; font-weight: 400; text-transform: none; letter-spacing: 0;
-  background: #333; color: #888; padding: 1px 5px; border-radius: 9px;
+  background: var(--badge-bg); color: var(--badge-fg); padding: 1px 5px; border-radius: 9px;
 }
-.sb-head .chev {
-  margin-left: auto; color: #666; transition: transform .15s;
-}
+.sb-head .chev { margin-left: auto; color: var(--sb-head); transition: transform .15s; }
 .sb-section.closed .chev { transform: rotate(-90deg); }
 .sb-section.closed .sb-body { display: none; }
 .sb-body { display: flex; flex-direction: column; overflow: hidden; flex: 1; }
@@ -85,66 +259,71 @@ body {
 /* Binary info */
 #bin-info {
   padding: 8px 12px 10px; font-size: 12px; line-height: 1.9;
-  border-bottom: 1px solid #1f1f1f; color: #777;
+  border-bottom: 1px solid var(--border-bin); color: var(--text-dim);
 }
 .bi-row { display: flex; gap: 6px; }
-.bi-lbl { min-width: 68px; color: #666; }
-.bi-val { color: #9cdcfe; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-#bin-placeholder { color: #555; font-style: italic; padding: 8px 12px; font-size: 12px; }
+.bi-lbl { min-width: 68px; color: var(--text-bi-lbl); }
+.bi-val { color: var(--text-bi-val); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#bin-placeholder {
+  color: var(--text-bin-ph); font-style: italic; padding: 8px 12px; font-size: 12px;
+}
 
 /* Search box */
 .sb-search { margin: 5px 8px; position: relative; flex-shrink: 0; }
 .sb-search input {
-  width: 100%; background: #3c3c3c; border: 1px solid #555;
-  border-radius: 3px; color: #ccc; font: 12px/1.4 inherit;
+  width: 100%; background: var(--bg-input); border: 1px solid var(--border-input);
+  border-radius: 3px; color: var(--text); font: 12px/1.4 inherit;
   padding: 4px 8px 4px 26px; outline: none;
 }
-.sb-search input:focus { border-color: #007acc; }
-.sb-search svg { position: absolute; left: 7px; top: 50%; transform: translateY(-50%); color: #666; pointer-events: none; }
+.sb-search input:focus { border-color: var(--accent); }
+.sb-search svg {
+  position: absolute; left: 7px; top: 50%; transform: translateY(-50%);
+  color: var(--text-dim); pointer-events: none;
+}
 
 /* Item lists */
 .item-list { overflow-y: auto; flex: 1; }
 .item-list::-webkit-scrollbar { width: 6px; }
-.item-list::-webkit-scrollbar-thumb { background: #3e3e3e; border-radius: 3px; }
-.item-list::-webkit-scrollbar-thumb:hover { background: #555; }
+.item-list::-webkit-scrollbar-track { background: transparent; }
+.item-list::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 3px; }
+.item-list::-webkit-scrollbar-thumb:hover { background: var(--scrollbar-hover); }
 
 .item {
   display: flex; align-items: center; gap: 6px;
   padding: 3px 10px 3px 8px; cursor: pointer; user-select: none;
   border-left: 2px solid transparent; font-size: 12px; line-height: 1.5;
 }
-.item:hover { background: #2a2d2e; }
-.item.active { background: #04395e; border-left-color: #007acc; color: #fff; }
+.item:hover { background: var(--bg-hover); }
+.item.active { background: var(--bg-active); border-left-color: var(--accent); color: var(--text-active); }
 .item .icon { flex-shrink: 0; opacity: .75; }
 .item .lbl { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .item .cnt {
-  font-size: 10px; background: #333; color: #777; padding: 1px 5px;
-  border-radius: 9px; flex-shrink: 0;
+  font-size: 10px; background: var(--badge-bg); color: var(--badge-fg);
+  padding: 1px 5px; border-radius: 9px; flex-shrink: 0;
 }
-.item.active .cnt { background: rgba(255,255,255,.12); color: #aaa; }
-.list-empty { padding: 10px 12px; color: #555; font-style: italic; font-size: 12px; text-align: center; }
+.item.active .cnt { background: rgba(0,59,142,.15); }
+body:not(.light) .item.active .cnt { background: rgba(255,255,255,.12); color: #aaa; }
+.list-empty { padding: 10px 12px; color: var(--text-placeholder); font-style: italic; font-size: 12px; text-align: center; }
 
 /* ── Editor area ──────────────────────────────────────────────────── */
 #editor { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
 
 /* Tabs */
 #tab-bar {
-  height: 35px; flex-shrink: 0; background: #2d2d2d;
-  border-bottom: 1px solid #1a1a1a;
-  display: flex; overflow-x: auto; overflow-y: hidden;
-  scrollbar-width: none;
+  height: 35px; flex-shrink: 0; background: var(--bg-tabbar);
+  border-bottom: 1px solid var(--border);
+  display: flex; overflow-x: auto; overflow-y: hidden; scrollbar-width: none;
 }
 #tab-bar::-webkit-scrollbar { display: none; }
 .tab {
   display: flex; align-items: center; gap: 6px;
   padding: 0 12px 0 14px; height: 35px; cursor: pointer;
-  border-right: 1px solid #1a1a1a; flex-shrink: 0;
-  background: #2d2d2d; color: #888; font-size: 12px;
-  white-space: nowrap; max-width: 200px; position: relative;
-  transition: color .1s;
+  border-right: 1px solid var(--border); flex-shrink: 0;
+  background: var(--bg-tab-inactive); color: var(--text-tab); font-size: 12px;
+  white-space: nowrap; max-width: 200px; transition: color .1s;
 }
-.tab:hover { background: #333; color: #bbb; }
-.tab.on { background: #1e1e1e; color: #fff; border-top: 1px solid #007acc; }
+.tab:hover { background: var(--bg-tab-hover); color: var(--text-tab-hover); }
+.tab.on { background: var(--bg-tab-active); color: var(--text-tab-active); border-top: 1px solid var(--accent); }
 .tab .tab-lbl { overflow: hidden; text-overflow: ellipsis; flex: 1; }
 .tab-x {
   display: flex; align-items: center; justify-content: center;
@@ -152,72 +331,76 @@ body {
   opacity: 0; transition: opacity .1s; margin-right: -4px; flex-shrink: 0;
 }
 .tab:hover .tab-x, .tab.on .tab-x { opacity: .6; }
-.tab-x:hover { background: rgba(255,255,255,.2); opacity: 1 !important; }
+.tab-x:hover { background: var(--tab-x-hover); opacity: 1 !important; }
 
 /* Welcome pane */
 #welcome {
   flex: 1; display: flex; align-items: center; justify-content: center;
-  flex-direction: column; gap: 16px; color: #444;
+  flex-direction: column; gap: 16px; color: var(--text-welcome);
+  background: var(--bg);
 }
 #welcome.gone { display: none; }
 .drop-target {
   display: flex; flex-direction: column; align-items: center; gap: 10px;
-  padding: 44px 72px; border: 2px dashed #383838; border-radius: 8px;
+  padding: 44px 72px; border: 2px dashed var(--drop-border); border-radius: 8px;
   cursor: pointer; transition: border-color .2s, color .2s;
 }
-.drop-target:hover { border-color: #555; color: #666; }
+.drop-target:hover { border-color: var(--drop-hover); color: var(--text-dim); }
+#welcome-line1 { font-size: 15px; color: var(--text-welcome); }
+#welcome-line2 { font-size: 12px; color: var(--text-welcome2); }
 
 /* Code pane */
 #code-pane {
   display: none; flex: 1; overflow: auto; position: relative;
-  scroll-behavior: auto;
+  background: var(--bg);
 }
 #code-pane::-webkit-scrollbar { width: 10px; height: 10px; }
-#code-pane::-webkit-scrollbar-track { background: #1e1e1e; }
-#code-pane::-webkit-scrollbar-thumb { background: #424242; border-radius: 5px; }
-#code-pane::-webkit-scrollbar-thumb:hover { background: #555; }
+#code-pane::-webkit-scrollbar-track { background: var(--scrollbar-track); }
+#code-pane::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 5px; }
+#code-pane::-webkit-scrollbar-thumb:hover { background: var(--scrollbar-hover); }
 #code-pane.show { display: flex; }
 #code-inner { display: flex; min-width: max-content; }
 
 #line-nums {
   padding: 14px 10px 40px 16px; text-align: right;
   font: 13px/1.6 'Cascadia Code','JetBrains Mono','Fira Code',Consolas,monospace;
-  color: #495565; user-select: none; background: #1e1e1e;
+  color: var(--linenum-color); user-select: none; background: var(--bg);
   position: sticky; left: 0; z-index: 1; min-width: 48px;
-  border-right: 1px solid #2a2a2a; flex-shrink: 0; white-space: pre;
+  border-right: 1px solid var(--border-code); flex-shrink: 0; white-space: pre;
 }
 #code-view {
   flex: 1; padding: 14px 20px 40px 16px;
   font: 13px/1.6 'Cascadia Code','JetBrains Mono','Fira Code',Consolas,monospace;
-  white-space: pre; tab-size: 4; min-width: 0;
+  white-space: pre; tab-size: 4; min-width: 0; color: var(--text);
 }
 
 /* Copy button */
 #copy-btn {
   position: sticky; top: 14px; right: 14px; margin-left: -46px;
-  width: 32px; height: 32px; background: #2e2e2e; border: 1px solid #484848;
-  border-radius: 4px; cursor: pointer; color: #888; display: none;
+  width: 32px; height: 32px; background: var(--bg-copy); border: 1px solid var(--border-copy);
+  border-radius: 4px; cursor: pointer; color: var(--text-dim); display: none;
   align-items: center; justify-content: center; flex-shrink: 0;
   align-self: flex-start; transition: background .1s, color .1s; z-index: 2;
 }
-#copy-btn:hover { background: #3c3c3c; color: #ccc; }
+#copy-btn:hover { background: var(--bg-hover); color: var(--text); }
 #copy-btn.ok { color: #4ec9b0 !important; }
+body.light #copy-btn.ok { color: #1a7a3a !important; }
 #code-pane.show #copy-btn { display: flex; }
 
 /* ── Syntax colours ───────────────────────────────────────────────── */
-.k  { color: #569cd6; }           /* keywords */
-.t  { color: #4ec9b0; }           /* types */
-.f  { color: #dcdcaa; }           /* function calls */
-.s  { color: #ce9178; }           /* strings */
-.n  { color: #b5cea8; }           /* numbers */
-.c  { color: #6a9955; font-style: italic; }  /* comments */
-.p  { color: #c586c0; }           /* preprocessor */
+.k { color: var(--c-kw);   }
+.t { color: var(--c-type); }
+.f { color: var(--c-fn);   }
+.s { color: var(--c-str);  }
+.n { color: var(--c-num);  }
+.c { color: var(--c-cmt);  font-style: italic; }
+.p { color: var(--c-pp);   }
 
 /* ── Status bar ───────────────────────────────────────────────────── */
 #statusbar {
-  height: 22px; flex-shrink: 0; background: #007acc;
+  height: 22px; flex-shrink: 0; background: var(--statusbar-bg);
   display: flex; align-items: center; padding: 0 12px; gap: 14px;
-  font-size: 11px; color: rgba(255,255,255,.9);
+  font-size: 11px; color: var(--statusbar-text);
 }
 #sb-msg { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 #sb-right { display: flex; gap: 14px; flex-shrink: 0; }
@@ -225,8 +408,8 @@ body {
 /* ── Drop overlay ─────────────────────────────────────────────────── */
 #drop-ov {
   display: none; position: fixed; inset: 0; z-index: 200;
-  background: rgba(0,0,0,.6); align-items: center; justify-content: center;
-  pointer-events: none; border: 3px dashed #007acc;
+  background: rgba(0,0,0,.55); align-items: center; justify-content: center;
+  pointer-events: none; border: 3px dashed var(--accent);
 }
 #drop-ov.on { display: flex; }
 #drop-ov-inner {
@@ -240,12 +423,15 @@ body {
   display: flex; flex-direction: column; gap: 6px; pointer-events: none;
 }
 .toast {
-  background: #2d2d2d; border: 1px solid #555; border-radius: 4px;
-  padding: 8px 14px; font-size: 12px; color: #ccc; max-width: 340px;
+  background: var(--bg-toast); border: 1px solid var(--toast-border);
+  border-radius: 4px; padding: 8px 14px; font-size: 12px;
+  color: var(--toast-text); max-width: 340px;
   animation: tin .2s, tout .3s 2.7s forwards;
 }
-.toast.err { border-color: #f14c4c; color: #f88; }
-.toast.ok  { border-color: #4ec9b0; color: #4ec9b0; }
+.toast.err { border-color: #f14c4c; color: #d9534f; }
+.toast.ok  { border-color: #4ec9b0; color: #1a8a5a; }
+body:not(.light) .toast.err { color: #f88; }
+body:not(.light) .toast.ok  { color: #4ec9b0; }
 @keyframes tin  { from { opacity:0; transform:translateY(8px) } }
 @keyframes tout { to   { opacity:0; transform:translateY(-4px) } }
 </style>
@@ -260,9 +446,9 @@ body {
   <a id="logo" href="#">
     <svg width="19" height="19" viewBox="0 0 19 19" fill="none">
       <rect x="5" y="5" width="9" height="9" rx="1.5" stroke="#9cdcfe" stroke-width="1.5" fill="none"/>
-      <line x1="7.5" y1="1.5" x2="7.5" y2="5"  stroke="#9cdcfe" stroke-width="1.5" stroke-linecap="round"/>
-      <line x1="11.5" y1="1.5" x2="11.5" y2="5" stroke="#9cdcfe" stroke-width="1.5" stroke-linecap="round"/>
-      <line x1="7.5" y1="14" x2="7.5" y2="17.5" stroke="#9cdcfe" stroke-width="1.5" stroke-linecap="round"/>
+      <line x1="7.5" y1="1.5" x2="7.5" y2="5"   stroke="#9cdcfe" stroke-width="1.5" stroke-linecap="round"/>
+      <line x1="11.5" y1="1.5" x2="11.5" y2="5"  stroke="#9cdcfe" stroke-width="1.5" stroke-linecap="round"/>
+      <line x1="7.5" y1="14" x2="7.5" y2="17.5"  stroke="#9cdcfe" stroke-width="1.5" stroke-linecap="round"/>
       <line x1="11.5" y1="14" x2="11.5" y2="17.5" stroke="#9cdcfe" stroke-width="1.5" stroke-linecap="round"/>
       <line x1="1.5" y1="7.5" x2="5" y2="7.5"    stroke="#9cdcfe" stroke-width="1.5" stroke-linecap="round"/>
       <line x1="1.5" y1="11.5" x2="5" y2="11.5"  stroke="#9cdcfe" stroke-width="1.5" stroke-linecap="round"/>
@@ -277,6 +463,28 @@ body {
     <div class="spinner on" id="spinner"></div>
     <span id="hdr-txt">Loading WASM…</span>
   </div>
+  <!-- Theme toggle -->
+  <button id="theme-btn" onclick="toggleTheme()" title="Toggle light/dark theme">
+    <!-- Moon icon (shown in dark mode → click to go light) -->
+    <svg id="icon-moon" width="14" height="14" viewBox="0 0 14 14" fill="none">
+      <path d="M12 8.5A5.5 5.5 0 0 1 5.5 2a5.5 5.5 0 1 0 6.5 6.5z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/>
+    </svg>
+    <!-- Sun icon (shown in light mode → click to go dark) -->
+    <svg id="icon-sun" width="14" height="14" viewBox="0 0 14 14" fill="none">
+      <circle cx="7" cy="7" r="2.8" stroke="currentColor" stroke-width="1.4"/>
+      <line x1="7" y1="1"   x2="7"   y2="2.5"  stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
+      <line x1="7" y1="11.5" x2="7"  y2="13"   stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
+      <line x1="1"   y1="7" x2="2.5" y2="7"    stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
+      <line x1="11.5" y1="7" x2="13" y2="7"    stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
+      <line x1="2.9" y1="2.9" x2="3.9" y2="3.9" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
+      <line x1="10.1" y1="10.1" x2="11.1" y2="11.1" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
+      <line x1="11.1" y1="2.9" x2="10.1" y2="3.9" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
+      <line x1="3.9"  y1="10.1" x2="2.9" y2="11.1" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
+    </svg>
+  </button>
+  <label id="ssa-label" title="Use SSA-based IR simplification">
+    <input type="checkbox" id="ssa-cb" checked> SSA
+  </label>
   <button id="open-btn" onclick="document.getElementById('file-input').click()">
     <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
       <path d="M6.5 1v7.5M3 5 6.5 1.5 10 5" stroke="#fff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
@@ -369,8 +577,8 @@ body {
           <line x1="15" y1="21" x2="25" y2="21" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
           <line x1="15" y1="25" x2="22" y2="25" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
         </svg>
-        <span style="font-size:15px;color:#555">Drop a Mach-O binary here</span>
-        <span style="font-size:12px;color:#444">or click to browse · x86 / x86-64 with STABS debug info</span>
+        <span id="welcome-line1">Drop a Mach-O binary here</span>
+        <span id="welcome-line2">or click to browse · x86 / x86-64 with STABS debug info</span>
       </div>
     </div>
 
@@ -416,17 +624,29 @@ body {
 <script>
 'use strict';
 
+// ── Theme ─────────────────────────────────────────────────────────────
+(function () {
+  if (localStorage.getItem('dis-theme') === 'light')
+    document.body.classList.add('light');
+})();
+
+function toggleTheme() {
+  const isLight = document.body.classList.toggle('light');
+  localStorage.setItem('dis-theme', isLight ? 'light' : 'dark');
+}
+
 // ── State ────────────────────────────────────────────────────────────
 let mod      = null;
-let tabs     = [];        // [{id, label, code, kind:'fn'|'src', addr?, srcIdx?}]
+let tabs     = [];
 let activeId = null;
 let curCode  = '';
-let allFns   = [];        // [{addr, sig, name}]
-let allSrcs  = [];        // [{idx, path, fnCount}]
+let allFns   = [];
+let allSrcs  = [];
 
 // ── WASM init ────────────────────────────────────────────────────────
 createDisModule().then(m => {
   mod = m;
+  mod.setUseSSA(true); // SSA on by default in web UI
   document.getElementById('spinner').classList.remove('on');
   document.getElementById('hdr-txt').textContent = 'Ready';
   sbMsg('Drop a Mach-O binary to get started');
@@ -440,8 +660,21 @@ createDisModule().then(m => {
 document.getElementById('file-input').addEventListener('change', function() {
   if (this.files[0]) loadFile(this.files[0]);
 });
-
-// Drag & drop
+document.getElementById('ssa-cb').addEventListener('change', function() {
+  if (!mod) return;
+  mod.setUseSSA(this.checked);
+  // Re-decompile the active tab so the output reflects the new setting
+  const tab = tabs.find(t => t.id === activeId);
+  if (!tab) return;
+  spin(true);
+  setTimeout(() => {
+    tab.code = tab.kind === 'fn'
+      ? mod.decompileFunction(tab.addr)
+      : mod.decompileSourceFile(tab.srcIdx);
+    spin(false);
+    showCode(tab.code);
+  }, 10);
+});
 document.addEventListener('dragenter', e => {
   if (e.dataTransfer.types.includes('Files'))
     document.getElementById('drop-ov').classList.add('on');
@@ -460,8 +693,7 @@ document.addEventListener('drop', e => {
 
 function loadFile(file) {
   if (!mod) { toast('WASM module not ready', 'err'); return; }
-  spin(true);
-  sbMsg('Loading ' + file.name + '…');
+  spin(true); sbMsg('Loading ' + file.name + '…');
   const reader = new FileReader();
   reader.onload = ev => {
     const bytes = new Uint8Array(ev.target.result);
@@ -470,11 +702,7 @@ function loadFile(file) {
     const res = mod.loadBinaryPtr(ptr, bytes.length);
     mod._free(ptr);
     spin(false);
-    if (res.startsWith('error:')) {
-      toast(res, 'err');
-      sbMsg(res, true);
-      return;
-    }
+    if (res.startsWith('error:')) { toast(res, 'err'); sbMsg(res, true); return; }
     document.getElementById('hdr-txt').textContent = file.name;
     sbMsg(file.name + ' · ' + res.replace('ok: ', ''));
     toast(res.replace('ok: ', ''), 'ok');
@@ -483,23 +711,17 @@ function loadFile(file) {
   reader.readAsArrayBuffer(file);
 }
 
-// ── Sidebar population ───────────────────────────────────────────────
+// ── Sidebar ──────────────────────────────────────────────────────────
 function populateSidebar(filename, res) {
-  // Binary info
-  const m   = res.match(/(\d+) bytes.*?(\d+) functions.*?(\d+) source files/);
-  const mb  = m ? (parseInt(m[1])/1048576).toFixed(1)+' MB' : '?';
-  const fns = m ? m[2] : '?';
-  const srs = m ? m[3] : '?';
+  const m  = res.match(/(\d+) bytes.*?(\d+) functions.*?(\d+) source files/);
+  const mb = m ? (parseInt(m[1])/1048576).toFixed(1)+' MB' : '?';
   document.getElementById('bin-placeholder').style.display = 'none';
   const bi = document.getElementById('bin-info');
   bi.style.display = '';
   bi.innerHTML =
-    row('File', esc(basename(filename))) +
-    row('Size', mb) +
-    row('Functions', fns) +
-    row('Sources', srs);
+    row('File', esc(basename(filename))) + row('Size', mb) +
+    row('Functions', m?m[2]:'?') + row('Sources', m?m[3]:'?');
 
-  // Functions
   allFns = [];
   for (const line of mod.listFunctions().split('\n').filter(Boolean)) {
     const lm = line.match(/^(0x[0-9A-Fa-f]+)\s+(.*)/);
@@ -509,7 +731,6 @@ function populateSidebar(filename, res) {
   const fnBadge = document.getElementById('fn-badge');
   fnBadge.textContent = allFns.length; fnBadge.style.display = '';
 
-  // Sources
   allSrcs = [];
   for (const line of mod.listSourceFiles().split('\n').filter(Boolean)) {
     const lm = line.match(/^\[(\d+)\]\s+(.*?)\s+\((\d+) functions\)/);
@@ -519,25 +740,23 @@ function populateSidebar(filename, res) {
   const srcBadge = document.getElementById('src-badge');
   srcBadge.textContent = allSrcs.length; srcBadge.style.display = '';
 
-  renderFnList(allFns);
-  renderSrcList(allSrcs);
+  renderFnList(allFns); renderSrcList(allSrcs);
 }
 
 function row(lbl, val) {
   return `<div class="bi-row"><span class="bi-lbl">${lbl}</span><span class="bi-val">${val}</span></div>`;
 }
 
-// ── List rendering ───────────────────────────────────────────────────
 function renderFnList(fns) {
   const el = document.getElementById('fn-list');
   if (!fns.length) { el.innerHTML = '<div class="list-empty">No matches</div>'; return; }
   el.innerHTML = fns.map(f =>
     `<div class="item" data-addr="${f.addr}" onclick="openFn(${f.addr},this)" title="${esc(f.sig)}">
       <svg class="icon" width="11" height="11" viewBox="0 0 11 11" fill="none">
-        <path d="M1.5 8.5V2.5l4 3-4 3z" fill="#dcdcaa"/>
-        <line x1="7" y1="3" x2="9.5" y2="3" stroke="#dcdcaa" stroke-width="1.1" stroke-linecap="round"/>
-        <line x1="7" y1="5.5" x2="9.5" y2="5.5" stroke="#dcdcaa" stroke-width="1.1" stroke-linecap="round"/>
-        <line x1="7" y1="8" x2="9.5" y2="8" stroke="#dcdcaa" stroke-width="1.1" stroke-linecap="round"/>
+        <path d="M1.5 8.5V2.5l4 3-4 3z" fill="var(--c-fn)"/>
+        <line x1="7" y1="3"   x2="9.5" y2="3"   stroke="var(--c-fn)" stroke-width="1.1" stroke-linecap="round"/>
+        <line x1="7" y1="5.5" x2="9.5" y2="5.5" stroke="var(--c-fn)" stroke-width="1.1" stroke-linecap="round"/>
+        <line x1="7" y1="8"   x2="9.5" y2="8"   stroke="var(--c-fn)" stroke-width="1.1" stroke-linecap="round"/>
       </svg>
       <span class="lbl">${esc(fnShort(f.name))}</span>
      </div>`
@@ -550,9 +769,9 @@ function renderSrcList(srcs) {
   el.innerHTML = srcs.map(s =>
     `<div class="item" data-idx="${s.idx}" onclick="openSrc(${s.idx},this)" title="${esc(s.path)}">
       <svg class="icon" width="11" height="11" viewBox="0 0 11 11" fill="none">
-        <path d="M2 1h5l2 2v8H2V1z" stroke="#9cdcfe" stroke-width="1.1" fill="none" stroke-linejoin="round"/>
-        <line x1="3.5" y1="5" x2="7.5" y2="5" stroke="#9cdcfe" stroke-width=".9" stroke-linecap="round"/>
-        <line x1="3.5" y1="7" x2="6.5" y2="7" stroke="#9cdcfe" stroke-width=".9" stroke-linecap="round"/>
+        <path d="M2 1h5l2 2v8H2V1z" stroke="var(--c-type)" stroke-width="1.1" fill="none" stroke-linejoin="round"/>
+        <line x1="3.5" y1="5" x2="7.5" y2="5" stroke="var(--c-type)" stroke-width=".9" stroke-linecap="round"/>
+        <line x1="3.5" y1="7" x2="6.5" y2="7" stroke="var(--c-type)" stroke-width=".9" stroke-linecap="round"/>
       </svg>
       <span class="lbl">${esc(basename(s.path))}</span>
       <span class="cnt">${s.fnCount}</span>
@@ -570,73 +789,61 @@ function filterSrcs() {
   renderSrcList(q ? allSrcs.filter(s => s.path.toLowerCase().includes(q)) : allSrcs);
 }
 
-// ── Decompilation & tabs ─────────────────────────────────────────────
+// ── Tabs & decompilation ─────────────────────────────────────────────
 function openFn(addr, el) {
   markActive('fn-list', 'data-addr', addr);
-  const ex = tabs.find(t => t.kind === 'fn' && t.addr === addr);
+  const ex = tabs.find(t => t.kind==='fn' && t.addr===addr);
   if (ex) { activateTab(ex.id); return; }
-  const info  = allFns.find(f => f.addr === addr);
-  const label = info ? fnShort(info.name) : '0x' + addr.toString(16);
-  const id    = 'fn_' + addr.toString(16);
-  sbMsg('Decompiling ' + label + '…');
-  spin(true);
+  const info  = allFns.find(f => f.addr===addr);
+  const label = info ? fnShort(info.name) : '0x'+addr.toString(16);
+  spin(true); sbMsg('Decompiling '+label+'…');
   setTimeout(() => {
     const code = mod.decompileFunction(addr);
     spin(false);
-    addTab({ id, label, code, kind: 'fn', addr });
-    sbMsg(label + ' · ' + countLines(code) + ' lines');
+    addTab({ id:'fn_'+addr.toString(16), label, code, kind:'fn', addr });
+    sbMsg(label+' · '+countLines(code)+' lines');
   }, 10);
 }
 
 function openSrc(idx, el) {
   markActive('src-list', 'data-idx', idx);
-  const ex = tabs.find(t => t.kind === 'src' && t.srcIdx === idx);
+  const ex = tabs.find(t => t.kind==='src' && t.srcIdx===idx);
   if (ex) { activateTab(ex.id); return; }
-  const info  = allSrcs.find(s => s.idx === idx);
-  const label = info ? basename(info.path) : 'src-' + idx;
-  const id    = 'src_' + idx;
-  sbMsg('Decompiling ' + label + '…');
-  spin(true);
+  const info  = allSrcs.find(s => s.idx===idx);
+  const label = info ? basename(info.path) : 'src-'+idx;
+  spin(true); sbMsg('Decompiling '+label+'…');
   setTimeout(() => {
     const code = mod.decompileSourceFile(idx);
     spin(false);
-    addTab({ id, label, code, kind: 'src', srcIdx: idx });
-    sbMsg(label + ' · ' + countLines(code) + ' lines');
+    addTab({ id:'src_'+idx, label, code, kind:'src', srcIdx:idx });
+    sbMsg(label+' · '+countLines(code)+' lines');
   }, 10);
 }
 
 function addTab(tab) {
-  if (!tabs.find(t => t.id === tab.id)) tabs.push(tab);
+  if (!tabs.find(t => t.id===tab.id)) tabs.push(tab);
   activateTab(tab.id);
 }
-
 function activateTab(id) {
   activeId = id;
-  const tab = tabs.find(t => t.id === id);
+  const tab = tabs.find(t => t.id===id);
   if (!tab) return;
-  renderTabBar();
-  showCode(tab.code);
-  if (tab.kind === 'fn')  markActive('fn-list',  'data-addr', tab.addr);
-  if (tab.kind === 'src') markActive('src-list', 'data-idx',  tab.srcIdx);
+  renderTabBar(); showCode(tab.code);
+  if (tab.kind==='fn')  markActive('fn-list',  'data-addr', tab.addr);
+  if (tab.kind==='src') markActive('src-list', 'data-idx',  tab.srcIdx);
 }
-
 function closeTab(id, e) {
   e && e.stopPropagation();
-  const i = tabs.findIndex(t => t.id === id);
-  if (i === -1) return;
-  tabs.splice(i, 1);
-  if (activeId === id)
-    activeId = tabs.length ? tabs[Math.max(0, i - 1)].id : null;
+  const i = tabs.findIndex(t => t.id===id);
+  if (i===-1) return;
+  tabs.splice(i,1);
+  if (activeId===id) activeId = tabs.length ? tabs[Math.max(0,i-1)].id : null;
   renderTabBar();
-  if (activeId) {
-    const t = tabs.find(x => x.id === activeId);
-    if (t) { showCode(t.code); return; }
-  }
+  if (activeId) { const t=tabs.find(x=>x.id===activeId); if(t){showCode(t.code);return;} }
   document.getElementById('code-pane').classList.remove('show');
   document.getElementById('welcome').classList.remove('gone');
-  curCode = ''; updateLines(0);
+  curCode=''; updateLines(0);
 }
-
 function renderTabBar() {
   document.getElementById('tab-bar').innerHTML = tabs.map(t =>
     `<div class="tab${t.id===activeId?' on':''}" onclick="activateTab('${t.id}')">
@@ -650,21 +857,19 @@ function renderTabBar() {
      </div>`
   ).join('');
 }
-
 function showCode(code) {
   curCode = code;
   document.getElementById('welcome').classList.add('gone');
   const pane = document.getElementById('code-pane');
   pane.classList.add('show');
   const lines = code.split('\n');
-  document.getElementById('line-nums').textContent = lines.map((_,i) => i+1).join('\n');
+  document.getElementById('line-nums').textContent = lines.map((_,i)=>i+1).join('\n');
   document.getElementById('code-view').innerHTML = hlC(code);
   updateLines(lines.length);
-  pane.scrollTop = 0; pane.scrollLeft = 0;
+  pane.scrollTop=0; pane.scrollLeft=0;
 }
-
 function updateLines(n) {
-  document.getElementById('sb-lines').textContent = n ? n + ' lines' : '';
+  document.getElementById('sb-lines').textContent = n ? n+' lines' : '';
 }
 function countLines(s) { return s.split('\n').length; }
 
@@ -674,162 +879,114 @@ function copyCode() {
   navigator.clipboard.writeText(curCode).then(() => {
     const b = document.getElementById('copy-btn');
     b.classList.add('ok');
-    setTimeout(() => b.classList.remove('ok'), 1400);
+    setTimeout(()=>b.classList.remove('ok'), 1400);
   });
 }
 
-// ── Sidebar resize ───────────────────────────────────────────────────
+// ── Sidebar resize ────────────────────────────────────────────────────
 const gutter = document.getElementById('resize-gutter');
-let dragging = false, dragX0 = 0, dragW0 = 0;
+let dragging=false, dragX0=0, dragW0=0;
 gutter.addEventListener('mousedown', e => {
-  dragging = true; dragX0 = e.clientX;
-  dragW0 = document.getElementById('sidebar').offsetWidth;
+  dragging=true; dragX0=e.clientX;
+  dragW0=document.getElementById('sidebar').offsetWidth;
   gutter.classList.add('drag');
-  document.body.style.cssText += 'cursor:col-resize;user-select:none;';
+  document.body.style.cssText+='cursor:col-resize;user-select:none;';
 });
 document.addEventListener('mousemove', e => {
   if (!dragging) return;
-  const w = Math.max(150, Math.min(520, dragW0 + e.clientX - dragX0));
-  document.getElementById('sidebar').style.width = w + 'px';
+  const w=Math.max(150,Math.min(520,dragW0+e.clientX-dragX0));
+  document.getElementById('sidebar').style.width=w+'px';
 });
-document.addEventListener('mouseup', () => {
+document.addEventListener('mouseup', ()=>{
   if (!dragging) return;
-  dragging = false; gutter.classList.remove('drag');
-  document.body.style.cursor = ''; document.body.style.userSelect = '';
+  dragging=false; gutter.classList.remove('drag');
+  document.body.style.cursor=''; document.body.style.userSelect='';
 });
 
-// ── Section toggle ───────────────────────────────────────────────────
+// ── Misc ──────────────────────────────────────────────────────────────
 function toggleSec(id) { document.getElementById(id).classList.toggle('closed'); }
-
-// ── Keyboard ─────────────────────────────────────────────────────────
-document.addEventListener('keydown', e => {
-  const isMod = e.ctrlKey || e.metaKey;
-  if (isMod && e.key === 'k') {
-    e.preventDefault();
-    document.getElementById('fn-filter').focus();
-    document.getElementById('fn-filter').select();
-  }
-  if (e.key === 'Escape') {
-    document.getElementById('fn-filter').blur();
-    document.getElementById('src-filter').blur();
-  }
-});
-
-// ── Helpers ──────────────────────────────────────────────────────────
-function spin(on) {
-  document.getElementById('spinner').classList.toggle('on', on);
+function spin(on) { document.getElementById('spinner').classList.toggle('on',on); }
+function sbMsg(msg,err) {
+  const el=document.getElementById('sb-msg');
+  el.textContent=msg; el.style.color=err?'#ffaaaa':'';
 }
-function sbMsg(msg, err) {
-  const el = document.getElementById('sb-msg');
-  el.textContent = msg;
-  el.style.color = err ? '#f88' : '';
-}
-function toast(msg, cls) {
-  const c = document.getElementById('toasts');
-  const el = document.createElement('div');
-  el.className = 'toast' + (cls ? ' '+cls : '');
-  el.textContent = msg;
-  c.appendChild(el);
-  setTimeout(() => el.remove(), 3000);
+function toast(msg,cls) {
+  const c=document.getElementById('toasts');
+  const el=document.createElement('div');
+  el.className='toast'+(cls?' '+cls:''); el.textContent=msg;
+  c.appendChild(el); setTimeout(()=>el.remove(),3000);
 }
 function esc(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
-function basename(p) {
-  return p.replace(/\\/g,'/').split('/').filter(Boolean).pop() || p;
-}
+function basename(p) { return p.replace(/\\/g,'/').split('/').filter(Boolean).pop()||p; }
 function fnShort(sig) {
-  const pi = sig.indexOf('(');
-  const before = pi >= 0 ? sig.slice(0, pi).trim() : sig;
-  const parts  = before.split(/\s+/);
-  return parts[parts.length - 1] || sig;
+  const pi=sig.indexOf('(');
+  const before=pi>=0?sig.slice(0,pi).trim():sig;
+  const parts=before.split(/\s+/);
+  return parts[parts.length-1]||sig;
 }
-function markActive(listId, attr, val) {
-  document.getElementById(listId).querySelectorAll('.item').forEach(el => {
-    const v = el.getAttribute(attr);
-    const match = typeof val === 'number' ? parseInt(v) === val : v === String(val);
-    el.classList.toggle('active', match);
-    if (match) el.scrollIntoView({ block: 'nearest' });
+function markActive(listId,attr,val) {
+  document.getElementById(listId).querySelectorAll('.item').forEach(el=>{
+    const v=el.getAttribute(attr);
+    const match=typeof val==='number'?parseInt(v)===val:v===String(val);
+    el.classList.toggle('active',match);
+    if(match) el.scrollIntoView({block:'nearest'});
   });
 }
 
+document.addEventListener('keydown',e=>{
+  const isMod=e.ctrlKey||e.metaKey;
+  if(isMod&&e.key==='k'){e.preventDefault();document.getElementById('fn-filter').focus();document.getElementById('fn-filter').select();}
+  if(e.key==='Escape'){document.getElementById('fn-filter').blur();document.getElementById('src-filter').blur();}
+});
+
 // ── C Syntax Highlighter ─────────────────────────────────────────────
-const KW = new Set([
-  'auto','break','case','char','const','continue','default','do','double',
-  'else','enum','extern','float','for','goto','if','inline','int','long',
-  'register','restrict','return','short','signed','sizeof','static','struct',
-  'switch','typedef','union','unsigned','void','volatile','while',
-  'NULL','nullptr','true','false','bool'
-]);
-const TYPES = new Set([
-  'int8_t','int16_t','int32_t','int64_t',
-  'uint8_t','uint16_t','uint32_t','uint64_t',
-  'size_t','ssize_t','ptrdiff_t','intptr_t','uintptr_t',
-  'FILE','BOOL','DWORD','WORD','BYTE','HRESULT','HANDLE','HWND',
-  'uint','ulong','ushort','uchar'
-]);
+const KW=new Set(['auto','break','case','char','const','continue','default','do','double',
+  'else','enum','extern','float','for','goto','if','inline','int','long','register',
+  'restrict','return','short','signed','sizeof','static','struct','switch','typedef',
+  'union','unsigned','void','volatile','while','NULL','nullptr','true','false','bool']);
+const TYPES=new Set(['int8_t','int16_t','int32_t','int64_t','uint8_t','uint16_t',
+  'uint32_t','uint64_t','size_t','ssize_t','ptrdiff_t','intptr_t','uintptr_t',
+  'FILE','BOOL','DWORD','WORD','BYTE','HRESULT','HANDLE','HWND','uint','ulong','ushort','uchar']);
 
 function hlC(src) {
-  let o = '', i = 0, n = src.length;
-  while (i < n) {
-    const c = src[i];
-
-    // Line comment
-    if (c === '/' && src[i+1] === '/') {
-      const e = src.indexOf('\n', i); const seg = e<0 ? src.slice(i) : src.slice(i,e);
-      o += `<span class="c">${esc(seg)}</span>`; i += seg.length; continue;
-    }
-    // Block comment
-    if (c === '/' && src[i+1] === '*') {
-      const e = src.indexOf('*/', i+2); const seg = e<0 ? src.slice(i) : src.slice(i,e+2);
-      o += `<span class="c">${esc(seg)}</span>`; i += seg.length; continue;
-    }
-    // Preprocessor
-    if (c === '#' && (i===0 || src[i-1]==='\n')) {
-      const e = src.indexOf('\n', i); const seg = e<0 ? src.slice(i) : src.slice(i,e);
-      o += `<span class="p">${esc(seg)}</span>`; i += seg.length; continue;
-    }
-    // String / char literal
-    if (c === '"' || c === "'") {
-      let j = i+1;
-      while (j<n && src[j]!==c) { if (src[j]==='\\') j++; j++; }
-      j++;
-      o += `<span class="s">${esc(src.slice(i,j))}</span>`; i=j; continue;
-    }
-    // Numbers (0x hex, decimal, float; also negative if preceded by operator/space/open)
-    if ((c>='0'&&c<='9') ||
-        (c==='-' && i>0 && /[\s=\(,\[{*+\-!|&^~<>%]/.test(src[i-1]) && src[i+1]>='0' && src[i+1]<='9')) {
-      let j = i; if (src[j]==='-') j++;
-      if (src[j]==='0' && src[j+1]==='x') {
-        j+=2; while (j<n && /[0-9a-fA-F]/.test(src[j])) j++;
-      } else {
-        while (j<n && src[j]>='0' && src[j]<='9') j++;
-        if (j<n && src[j]==='.') { j++; while(j<n&&src[j]>='0'&&src[j]<='9') j++; }
-        if (j<n && (src[j]==='e'||src[j]==='E')) {
-          j++; if(src[j]==='+'||src[j]==='-') j++;
-          while(j<n&&src[j]>='0'&&src[j]<='9') j++;
-        }
-      }
-      while (j<n && /[uUlLfF]/.test(src[j])) j++;
-      o += `<span class="n">${esc(src.slice(i,j))}</span>`; i=j; continue;
-    }
-    // Identifiers, keywords, types, function calls
-    if (/[a-zA-Z_]/.test(c)) {
-      let j = i; while (j<n && /[a-zA-Z0-9_]/.test(src[j])) j++;
-      const word = src.slice(i,j);
-      let k = j; while (k<n && (src[k]===' '||src[k]==='\t')) k++;
-      if (KW.has(word)) {
-        o += `<span class="k">${esc(word)}</span>`;
-      } else if (TYPES.has(word)) {
-        o += `<span class="t">${esc(word)}</span>`;
-      } else if (src[k]==='(' && word!=='if'&&word!=='while'&&word!=='for'&&word!=='switch'&&word!=='return') {
-        o += `<span class="f">${esc(word)}</span>`;
-      } else {
-        o += esc(word);
-      }
-      i=j; continue;
-    }
-    o += esc(c); i++;
+  let o='',i=0,n=src.length;
+  while(i<n){
+    const c=src[i];
+    if(c==='/'&&src[i+1]==='/'){
+      const e=src.indexOf('\n',i);const seg=e<0?src.slice(i):src.slice(i,e);
+      o+=`<span class="c">${esc(seg)}</span>`;i+=seg.length;continue;}
+    if(c==='/'&&src[i+1]==='*'){
+      const e=src.indexOf('*/',i+2);const seg=e<0?src.slice(i):src.slice(i,e+2);
+      o+=`<span class="c">${esc(seg)}</span>`;i+=seg.length;continue;}
+    if(c==='#'&&(i===0||src[i-1]==='\n')){
+      const e=src.indexOf('\n',i);const seg=e<0?src.slice(i):src.slice(i,e);
+      o+=`<span class="p">${esc(seg)}</span>`;i+=seg.length;continue;}
+    if(c==='"'||c==="'"){
+      let j=i+1;while(j<n&&src[j]!==c){if(src[j]==='\\')j++;j++;}j++;
+      o+=`<span class="s">${esc(src.slice(i,j))}</span>`;i=j;continue;}
+    if((c>='0'&&c<='9')||
+       (c==='-'&&i>0&&/[\s=\(,\[{*+\-!|&^~<>%]/.test(src[i-1])&&src[i+1]>='0'&&src[i+1]<='9')){
+      let j=i;if(src[j]==='-')j++;
+      if(src[j]==='0'&&src[j+1]==='x'){j+=2;while(j<n&&/[0-9a-fA-F]/.test(src[j]))j++;}
+      else{while(j<n&&src[j]>='0'&&src[j]<='9')j++;
+        if(j<n&&src[j]==='.'){j++;while(j<n&&src[j]>='0'&&src[j]<='9')j++;}
+        if(j<n&&(src[j]==='e'||src[j]==='E')){j++;if(src[j]==='+'||src[j]==='-')j++;
+          while(j<n&&src[j]>='0'&&src[j]<='9')j++;}}
+      while(j<n&&/[uUlLfF]/.test(src[j]))j++;
+      o+=`<span class="n">${esc(src.slice(i,j))}</span>`;i=j;continue;}
+    if(/[a-zA-Z_]/.test(c)){
+      let j=i;while(j<n&&/[a-zA-Z0-9_]/.test(src[j]))j++;
+      const word=src.slice(i,j);
+      let k=j;while(k<n&&(src[k]===' '||src[k]==='\t'))k++;
+      if(KW.has(word))o+=`<span class="k">${esc(word)}</span>`;
+      else if(TYPES.has(word))o+=`<span class="t">${esc(word)}</span>`;
+      else if(src[k]==='('&&word!=='if'&&word!=='while'&&word!=='for'&&word!=='switch'&&word!=='return')
+        o+=`<span class="f">${esc(word)}</span>`;
+      else o+=esc(word);
+      i=j;continue;}
+    o+=esc(c);i++;
   }
   return o;
 }
