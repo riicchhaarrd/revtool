@@ -3181,34 +3181,6 @@ private:
                 }
                 // Use coalesced variable name if available
                 result = tempName(id);
-                // For array-typed temps in value context: add [0]
-                if (m_addrDepth == 0) {
-                    // Check the temp's type from coalescing or definition
-                    TypeRef tt = m_func.tempType(id);
-                    if (tt == NullType) {
-                        // Try from tempDef
-                        auto dit = m_tempDef.find(id);
-                        if (dit != m_tempDef.end() && dit->second)
-                            tt = dit->second->typeRef;
-                    }
-                    if (tt == NullType) {
-                        // Try from coalesced var's locals
-                        auto vit = m_func.tempToVar.find(id);
-                        if (vit != m_func.tempToVar.end()) {
-                            auto nit = m_func.varNames.find(vit->second);
-                            if (nit != m_func.varNames.end()) {
-                                for (auto &l : m_func.locals)
-                                    if (l.name == nit->second && l.typeRef != NullType)
-                                        { tt = l.typeRef; break; }
-                            }
-                        }
-                    }
-                    if (tt != NullType) {
-                        auto *vt = m_types.resolveType(tt);
-                        if (vt && vt->kind == StabsTypeKind::Array)
-                            result += "[0]";
-                    }
-                }
                 // If we'd emit a raw "tN" name, force-declare it
                 if (result.size() >= 2 && result[0] == 't' && result[1] >= '0' && result[1] <= '9') {
                     m_forceDeclareTemps.insert(id);
@@ -3886,13 +3858,15 @@ private:
                 auto fixArrayVar = [&](std::string &s, IRExpr *kid) {
                     if (!kid) return;
                     IRExpr *src = kid;
-                    // Follow temp chain (up to 3 levels) to find the source Var
+                    // Follow temp → Var chain (only through simple Var definitions)
                     for (int d = 0; d < 3 && src && src->op == IROp::Temp; ++d) {
                         auto dit = m_tempDef.find(src->tempId());
-                        if (dit != m_tempDef.end() && dit->second)
+                        if (dit != m_tempDef.end() && dit->second &&
+                            dit->second->op == IROp::Var)
                             src = dit->second;
                         else break;
                     }
+                    // Only use the Var's own typeRef (not exprType which may match wrong locals)
                     if (src && src->op == IROp::Var && src->typeRef != NullType) {
                         auto *kt = m_types.resolveType(src->typeRef);
                         if (kt && kt->kind == StabsTypeKind::Array)

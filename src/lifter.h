@@ -986,8 +986,15 @@ private:
             }
             if (d < 0) {
                 auto it = m_localByOffset.find(d);
-                if (it != m_localByOffset.end())
-                    return IRExpr::mkVar(it->second->name, it->second->typeRef);
+                if (it != m_localByOffset.end()) {
+                    auto var = IRExpr::mkVar(it->second->name, it->second->typeRef);
+                    // For array-typed locals, wrap in Load to distinguish
+                    // value access (movss → first element) from address access (lea)
+                    auto *lt = m_types.resolveType(it->second->typeRef);
+                    if (lt && lt->kind == StabsTypeKind::Array)
+                        return IRExpr::mkLoad(std::move(var));
+                    return var;
+                }
                 // Check if offset falls within an array local
                 for (auto &[off, loc] : m_localByOffset) {
                     if (off > d) continue;
