@@ -3416,7 +3416,15 @@ private:
                     int off = (int)e->value;
                     result = std::string("*(") + loadCastType(e->loadSize) + " *)((char *)(" + base + ") + " + std::to_string(off) + ")";
                 } else {
-                    result = base + "->" + e->name;
+                    // Use -> for pointer-to-struct, . for struct-by-value
+                    TypeRef baseType = e->kids[0] ? exprType(e->kids[0].get()) : NullType;
+                    bool useArrow = true;
+                    if (baseType != NullType) {
+                        auto *bt = m_types.resolveType(baseType);
+                        if (bt && (bt->kind == StabsTypeKind::Struct || bt->kind == StabsTypeKind::Union))
+                            useArrow = false;  // struct-by-value: use dot
+                    }
+                    result = base + (useArrow ? "->" : ".") + e->name;
                 }
                 break;
             }

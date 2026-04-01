@@ -1060,7 +1060,20 @@ private:
                     if (!access.empty()) {
                         auto *field = m_types.findFieldAtOffset(structRef, (int)m.disp);
                         TypeRef ft = field ? field->typeRef : NullType;
-                        // Annotate the base with the struct pointer type for type inference
+                        base->typeRef = baseType;
+                        return IRExpr::mkField(std::move(base), access, (int)m.disp, ft);
+                    }
+                }
+            }
+            // Struct-by-value: base holds address of struct (not pointer to pointer).
+            // Type is the struct itself, accessed via [base + disp] = base.field
+            if (m.disp != 0 && baseType != NullType) {
+                auto *bt = m_types.resolveType(baseType);
+                if (bt && (bt->kind == StabsTypeKind::Struct || bt->kind == StabsTypeKind::Union)) {
+                    std::string access = m_types.formatFieldAccess(baseType, (int)m.disp);
+                    if (!access.empty()) {
+                        auto *field = m_types.findFieldAtOffset(baseType, (int)m.disp);
+                        TypeRef ft = field ? field->typeRef : NullType;
                         base->typeRef = baseType;
                         return IRExpr::mkField(std::move(base), access, (int)m.disp, ft);
                     }
@@ -1102,6 +1115,13 @@ private:
                     auto *gt = m_types.resolveType(gn->typeRef);
                     if (gt && gt->kind == StabsTypeKind::Pointer)
                         return IRExpr::mkVar(symName, gn->typeRef);
+                    // For NLP (IMPORT segment), struct types = pointer to struct
+                    if (gt && (gt->kind == StabsTypeKind::Struct ||
+                               gt->kind == StabsTypeKind::Union)) {
+                        const Section *sec = m_mf.sectionForAddress(addr);
+                        if (sec && sec->segname == "__IMPORT")
+                            return IRExpr::mkVar(symName, gn->typeRef);
+                    }
                 }
                 return IRExpr::mkVar(symName);
             }
@@ -1196,7 +1216,21 @@ private:
                         auto *field = m_types.findFieldAtOffset(structRef, (int)m.disp);
                         TypeRef ft = field ? field->typeRef : NullType;
                         auto fld = IRExpr::mkField(std::move(base), access, (int)m.disp, ft);
-                        bb.stmts.push_back(IRStmt::mkStore(std::move(fld), std::move(val)));
+                        bb.stmts.push_back(IRStmt::mkStore(std::move(fld), std::move(val), storeSize));
+                        return;
+                    }
+                }
+            }
+            // Struct-by-value store: base.field = value
+            if (m.disp != 0 && baseType != NullType) {
+                auto *btt = m_types.resolveType(baseType);
+                if (btt && (btt->kind == StabsTypeKind::Struct || btt->kind == StabsTypeKind::Union)) {
+                    std::string access = m_types.formatFieldAccess(baseType, (int)m.disp);
+                    if (!access.empty()) {
+                        auto *field = m_types.findFieldAtOffset(baseType, (int)m.disp);
+                        TypeRef ft = field ? field->typeRef : NullType;
+                        auto fld = IRExpr::mkField(std::move(base), access, (int)m.disp, ft);
+                        bb.stmts.push_back(IRStmt::mkStore(std::move(fld), std::move(val), storeSize));
                         return;
                     }
                 }
