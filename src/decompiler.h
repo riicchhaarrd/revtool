@@ -2690,6 +2690,12 @@ private:
             }
             case IRStmtKind::Store: {
                 std::string val = stmt.expr ? emitExpr(stmt.expr.get()) : "0";
+                // When storing from an array variable, use [0] to get first element
+                if (stmt.expr && stmt.expr->op == IROp::Var && stmt.expr->typeRef != NullType) {
+                    auto *vti = m_types.resolveType(stmt.expr->typeRef);
+                    if (vti && vti->kind == StabsTypeKind::Array)
+                        val += "[0]";
+                }
                 if (!stmt.addr) break;
                 auto *a = stmt.addr.get();
                 struct AddrGuard { int &d; AddrGuard(int &d):d(d){d++;} ~AddrGuard(){d--;} } _ag(m_addrDepth);
@@ -2754,12 +2760,26 @@ private:
                     }
                     if (!usedArrayNotation) {
                         // Try type-aware struct field access
+                        // Skip for interior pointers (vars from &struct->field)
                         TypeRef stBaseType = exprType(a->kids[0].get());
+                        bool stIsInterior = false;
+                        if (a->kids[0]->op == IROp::Var && !a->kids[0]->name.empty())
+                            stIsInterior = m_interiorPtrVars.count(a->kids[0]->name) > 0;
                         std::string access;
-                        if (stBaseType != NullType && m_types.isStructPointer(stBaseType)) {
+                        if (!stIsInterior && stBaseType != NullType && m_types.isStructPointer(stBaseType)) {
                             TypeRef structRef = m_types.getPointedStruct(stBaseType);
                             if (structRef != NullType)
                                 access = m_types.formatFieldAccess(structRef, off);
+                            // Validate: don't resolve to a large struct field (interior pointer)
+                            if (!access.empty()) {
+                                auto *field = m_types.findFieldAtOffset(structRef, off);
+                                if (field && field->typeRef != NullType) {
+                                    auto *ft = m_types.resolveType(field->typeRef);
+                                    if (ft && (ft->kind == StabsTypeKind::Struct ||
+                                               ft->kind == StabsTypeKind::Union) && ft->sizeBytes > 4)
+                                        access.clear();
+                                }
+                            }
                         }
                         if (!access.empty()) {
                             out += pad(indent) + QString::fromStdString(
@@ -2826,7 +2846,6 @@ private:
                     auto *atInfo = (at != NullType) ? m_types.resolveType(at) : nullptr;
                     if (atInfo && atInfo->kind == StabsTypeKind::Pointer) {
                         auto *tgt = m_types.resolveType(atInfo->targetType);
-                        // Scalar pointer (float*, int*): use ptr[0] = val
                         if (tgt && tgt->sizeBytes > 0 && tgt->sizeBytes <= 8 &&
                             tgt->kind != StabsTypeKind::Struct &&
                             tgt->kind != StabsTypeKind::Union) {
@@ -2836,6 +2855,10 @@ private:
                             out += pad(indent) + QString::fromStdString(
                                 "*(" + storeCast + " *)(" + addrS + ") = " + val) + ";\n";
                         }
+                    } else if (atInfo && atInfo->kind == StabsTypeKind::Array) {
+                        // Array at offset 0: arr[0] = val
+                        out += pad(indent) + QString::fromStdString(
+                            addrS + "[0] = " + val) + ";\n";
                     } else {
                         out += pad(indent) + QString::fromStdString(
                             "*(" + storeCast + " *)((char *)(" + addrS + ")) = " + val) + ";\n";
@@ -2849,6 +2872,11 @@ private:
             }
             case IRStmtKind::VarSet: {
                 std::string val = stmt.expr ? emitExpr(stmt.expr.get()) : "0";
+                // Array var as value source → add [0] (only for direct Vars, not temps)
+                if (stmt.expr && stmt.expr->op == IROp::Var && stmt.expr->typeRef != NullType) {
+                    auto *vsti = m_types.resolveType(stmt.expr->typeRef);
+                    if (vsti && vsti->kind == StabsTypeKind::Array) val += "[0]";
+                }
                 std::string dest = stmt.destVar;
                 // Suppress parameter slot reuse when assigning a string literal to a param
                 // (clear indicator of Com_Error/Com_Printf call argument setup)
@@ -3167,15 +3195,11 @@ private:
                 break;
             }
             case IROp::Var: {
-                // Only sanitize names that aren't numeric literals or expressions
                 std::string vn = e->name;
                 if (!vn.empty() && (isdigit(vn[0]) || vn[0] == '-' || vn[0] == '"' || vn[0] == '('))
                     result = vn;
                 else
                     result = cName(vn);
-                // Don't add [0] here — array-typed Vars used in expressions are
-                // handled by the caller (Store/Load/VarSet) or by context.
-                // Adding [0] unconditionally breaks synthetic stack vars.
                 break;
             }
             case IROp::String: result = e->name; break;
@@ -3353,6 +3377,9 @@ private:
                                 result = emitExpr(addr) + "[0]";
                             else
                                 result = "*(" + emitExpr(addr) + ")";
+                        } else if (at && at->kind == StabsTypeKind::Array) {
+                            // Array variable at offset 0: arr[0]
+                            result = emitExpr(addr) + "[0]";
                         } else {
                             result = "*(" + emitExpr(addr) + ")";
                         }
@@ -3413,7 +3440,20 @@ private:
                         }
                     }
                 } else {
-                    result = "&" + emitExpr(inner);
+                    // For array variables, &array == array (same address)
+                    // Skip the & to avoid producing float(*)[3] instead of float*
+                    bool isArray = false;
+                    if (inner && inner->op == IROp::Var && !inner->name.empty()) {
+                        TypeRef vt = exprType(inner);
+                        if (vt != NullType) {
+                            auto *vti = m_types.resolveType(vt);
+                            isArray = vti && vti->kind == StabsTypeKind::Array;
+                        }
+                    }
+                    if (isArray)
+                        result = emitExpr(inner);
+                    else
+                        result = "&" + emitExpr(inner);
                 }
                 break;
             }
@@ -3820,6 +3860,17 @@ private:
             case IROp::Ult: case IROp::Ule: case IROp::Ugt: case IROp::Uge: {
                 std::string lhs = emitExpr(e->kids[0].get());
                 std::string rhs = emitExpr(e->kids[1].get());
+                // Array-typed Vars in arithmetic should use [0] (first element)
+                auto fixArrayVar = [&](std::string &s, IRExpr *kid) {
+                    if (!kid) return;
+                    if (kid->op == IROp::Var && kid->typeRef != NullType) {
+                        auto *kt = m_types.resolveType(kid->typeRef);
+                        if (kt && kt->kind == StabsTypeKind::Array)
+                            s += "[0]";
+                    }
+                };
+                fixArrayVar(lhs, e->kids[0].get());
+                fixArrayVar(rhs, e->kids[1].get());
                 std::string op;
                 IROp cmp = negate ? negateOp(e->op) : e->op;
                 switch (cmp) {

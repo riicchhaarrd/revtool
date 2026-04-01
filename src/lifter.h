@@ -759,6 +759,7 @@ private:
     bool     m_hasPIC = false;
     uint32_t m_picBase = 0;
     uint32_t m_picThunkAddr = 0;
+    bool     m_suppressNextNot = false;  // after repne scasb (strlen), skip next NOT
 
     // Param/local lookup
     std::map<int, const StabsTypedVar*> m_paramByOffset;
@@ -1060,8 +1061,23 @@ private:
                     if (!access.empty()) {
                         auto *field = m_types.findFieldAtOffset(structRef, (int)m.disp);
                         TypeRef ft = field ? field->typeRef : NullType;
-                        base->typeRef = baseType;
-                        return IRExpr::mkField(std::move(base), access, (int)m.disp, ft);
+                        // Skip if field is a large struct/union — accessing it as
+                        // scalar means we're reading INTO the sub-struct, not the
+                        // struct itself. Fall through to generic access.
+                        if (ft != NullType) {
+                            auto *fti = m_types.resolveType(ft);
+                            if (fti && (fti->kind == StabsTypeKind::Struct ||
+                                        fti->kind == StabsTypeKind::Union) &&
+                                fti->sizeBytes > 4) {
+                                // Sub-struct access — skip
+                            } else {
+                                base->typeRef = baseType;
+                                return IRExpr::mkField(std::move(base), access, (int)m.disp, ft);
+                            }
+                        } else {
+                            base->typeRef = baseType;
+                            return IRExpr::mkField(std::move(base), access, (int)m.disp, ft);
+                        }
                     }
                 }
             }
@@ -1215,9 +1231,19 @@ private:
                     if (!access.empty()) {
                         auto *field = m_types.findFieldAtOffset(structRef, (int)m.disp);
                         TypeRef ft = field ? field->typeRef : NullType;
-                        auto fld = IRExpr::mkField(std::move(base), access, (int)m.disp, ft);
-                        bb.stmts.push_back(IRStmt::mkStore(std::move(fld), std::move(val), storeSize));
-                        return;
+                        // Skip sub-struct fields (store is into the sub-struct, not to it)
+                        bool skip = false;
+                        if (ft != NullType) {
+                            auto *fti = m_types.resolveType(ft);
+                            if (fti && (fti->kind == StabsTypeKind::Struct ||
+                                        fti->kind == StabsTypeKind::Union) && fti->sizeBytes > 4)
+                                skip = true;
+                        }
+                        if (!skip) {
+                            auto fld = IRExpr::mkField(std::move(base), access, (int)m.disp, ft);
+                            bb.stmts.push_back(IRStmt::mkStore(std::move(fld), std::move(val), storeSize));
+                            return;
+                        }
                     }
                 }
             }
@@ -1612,6 +1638,10 @@ private:
             return;
         }
         if (mn == "not" && n == 1) {
+            if (m_suppressNextNot) {
+                m_suppressNextNot = false;
+                return; // part of repne scasb (strlen) idiom — already handled
+            }
             auto v = readOp(o[0]);
             if (v) writeOp(o[0], IRExpr::mkUnary(IROp::Not, std::move(v)), bb);
             return;
@@ -2033,11 +2063,13 @@ private:
             }
             int t = func.newTemp();
             bb.stmts.push_back(IRStmt::mkAssign(t, IRExpr::mkCall(fname, std::move(args))));
-            // Assign strlen result directly to ECX.
-            // Note: repne scasb produces ~(len+1) in ECX, but we abstract to strlen().
-            // The subsequent xor edi,-1 pattern will produce (strlen ^ -1) in the output.
-            // For correct C: the original pattern is strlen(s)+1 (including null terminator).
+            // repne scasb produces ~(strlen+1) in ECX. The typical idiom is:
+            //   repne scasb; not ecx  → ecx = strlen+1
+            //   lea reg, -1(%ecx, %esi) → reg = strlen + esi
+            // Assign strlen() directly to ECX. Suppress the next 'not ecx' (part of idiom).
+            // The lea's -1 cancels the +1 that NOT would produce.
             assignReg(X86_REG_ECX, IRExpr::mkTemp(t), bb);
+            m_suppressNextNot = true;
             return;
         }
         if (mn == "movsb" || (mn == "movsd" && n == 0) || mn == "movsw") {

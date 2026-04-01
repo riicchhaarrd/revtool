@@ -511,6 +511,7 @@ private:
 
                     if (convergence >= 0 && trueB != convergence && falseB != convergence) {
                         // If/else: both arms converge
+                        // Structure both arms and check for excessive duplication.
                         auto ifNode = StructNode::mkIf(last.expr.get(), false);
 
                         std::vector<bool> thenVisited = visited;
@@ -519,7 +520,46 @@ private:
                         std::vector<bool> elseVisited = visited;
                         ifNode->elseNode = structureRegion(falseB, convergence, elseVisited);
 
-                        for (int vi = 0; vi < n; ++vi) if (thenVisited[vi] || elseVisited[vi]) visited[vi] = true;
+                        // Detect duplication: count blocks visited by both arms
+                        int thenCount = 0, elseCount = 0, sharedCount = 0;
+                        for (int vi = 0; vi < n; ++vi) {
+                            bool inThen = thenVisited[vi] && !visited[vi];
+                            bool inElse = elseVisited[vi] && !visited[vi];
+                            if (inThen) thenCount++;
+                            if (inElse) elseCount++;
+                            if (inThen && inElse) sharedCount++;
+                        }
+                        // If >30% of blocks are shared, use goto for else arm
+                        int totalArms = thenCount + elseCount;
+                        if (sharedCount > 0 && totalArms > 6 &&
+                            sharedCount * 100 / std::max(1, totalArms) > 30) {
+                            // Too much duplication — use goto for the larger arm
+                            ifNode->elseNode.reset();
+                            if (thenCount >= elseCount) {
+                                // Keep else inline, use goto for then
+                                ifNode->children.clear();
+                                ifNode->children.push_back(StructNode::mkGoto(trueB));
+                                ifNode->negated = false;
+                                // Re-structure else as the inline arm
+                                std::vector<bool> ev2 = visited;
+                                auto elsBody = structureRegion(falseB, convergence, ev2);
+                                ifNode->elseNode = std::move(elsBody);
+                                for (int vi = 0; vi < n; ++vi)
+                                    if (ev2[vi]) visited[vi] = true;
+                            } else {
+                                ifNode->children.clear();
+                                std::vector<bool> tv2 = visited;
+                                ifNode->children.push_back(structureRegion(trueB, convergence, tv2));
+                                ifNode->elseNode = std::make_unique<StructNode>();
+                                ifNode->elseNode->kind = StructKind::Block;
+                                ifNode->elseNode->children.push_back(StructNode::mkGoto(falseB));
+                                for (int vi = 0; vi < n; ++vi)
+                                    if (tv2[vi]) visited[vi] = true;
+                            }
+                        } else {
+                            for (int vi = 0; vi < n; ++vi)
+                                if (thenVisited[vi] || elseVisited[vi]) visited[vi] = true;
+                        }
 
                         block->children.push_back(std::move(ifNode));
                         cur = convergence;
