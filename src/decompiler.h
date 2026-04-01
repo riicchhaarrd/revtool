@@ -4010,7 +4010,17 @@ private:
                     }
                 }
 
-                result = lhs + op + rhs;
+                // For unsigned comparisons (Ult/Ule/Ugt/Uge), add (unsigned) cast
+                // to ensure GCC generates unsigned comparison instructions (ja/jb/setbe etc.)
+                bool isUnsigned = (cmp == IROp::Ult || cmp == IROp::Ule ||
+                                   cmp == IROp::Ugt || cmp == IROp::Uge);
+                if (isUnsigned && !lhs.empty() &&
+                    lhs.find("(unsigned)") == std::string::npos &&
+                    lhs.find("(unsigned int)") == std::string::npos) {
+                    result = "(unsigned)(" + lhs + ")" + op + rhs;
+                } else {
+                    result = lhs + op + rhs;
+                }
                 if (negate) negate = false; // already handled
                 break;
             }
