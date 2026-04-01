@@ -121,6 +121,11 @@ typedef int JDIMENSION; typedef int JSAMPLE; typedef short JCOEF;
 typedef int boolean;
 typedef short DCTELEM;
 typedef int *JSAMPARRAY; typedef int *JSAMPROW; typedef int *JBLOCKROW;
+/* Dvar struct types (needed for -> field access) */
+union DvarValue { int enabled; int integer; float value; float *vector; const char *string; unsigned char color[4]; };
+union DvarLimits { struct { int min; int max; } integer; struct { float min; float max; } value; int enumCount; };
+struct dvar_s { const char *name; unsigned short flags; unsigned char type; int modified; union DvarValue current; union DvarValue latched; union DvarValue reset; union DvarLimits domain; struct dvar_s *next; struct dvar_s *hashNext; };
+typedef struct dvar_s dvar_t;
 /* Misc missing */
 typedef int scr_anim_t;
 typedef struct { int _[32]; } SpeexBits;
@@ -133,7 +138,6 @@ typedef struct { int _[64]; } inflate_state;
 DVAR_PROTOS = '''
 #ifndef DVAR_PROTOS_DEFINED
 #define DVAR_PROTOS_DEFINED
-typedef int dvar_t;
 dvar_t *Dvar_RegisterBool(const char*,int,int);
 dvar_t *Dvar_RegisterInt(const char*,int,int,int,int);
 dvar_t *Dvar_RegisterFloat(const char*,float,float,float,int);
@@ -415,8 +419,13 @@ def compile_to_asm(c_code, orig_check=None):
     for name in extracted:
         emit_type(name)
     types_block = '\n'.join(ordered)
-    # Add Dvar prototypes only if no dvar_t struct is already extracted
-    dvar_block = DVAR_PROTOS if 'dvar_t' not in extracted else ''
+    # Always include Dvar function prototypes.
+    # Only include the 'typedef int dvar_t' stub if the real dvar_t isn't extracted.
+    # dvar_t struct is defined in STUBS. Always include DVAR_PROTOS for
+    # the Dvar function prototypes (the typedef was removed from DVAR_PROTOS).
+    dvar_block = DVAR_PROTOS
+    # Remove any Dvar function prototypes from types_block/func_protos to avoid conflicts
+    func_protos = re.sub(r'^.*\bDvar_\w+\b.*\n', '', func_protos, flags=re.MULTILINE)
     full = STUBS + '\n' + dvar_block + '\n' + types_block + '\n' + func_protos + '\n' + c_code
 
     # Try compile with extracted types
@@ -624,12 +633,18 @@ def compile_to_asm(c_code, orig_check=None):
                 struct_type = None
                 if arrow_field:
                     field_name = arrow_field.group(1)
-                    # Search extracted struct definitions for this field
-                    for tname, tdef in extracted.items():
-                        if re.search(r'\b' + re.escape(field_name) + r'\b', tdef) and \
-                           'struct' in tdef:
-                            struct_type = tname
+                    # Search for this field in extracted types AND STUBS
+                    # Check STUBS first (dvar_s is defined there)
+                    for struct_m in re.finditer(r'struct\s+(\w+)\s*\{([^}]+)\}', STUBS):
+                        if re.search(r'\b' + re.escape(field_name) + r'\b', struct_m.group(2)):
+                            struct_type = 'struct ' + struct_m.group(1)
                             break
+                    if not struct_type:
+                        for tname, tdef in extracted.items():
+                            if re.search(r'\b' + re.escape(field_name) + r'\b', tdef) and \
+                               'struct' in tdef:
+                                struct_type = tname
+                                break
                 if struct_type:
                     stubs += f'{qual}{struct_type} *{name};\n'
                 else:
