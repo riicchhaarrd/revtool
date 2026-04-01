@@ -809,6 +809,19 @@ private:
     // Register → temp mapping (current state)
     std::map<x86_reg, int> m_regTemps;
 
+    // Register → global struct source: tracks when a register was loaded from
+    // a global variable that is a struct with function pointer fields.
+    // Used to resolve indirect calls like call [reg + offset] → globalName.fieldName(args)
+    struct RegGlobalInfo {
+        std::string globalName;    // e.g. "ri"
+        TypeRef     typeRef;       // STABS type of the global
+    };
+    std::map<x86_reg, RegGlobalInfo> m_regGlobalSource;
+
+    // Register → resolved function name: when mov reg, [globalStruct + offset]
+    // resolves the field to a function pointer name, track it for call reg.
+    std::map<x86_reg, std::string> m_regFuncPtrName;
+
     // Flags state: which temp holds the flag result and what comparison produced it
     struct FlagsState {
         int   temp = -1;
@@ -1511,6 +1524,43 @@ private:
             auto src = readOp(o[1]);
             if (!src) return;
             TypeRef t = src->typeRef;
+            // Track register-to-global source for indirect call resolution.
+            if (o[0].type == X86_OP_REG) {
+                x86_reg canon = canonReg(o[0].reg);
+                m_regGlobalSource.erase(canon);
+                m_regFuncPtrName.erase(canon);
+
+                if (o[1].type == X86_OP_MEM) {
+                    auto &smem = o[1].mem;
+                    if (smem.base == X86_REG_INVALID && smem.index == X86_REG_INVALID &&
+                        smem.disp != 0) {
+                        // mov reg, [addr] — direct address load
+                        // Check if the loaded value is a named global with struct type
+                        if (src->op == IROp::Var && !src->name.empty()) {
+                            auto *g = m_types.globalByName(src->name);
+                            if (g && g->typeRef != NullType) {
+                                auto *gt = m_types.resolveType(g->typeRef);
+                                if (gt && (gt->kind == StabsTypeKind::Struct ||
+                                           gt->kind == StabsTypeKind::ForwardRef)) {
+                                    m_regGlobalSource[canon] = {src->name, g->typeRef};
+                                }
+                            }
+                        }
+                    } else if (smem.base != X86_REG_INVALID && smem.index == X86_REG_INVALID &&
+                               smem.disp >= 0) {
+                        // mov reg, [base + offset] — check if base is a global struct
+                        auto git = m_regGlobalSource.find(canonReg(smem.base));
+                        if (git != m_regGlobalSource.end()) {
+                            std::string fieldName = m_types.formatFieldAccess(
+                                git->second.typeRef, (int)smem.disp);
+                            if (!fieldName.empty()) {
+                                m_regFuncPtrName[canon] =
+                                    git->second.globalName + "." + fieldName;
+                            }
+                        }
+                    }
+                }
+            }
             writeOp(o[0], std::move(src), bb, t);
             return;
         }
@@ -1955,9 +2005,24 @@ private:
                     // where reg was loaded from [this] (i.e., vtable pointer)
                     auto &mem = o[0].mem;
                     if (mem.base != X86_REG_INVALID && mem.index == X86_REG_INVALID && mem.disp >= 0) {
-                        int slot = (int)mem.disp / 4;
-                        char buf[32]; snprintf(buf, sizeof(buf), "vfunc_%d", slot);
-                        target = buf;
+                        // Check if base register came from a known global struct
+                        // (e.g., ri = refimport_t with function pointer fields)
+                        bool resolved = false;
+                        auto git = m_regGlobalSource.find(canonReg(mem.base));
+                        if (git != m_regGlobalSource.end()) {
+                            // Look up field name at the given offset in the struct
+                            std::string fieldName = m_types.formatFieldAccess(
+                                git->second.typeRef, (int)mem.disp);
+                            if (!fieldName.empty()) {
+                                target = git->second.globalName + "." + fieldName;
+                                resolved = true;
+                            }
+                        }
+                        if (!resolved) {
+                            int slot = (int)mem.disp / 4;
+                            char buf[32]; snprintf(buf, sizeof(buf), "vfunc_%d", slot);
+                            target = buf;
+                        }
                     } else if (mem.base == X86_REG_INVALID && mem.index != X86_REG_INVALID) {
                         // call [reg*4 + table_addr] — function pointer table
                         char buf[64]; snprintf(buf, sizeof(buf), "fptable_%X_%d",
@@ -1973,10 +2038,16 @@ private:
                     }
                 } else if (o[0].type == X86_OP_REG) {
                     // call reg — function pointer in register
-                    auto tgt = readReg(o[0].reg);
-                    int fpTemp = func.newTemp();
-                    bb.stmts.push_back(IRStmt::mkAssign(fpTemp, std::move(tgt)));
-                    target = "t" + std::to_string(fpTemp);
+                    // Check if reg was loaded from a known global struct field
+                    auto fit = m_regFuncPtrName.find(canonReg(o[0].reg));
+                    if (fit != m_regFuncPtrName.end()) {
+                        target = fit->second;
+                    } else {
+                        auto tgt = readReg(o[0].reg);
+                        int fpTemp = func.newTemp();
+                        bb.stmts.push_back(IRStmt::mkAssign(fpTemp, std::move(tgt)));
+                        target = "t" + std::to_string(fpTemp);
+                    }
                 } else {
                     target = "???";
                 }

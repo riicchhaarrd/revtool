@@ -1344,7 +1344,9 @@ public:
             static const char *floatFuncs[] = {
                 "AngleDelta", "AngleNormalize180", "AngleNormalize180Accurate",
                 "PitchForYawOnNormal", "Vec3Normalize", "Vec2Normalize",
-                "floorf", "sinf", "cosf", "sqrtf", "fminf", "fmaxf", nullptr
+                "floorf", "ceilf", "sinf", "cosf", "tanf", "sqrtf", "fabsf",
+                "asinf", "acosf", "atanf", "atan2f", "fmodf", "powf",
+                "fminf", "fmaxf", "Scr_GetFloat", nullptr
             };
             QStringList cl = cleaned.split('\n');
             // Find int var_X declarations where all uses are float-like
@@ -1370,9 +1372,10 @@ public:
                             }
                         }
                     }
-                    // Check if used in float context (0.0f comparison, fabsf, etc.)
+                    // Check if used in float context (0.0f comparison, fabsf, mulsd, etc.)
                     if (line.contains(varName) &&
-                        (line.contains("0.0f") || line.contains("fabsf"))) {
+                        (line.contains("0.0f") || line.contains("fabsf") ||
+                         line.contains("57.29") || line.contains("Scr_AddFloat"))) {
                         assignedFromFloat = true;
                     }
                     // Check if used as a pure integer (bit ops, array index, etc.)
