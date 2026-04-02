@@ -692,8 +692,10 @@ private:
                     structName == "short" || structName == "const" || structName == "signed")
                     continue;
                 for (auto &[tref, ti] : m_typeTable.allTypes()) {
-                    if ((ti.kind == StabsTypeKind::Struct || ti.kind == StabsTypeKind::Union) &&
-                        ti.name == structName && !ti.fields.empty()) {
+                    if ((ti.kind == StabsTypeKind::Struct || ti.kind == StabsTypeKind::Union ||
+                         ti.kind == StabsTypeKind::ForwardRef) &&
+                        (ti.name == structName || ti.forwardTag == structName) &&
+                        (ti.kind == StabsTypeKind::ForwardRef || !ti.fields.empty())) {
                         // Found the struct. Create a pointer type reference.
                         // Look for an existing pointer-to-struct type
                         for (auto &[pref, pti] : m_typeTable.allTypes()) {

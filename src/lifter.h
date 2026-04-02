@@ -215,6 +215,41 @@ public:
             addrToBlock[addr] = id;
         }
 
+        // ── Pass 2b: pre-compute predecessors for CFG-aware lifting ──
+        int nBlocks = (int)func.blocks.size();
+        std::vector<std::set<int>> prePreds(nBlocks);
+        {
+            int prevBlk = 0;
+            for (size_t i = 0; i < funcEndIdx; ++i) {
+                auto bit2 = addrToBlock.find(insn[i].address);
+                if (bit2 != addrToBlock.end()) prevBlk = bit2->second;
+                bool isJmp = false, isRet = false, isCond = false;
+                if (insn[i].detail) {
+                    for (uint8_t g = 0; g < insn[i].detail->groups_count; ++g) {
+                        if (insn[i].detail->groups[g] == CS_GRP_JUMP) isJmp = true;
+                        if (insn[i].detail->groups[g] == CS_GRP_RET) isRet = true;
+                    }
+                }
+                if (isJmp && std::string(insn[i].mnemonic) != "jmp") isCond = true;
+                if (isJmp && insn[i].detail && insn[i].detail->x86.op_count > 0 &&
+                    insn[i].detail->x86.operands[0].type == X86_OP_IMM) {
+                    uint32_t tgt = (uint32_t)insn[i].detail->x86.operands[0].imm;
+                    auto tit = addrToBlock.find(tgt);
+                    if (tit != addrToBlock.end() && tit->second < nBlocks)
+                        prePreds[tit->second].insert(prevBlk);
+                    if (isCond && i + 1 < funcEndIdx) {
+                        auto fit = addrToBlock.find(insn[i+1].address);
+                        if (fit != addrToBlock.end() && fit->second < nBlocks)
+                            prePreds[fit->second].insert(prevBlk);
+                    }
+                } else if (!isJmp && !isRet && i + 1 < funcEndIdx) {
+                    auto nbit = addrToBlock.find(insn[i+1].address);
+                    if (nbit != addrToBlock.end() && nbit->second != prevBlk && nbit->second < nBlocks)
+                        prePreds[nbit->second].insert(prevBlk);
+                }
+            }
+        }
+
         // ── Pass 3: detect prologue & PIC thunk ─────────────────────
         m_hasFrame = false; m_frameSize = 0;
         m_hasPIC = false; m_picBase = 0;
@@ -443,17 +478,8 @@ public:
             if (bit != addrToBlock.end()) {
                 int prevBlock = curBlock;
                 curBlock = bit->second;
-                // At loop header blocks, clear register state so loop-body reads
-                // create fresh temps instead of using pre-loop values.
-                // Detect: block has MULTIPLE predecessors (one from before the loop,
-                // one from the loop back-edge). A block with multiple predecessors
-                // that isn't the entry block is potentially a loop header.
+                // At loop header blocks, create phi temps
                 if (curBlock > 0 && loopHeaderAddrs.count(in.address)) {
-                    // At loop headers, assign registers from a Var reference
-                    // (not from the pre-loop temp) so the emitter doesn't
-                    // const-propagate the initial value.
-                    // The var name "loop_REG" acts as a placeholder that
-                    // the pass 8 phi copy will replace with the correct value.
                     auto &hdr = func.blocks[curBlock];
                     static const x86_reg gpRegs[] = {
                         X86_REG_EAX, X86_REG_EBX, X86_REG_ECX,
@@ -465,8 +491,6 @@ public:
                             int oldTemp = it->second;
                             int newTemp = func.newTemp(func.tempType(oldTemp));
                             func.phiTemps.insert(newTemp);
-                            // Assign from old temp — gives a definition for the emitter.
-                            // Pass 8 will later add the back-edge copy.
                             hdr.stmts.push_back(IRStmt::mkAssign(newTemp,
                                 IRExpr::mkTemp(oldTemp, func.tempType(oldTemp)),
                                 func.tempType(oldTemp)));
@@ -878,18 +902,101 @@ private:
     // Register → temp mapping (current state)
     std::map<x86_reg, int> m_regTemps;
 
-    // Register → global struct source: tracks when a register was loaded from
-    // a global variable that is a struct with function pointer fields.
-    // Used to resolve indirect calls like call [reg + offset] → globalName.fieldName(args)
+    // Register → global struct source
     struct RegGlobalInfo {
-        std::string globalName;    // e.g. "ri"
-        TypeRef     typeRef;       // STABS type of the global
+        std::string globalName;
+        TypeRef     typeRef;
     };
     std::map<x86_reg, RegGlobalInfo> m_regGlobalSource;
 
-    // Register → resolved function name: when mov reg, [globalStruct + offset]
-    // resolves the field to a function pointer name, track it for call reg.
+    // Register → resolved function name
     std::map<x86_reg, std::string> m_regFuncPtrName;
+
+    // Per-block register state for CFG-aware tracking
+    struct BlockLiftState {
+        std::map<x86_reg, int> regTemps;
+        std::map<x86_reg, RegGlobalInfo> regGlobalSource;
+        std::map<x86_reg, std::string> regFuncPtrName;
+        int flagsTemp = -1;
+        IROp flagsOp = IROp::Eq;
+        std::vector<int> fpuStack;
+    };
+    std::map<int, BlockLiftState> m_blockExitState;
+
+    void saveBlockState(int blockId) {
+        auto &s = m_blockExitState[blockId];
+        s.regTemps = m_regTemps;
+        s.regGlobalSource = m_regGlobalSource;
+        s.regFuncPtrName = m_regFuncPtrName;
+        s.flagsTemp = m_flags.temp;
+        s.flagsOp = m_flags.op;
+        s.fpuStack = m_fpuStack;
+    }
+
+    void restoreBlockState(const BlockLiftState &s) {
+        m_regTemps = s.regTemps;
+        m_regGlobalSource = s.regGlobalSource;
+        m_regFuncPtrName = s.regFuncPtrName;
+        m_flags.temp = s.flagsTemp;
+        m_flags.op = s.flagsOp;
+        m_flags.lhs.reset();
+        m_flags.rhs.reset();
+        m_fpuStack = s.fpuStack;
+    }
+
+    void mergeBlockState(int blockId, const std::vector<std::set<int>> &prePreds, IRFunc &func) {
+        auto &preds = prePreds[blockId];
+        // Collect processed predecessor states
+        std::vector<const BlockLiftState*> predStates;
+        for (int p : preds) {
+            auto it = m_blockExitState.find(p);
+            if (it != m_blockExitState.end())
+                predStates.push_back(&it->second);
+        }
+        if (predStates.empty()) return;  // no predecessors processed; keep current
+        if (predStates.size() == 1) { restoreBlockState(*predStates[0]); return; }
+
+        // Multiple predecessors: merge register state.
+        // At loop headers, create phi temps for registers that disagree
+        // between predecessors, so the loop body uses fresh temps instead
+        // of stale values from the pre-loop path.
+        m_regGlobalSource.clear();
+        m_regFuncPtrName.clear();
+        m_flags = {-1, IROp::Eq, nullptr, nullptr};
+        m_fpuStack.clear();
+
+        static const x86_reg gpRegs[] = {
+            X86_REG_EAX, X86_REG_EBX, X86_REG_ECX,
+            X86_REG_EDX, X86_REG_ESI, X86_REG_EDI
+        };
+        auto &hdr = func.blocks[blockId];
+        std::map<x86_reg, int> newRegTemps;
+        for (x86_reg reg : gpRegs) {
+            int firstTemp = -1;
+            bool allSame = true;
+            bool anyMissing = false;
+            for (auto *ps : predStates) {
+                auto it = ps->regTemps.find(reg);
+                if (it == ps->regTemps.end()) { anyMissing = true; break; }
+                if (firstTemp < 0) firstTemp = it->second;
+                else if (it->second != firstTemp) allSame = false;
+            }
+            if (anyMissing) continue;
+            if (allSame) {
+                newRegTemps[reg] = firstTemp;
+            } else {
+                // Disagreement: create a phi temp so the loop body gets
+                // a fresh temp instead of using a stale pre-loop value.
+                TypeRef t = func.tempType(firstTemp);
+                int phiTemp = func.newTemp(t);
+                func.phiTemps.insert(phiTemp);
+                hdr.stmts.push_back(IRStmt::mkAssign(phiTemp,
+                    IRExpr::mkTemp(firstTemp, t), t));
+                newRegTemps[reg] = phiTemp;
+            }
+        }
+        m_regTemps = newRegTemps;
+    }
 
     // Flags state: which temp holds the flag result and what comparison produced it
     struct FlagsState {
