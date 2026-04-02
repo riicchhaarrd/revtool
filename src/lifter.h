@@ -1971,6 +1971,9 @@ private:
 
         // ── Return ──────────────────────────────────────────────────
         if (mn == "ret") {
+            fprintf(stderr, "RET_LIFTER: retType=(%d,%d) fpuStack=%d lastFpuTop=%d\n",
+                    m_func->returnType.first, m_func->returnType.second,
+                    (int)m_fpuStack.size(), m_lastFpuTop);
             // Return handling
             // Check if return type is void (including through typedef chains)
             if (m_func->returnType != NullType) {

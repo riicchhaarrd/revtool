@@ -816,6 +816,14 @@ public:
     static QString cleanupOutput(const QString &code) {
         // Pre-pass: fix &EXPR->field_X patterns → (EXPR + 0xX)
         QString cleaned = code;
+        auto isSimpleIdentifier = [](const QString &name) {
+            if (name.isEmpty()) return false;
+            for (int i = 0; i < name.size(); ++i) {
+                QChar c = name[i];
+                if (!c.isLetterOrNumber() && c != '_') return false;
+            }
+            return true;
+        };
         // &0->field_X → 0xX
         cleaned.replace("&0->field_", "0x__F");
         cleaned.replace("&(0)->field_", "0x__F");
@@ -885,9 +893,8 @@ public:
                 QString srcName = trimmed.mid(eq + 3, trimmed.size() - eq - 4).trimmed();
                 // Both must be simple identifiers
                 if (varName.isEmpty() || srcName.isEmpty()) continue;
-                bool varOk = true, srcOk = true;
-                for (auto c : varName) if (!c.isLetterOrNumber() && c != '_') { varOk = false; break; }
-                for (auto c : srcName) if (!c.isLetterOrNumber() && c != '_') { srcOk = false; break; }
+                bool varOk = isSimpleIdentifier(varName);
+                bool srcOk = isSimpleIdentifier(srcName);
                 if (!varOk || !srcOk || srcName[0].isDigit()) continue;
                 if (varName == srcName) continue;
                 // Check: is there a declaration "TYPE *varName;" earlier in the function?
@@ -943,8 +950,7 @@ public:
                 if (eqPos > 0) {
                     QString varName = line.left(eqPos).trimmed();
                     // varName should be a simple identifier
-                    bool ok = !varName.isEmpty();
-                    for (auto c : varName) if (!c.isLetterOrNumber() && c != '_') { ok = false; break; }
+                    bool ok = isSimpleIdentifier(varName);
                     if (ok) interiorPtrs[varName] = 4;
                 }
                 pos2 += 4;
@@ -1387,8 +1393,15 @@ public:
                         (line.contains("= v") || line.contains("= (v"))) {
                         // Check if the RHS variable is declared as float
                         for (int k = 0; k < i; ++k) {
-                            if (cl[k].trimmed().startsWith("float ") &&
-                                line.contains(cl[k].trimmed().mid(6).split(';').first().trimmed())) {
+                            QString decl = cl[k].trimmed();
+                            QString declName;
+                            if (decl.startsWith("float ")) {
+                                declName = decl.mid(6);
+                                int semi = declName.indexOf(';');
+                                if (semi >= 0) declName = declName.left(semi);
+                                declName = declName.trimmed();
+                            }
+                            if (!declName.isEmpty() && line.contains(declName)) {
                                 assignedFromFloat = true;
                                 break;
                             }
