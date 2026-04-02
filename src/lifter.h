@@ -2,6 +2,7 @@
 #include "ir.h"
 #include "macho.h"
 #include <capstone/capstone.h>
+#include <list>
 #include <map>
 #include <set>
 #include <string>
@@ -19,6 +20,7 @@ public:
 
     // Lift one function into an IRFunc.  Returns empty blocks on failure.
     IRFunc liftFunction(uint32_t funcAddr) {
+
         IRFunc func;
         const StabsFunction *sfn = m_mf.stabsFunctionAt(funcAddr);
         uint32_t endAddr;
@@ -46,6 +48,9 @@ public:
             func.params = sfn->params;
             func.locals = sfn->locals;
             func.sourceFileIdx = sfn->sourceFileIdx;
+            m_curSourceFileIdx = sfn->sourceFileIdx;
+        } else {
+            m_curSourceFileIdx = -1;
         }
 
         // Disassemble
@@ -214,6 +219,41 @@ public:
             addrToBlock[addr] = id;
         }
 
+        // ── Pass 2b: pre-compute predecessors for CFG-aware lifting ──
+        int nBlocks = (int)func.blocks.size();
+        std::vector<std::set<int>> prePreds(nBlocks);
+        {
+            int prevBlk = 0;
+            for (size_t i = 0; i < funcEndIdx; ++i) {
+                auto bit2 = addrToBlock.find(insn[i].address);
+                if (bit2 != addrToBlock.end()) prevBlk = bit2->second;
+                bool isJmp = false, isRet = false, isCond = false;
+                if (insn[i].detail) {
+                    for (uint8_t g = 0; g < insn[i].detail->groups_count; ++g) {
+                        if (insn[i].detail->groups[g] == CS_GRP_JUMP) isJmp = true;
+                        if (insn[i].detail->groups[g] == CS_GRP_RET) isRet = true;
+                    }
+                }
+                if (isJmp && std::string(insn[i].mnemonic) != "jmp") isCond = true;
+                if (isJmp && insn[i].detail && insn[i].detail->x86.op_count > 0 &&
+                    insn[i].detail->x86.operands[0].type == X86_OP_IMM) {
+                    uint32_t tgt = (uint32_t)insn[i].detail->x86.operands[0].imm;
+                    auto tit = addrToBlock.find(tgt);
+                    if (tit != addrToBlock.end() && tit->second < nBlocks)
+                        prePreds[tit->second].insert(prevBlk);
+                    if (isCond && i + 1 < funcEndIdx) {
+                        auto fit = addrToBlock.find(insn[i+1].address);
+                        if (fit != addrToBlock.end() && fit->second < nBlocks)
+                            prePreds[fit->second].insert(prevBlk);
+                    }
+                } else if (!isJmp && !isRet && i + 1 < funcEndIdx) {
+                    auto nbit = addrToBlock.find(insn[i+1].address);
+                    if (nbit != addrToBlock.end() && nbit->second != prevBlk && nbit->second < nBlocks)
+                        prePreds[nbit->second].insert(prevBlk);
+                }
+            }
+        }
+
         // ── Pass 3: detect prologue & PIC thunk ─────────────────────
         m_hasFrame = false; m_frameSize = 0;
         m_hasPIC = false; m_picBase = 0;
@@ -329,13 +369,80 @@ public:
         m_flags = {-1, IROp::Eq, nullptr, nullptr};
 
         // Inject register parameter initializations.
-        // Scan the first few instructions for "mov REGPARAM_DEST, SRC" patterns
-        // where DEST is a regparam register. Pre-bind the SRC register to the
-        // parameter name since the calling convention delivers the value there.
+        // Regparm args arrive in EAX, EDX, ECX. Detection:
+        // 1. STABS N_RSYM with descriptor 'P' (explicit register param)
+        // 2. Prologue pattern: mov [ebp-N], eax/edx/ecx where a STABS param exists
+        //    at that stack offset (param saved to stack in prologue)
+        m_regParamLocals.clear();
+
+        // Detect additional regparm params from prologue save patterns.
+        // If we see "mov [ebp-N], eax/edx/ecx" and STABS has a param at offset N,
+        // the param is regparm (arrived in register, saved to stack).
+        if (sfn && !func.blocks.empty()) {
+            static const x86_reg regparmRegs[] = {X86_REG_EAX, X86_REG_EDX, X86_REG_ECX};
+            for (size_t pi = 0; pi < std::min(funcEndIdx, (size_t)15); ++pi) {
+                auto &pin = insn[pi];
+                std::string pmn = pin.mnemonic;
+                if (pmn != "mov") continue;
+                if (pin.detail->x86.op_count != 2) continue;
+                auto &dst = pin.detail->x86.operands[0];
+                auto &src = pin.detail->x86.operands[1];
+                if (src.type != X86_OP_REG) continue;
+                x86_reg srcR = canonReg(src.reg);
+                bool isRegparm = false;
+                for (auto rr : regparmRegs) if (srcR == rr) { isRegparm = true; break; }
+                if (!isRegparm) continue;
+                if (m_regParamRegs.count(srcR)) continue;  // already detected
+
+                if (dst.type == X86_OP_MEM &&
+                    dst.mem.base == X86_REG_EBP && dst.mem.index == X86_REG_INVALID &&
+                    (int)dst.mem.disp < 0) {
+                    // Pattern 1: mov [ebp-N], eax/edx/ecx — save to stack
+                    int off = (int)dst.mem.disp;
+                    for (auto &p : sfn->params) {
+                        if (p.stackOffset == off && p.regNum < 0) {
+                            m_regParamRegs[srcR] = &p;
+                            break;
+                        }
+                    }
+                } else if (dst.type == X86_OP_REG) {
+                    // Pattern 2: mov REG_DEST, eax/edx/ecx — save to callee-saved reg
+                    // Check if STABS has a param with regNum matching DEST
+                    x86_reg dstR = canonReg(dst.reg);
+                    int stabsReg = -1;
+                    switch (dstR) {
+                        case X86_REG_EAX: stabsReg = 0; break;
+                        case X86_REG_ECX: stabsReg = 1; break;
+                        case X86_REG_EDX: stabsReg = 2; break;
+                        case X86_REG_EBX: stabsReg = 3; break;
+                        case X86_REG_ESI: stabsReg = 6; break;
+                        case X86_REG_EDI: stabsReg = 7; break;
+                        default: break;
+                    }
+                    if (stabsReg >= 0) {
+                        for (auto &p : sfn->params) {
+                            if (p.regNum == stabsReg) {
+                                m_regParamRegs[srcR] = &p;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         if (!func.blocks.empty() && !m_regParamRegs.empty()) {
             auto &bb0 = func.blocks[0];
-            // First, scan prologue instructions to find source registers
-            std::set<x86_reg> sourcesHandled;
+
+            // Bind the regparam registers to parameter names
+            for (auto &[xr, param] : m_regParamRegs) {
+                int t = func.newTemp(param->typeRef);
+                bb0.stmts.push_back(IRStmt::mkAssign(t,
+                    IRExpr::mkVar(param->name, param->typeRef), param->typeRef));
+                m_regTemps[xr] = t;
+            }
+
+            // Scan prologue for instructions that SAVE regparam values.
             for (size_t pi = 0; pi < std::min(funcEndIdx, (size_t)20); ++pi) {
                 auto &pin = insn[pi];
                 std::string pmn = pin.mnemonic;
@@ -343,27 +450,27 @@ public:
                 if (pin.detail->x86.op_count != 2) continue;
                 auto &dst = pin.detail->x86.operands[0];
                 auto &src = pin.detail->x86.operands[1];
-                if (dst.type != X86_OP_REG || src.type != X86_OP_REG) continue;
-                x86_reg dstR = canonReg(dst.reg);
+                if (src.type != X86_OP_REG) continue;
                 x86_reg srcR = canonReg(src.reg);
-                auto pit = m_regParamRegs.find(dstR);
+                auto pit = m_regParamRegs.find(srcR);
                 if (pit == m_regParamRegs.end()) continue;
-                if (sourcesHandled.count(srcR)) continue;
-                sourcesHandled.insert(srcR);
-                // Pre-bind the source register to the parameter
+
                 auto *param = pit->second;
-                int t = func.newTemp(param->typeRef);
-                bb0.stmts.push_back(IRStmt::mkAssign(t,
-                    IRExpr::mkVar(param->name, param->typeRef), param->typeRef));
-                m_regTemps[srcR] = t;
-            }
-            // Also bind the regparam registers themselves (for direct use)
-            for (auto &[xr, param] : m_regParamRegs) {
-                if (m_regTemps.count(xr)) continue; // already bound via source
-                int t = func.newTemp(param->typeRef);
-                bb0.stmts.push_back(IRStmt::mkAssign(t,
-                    IRExpr::mkVar(param->name, param->typeRef), param->typeRef));
-                m_regTemps[xr] = t;
+                if (dst.type == X86_OP_REG) {
+                    x86_reg dstR = canonReg(dst.reg);
+                    if (dstR == srcR) continue;
+                    if (m_regTemps.count(dstR)) continue;
+                    m_regTemps[dstR] = m_regTemps[srcR];
+                } else if (dst.type == X86_OP_MEM &&
+                           dst.mem.base == X86_REG_EBP &&
+                           dst.mem.index == X86_REG_INVALID &&
+                           (int)dst.mem.disp < 0) {
+                    int off = (int)dst.mem.disp;
+                    if (m_localByOffset.find(off) == m_localByOffset.end()) {
+                        m_regParamLocals.push_back({param->name, param->typeRef, off, -1});
+                        m_localByOffset[off] = &m_regParamLocals.back();
+                    }
+                }
             }
         }
 
@@ -375,17 +482,36 @@ public:
             if (bit != addrToBlock.end()) {
                 int prevBlock = curBlock;
                 curBlock = bit->second;
-                // At loop header blocks, clear register state so loop-body reads
-                // create fresh temps instead of using pre-loop values.
-                // Detect: block has MULTIPLE predecessors (one from before the loop,
-                // one from the loop back-edge). A block with multiple predecessors
-                // that isn't the entry block is potentially a loop header.
+                // For large functions (30+ blocks): clear stale register state
+                // when the previous linear block is NOT a CFG predecessor.
+                // This prevents register values from one code path leaking into
+                // an unrelated block reached via a different jump.
+                // Only for large functions — small functions work correctly with
+                // linear state because their code layout matches execution order.
+                if (nBlocks >= 50 && curBlock > 0 && curBlock < nBlocks &&
+                    prevBlock >= 0 && prevBlock != curBlock) {
+                    if (!prePreds[curBlock].count(prevBlock)) {
+                        m_regTemps.clear();
+                        m_regGlobalSource.clear();
+                        m_regFuncPtrName.clear();
+                        m_flags = {-1, IROp::Eq, nullptr, nullptr};
+                    }
+                }
+                // At blocks with back-edge predecessors (loop headers),
+                // clear stale global source info — registers may be modified
+                // in the loop body (e.g., linked list traversal)
+                if (curBlock > 0 && curBlock < nBlocks &&
+                    !loopHeaderAddrs.count(in.address)) {
+                    for (int pred : prePreds[curBlock]) {
+                        if (pred > curBlock) {
+                            m_regGlobalSource.clear();
+                            m_regFuncPtrName.clear();
+                            break;
+                        }
+                    }
+                }
+                // At loop header blocks, create phi temps
                 if (curBlock > 0 && loopHeaderAddrs.count(in.address)) {
-                    // At loop headers, assign registers from a Var reference
-                    // (not from the pre-loop temp) so the emitter doesn't
-                    // const-propagate the initial value.
-                    // The var name "loop_REG" acts as a placeholder that
-                    // the pass 8 phi copy will replace with the correct value.
                     auto &hdr = func.blocks[curBlock];
                     static const x86_reg gpRegs[] = {
                         X86_REG_EAX, X86_REG_EBX, X86_REG_ECX,
@@ -397,12 +523,14 @@ public:
                             int oldTemp = it->second;
                             int newTemp = func.newTemp(func.tempType(oldTemp));
                             func.phiTemps.insert(newTemp);
-                            // Assign from old temp — gives a definition for the emitter.
-                            // Pass 8 will later add the back-edge copy.
                             hdr.stmts.push_back(IRStmt::mkAssign(newTemp,
                                 IRExpr::mkTemp(oldTemp, func.tempType(oldTemp)),
                                 func.tempType(oldTemp)));
                             m_regTemps[reg] = newTemp;
+                            // Clear stale global source info — the register may be
+                            // updated in the loop body (e.g., linked list traversal)
+                            m_regGlobalSource.erase(reg);
+                            m_regFuncPtrName.erase(reg);
                         }
                     }
                 }
@@ -433,8 +561,7 @@ public:
                     for (uint8_t g = 0; g < in.detail->groups_count; ++g)
                         if (in.detail->groups[g] == CS_GRP_RET) isRet = true;
                 }
-                if (isRet) fprintf(stderr, "RET_INSN: mn='%s' addr=0x%llx\n",
-                                   in.mnemonic, (unsigned long long)in.address);
+
             }
             liftInsn(in, func.blocks[curBlock], func, addrToBlock);
         }
@@ -445,8 +572,7 @@ public:
         // synthesize one from the last FPU stack value.
         if (sfn && sfn->returnType != NullType && !func.blocks.empty()) {
             auto *rt = m_types.resolveType(sfn->returnType);
-            fprintf(stderr, "PASS5B: rt=%p kind=%d fpuStack=%d lastFpuTop=%d\n",
-                    (void*)rt, rt ? (int)rt->kind : -1, (int)m_fpuStack.size(), m_lastFpuTop);
+
             if (rt && (rt->kind == StabsTypeKind::Float ||
                        rt->kind == StabsTypeKind::Double ||
                        rt->kind == StabsTypeKind::LongDouble)) {
@@ -455,7 +581,7 @@ public:
                 for (auto &bb : func.blocks)
                     for (auto &s : bb.stmts)
                         if (s.kind == IRStmtKind::Return) { hasReturn = true; break; }
-                fprintf(stderr, "PASS5B_FLOAT: hasReturn=%d\n", hasReturn);
+
                 if (!hasReturn) {
                     auto &lastBB = func.blocks.back();
                     if (!m_fpuStack.empty()) {
@@ -787,6 +913,7 @@ private:
     const MachOFile      &m_mf;
     const StabsTypeTable &m_types;
     IRFunc               *m_func = nullptr;
+    int                   m_curSourceFileIdx = -1;  // CU of current function
     csh                   m_cs;
 
     // Prologue/PIC state
@@ -803,24 +930,108 @@ private:
     std::map<int, const StabsTypedVar*> m_localByOffset;
     std::map<x86_reg, const StabsTypedVar*> m_regParamRegs;  // register params (regparm)
     std::set<x86_reg> m_regParamInjected;  // which reg params we've already injected
+    std::list<StabsTypedVar> m_regParamLocals;  // stable storage for regparm stack locals
     std::set<uint32_t> m_floatReturnAddrs;   // call target addresses known to return float
     std::set<uint32_t> m_floatRetCallSites;  // instruction addresses of float-returning calls
 
     // Register → temp mapping (current state)
     std::map<x86_reg, int> m_regTemps;
 
-    // Register → global struct source: tracks when a register was loaded from
-    // a global variable that is a struct with function pointer fields.
-    // Used to resolve indirect calls like call [reg + offset] → globalName.fieldName(args)
+    // Register → global struct source
     struct RegGlobalInfo {
-        std::string globalName;    // e.g. "ri"
-        TypeRef     typeRef;       // STABS type of the global
+        std::string globalName;
+        TypeRef     typeRef;
     };
     std::map<x86_reg, RegGlobalInfo> m_regGlobalSource;
 
-    // Register → resolved function name: when mov reg, [globalStruct + offset]
-    // resolves the field to a function pointer name, track it for call reg.
+    // Register → resolved function name
     std::map<x86_reg, std::string> m_regFuncPtrName;
+
+    // Per-block register state for CFG-aware tracking
+    struct BlockLiftState {
+        std::map<x86_reg, int> regTemps;
+        std::map<x86_reg, RegGlobalInfo> regGlobalSource;
+        std::map<x86_reg, std::string> regFuncPtrName;
+        int flagsTemp = -1;
+        IROp flagsOp = IROp::Eq;
+        std::vector<int> fpuStack;
+    };
+    std::map<int, BlockLiftState> m_blockExitState;
+
+    void saveBlockState(int blockId) {
+        auto &s = m_blockExitState[blockId];
+        s.regTemps = m_regTemps;
+        s.regGlobalSource = m_regGlobalSource;
+        s.regFuncPtrName = m_regFuncPtrName;
+        s.flagsTemp = m_flags.temp;
+        s.flagsOp = m_flags.op;
+        s.fpuStack = m_fpuStack;
+    }
+
+    void restoreBlockState(const BlockLiftState &s) {
+        m_regTemps = s.regTemps;
+        m_regGlobalSource = s.regGlobalSource;
+        m_regFuncPtrName = s.regFuncPtrName;
+        m_flags.temp = s.flagsTemp;
+        m_flags.op = s.flagsOp;
+        m_flags.lhs.reset();
+        m_flags.rhs.reset();
+        m_fpuStack = s.fpuStack;
+    }
+
+    void mergeBlockState(int blockId, const std::vector<std::set<int>> &prePreds, IRFunc &func) {
+        auto &preds = prePreds[blockId];
+        // Collect processed predecessor states
+        std::vector<const BlockLiftState*> predStates;
+        for (int p : preds) {
+            auto it = m_blockExitState.find(p);
+            if (it != m_blockExitState.end())
+                predStates.push_back(&it->second);
+        }
+        if (predStates.empty()) return;  // no predecessors processed; keep current
+        if (predStates.size() == 1) { restoreBlockState(*predStates[0]); return; }
+
+        // Multiple predecessors: merge register state.
+        // At loop headers, create phi temps for registers that disagree
+        // between predecessors, so the loop body uses fresh temps instead
+        // of stale values from the pre-loop path.
+        m_regGlobalSource.clear();
+        m_regFuncPtrName.clear();
+        m_flags = {-1, IROp::Eq, nullptr, nullptr};
+        m_fpuStack.clear();
+
+        static const x86_reg gpRegs[] = {
+            X86_REG_EAX, X86_REG_EBX, X86_REG_ECX,
+            X86_REG_EDX, X86_REG_ESI, X86_REG_EDI
+        };
+        auto &hdr = func.blocks[blockId];
+        std::map<x86_reg, int> newRegTemps;
+        for (x86_reg reg : gpRegs) {
+            int firstTemp = -1;
+            bool allSame = true;
+            bool anyMissing = false;
+            for (auto *ps : predStates) {
+                auto it = ps->regTemps.find(reg);
+                if (it == ps->regTemps.end()) { anyMissing = true; break; }
+                if (firstTemp < 0) firstTemp = it->second;
+                else if (it->second != firstTemp) allSame = false;
+            }
+            if (anyMissing) continue;
+            if (allSame) {
+                newRegTemps[reg] = firstTemp;
+            } else {
+                // Disagreement: create a phi temp so the loop body gets
+                // a fresh temp instead of using a stale pre-loop value.
+                TypeRef t = func.tempType(firstTemp);
+                int phiTemp = func.newTemp(t);
+                func.phiTemps.insert(phiTemp);
+                hdr.stmts.push_back(IRStmt::mkAssign(phiTemp,
+                    IRExpr::mkTemp(firstTemp, t), t));
+                newRegTemps[reg] = phiTemp;
+            }
+        }
+        m_regTemps = newRegTemps;
+    }
 
     // Flags state: which temp holds the flag result and what comparison produced it
     struct FlagsState {
@@ -1018,7 +1229,7 @@ private:
         // Global variable address (from STABS)?
         // An immediate that matches a global address is &global, not *global.
         // Loading the value would be mov eax, [addr] (memory operand), not mov eax, addr (imm).
-        auto *g = m_types.globalAtAddress(v);
+        auto *g = m_types.globalAtAddress(v, m_curSourceFileIdx);
         if (g) return IRExpr::mkAddrOf(IRExpr::mkVar(g->name, g->typeRef));
         // Don't resolve function addresses here — they'd be misidentified as data.
         // Function refs are handled in the 'call' and 'lea' instruction handlers.
@@ -1078,7 +1289,7 @@ private:
         // PIC-relative (EBX + disp)
         if (m_hasPIC && m.base == X86_REG_EBX && m.index == X86_REG_INVALID && m_picBase) {
             uint32_t addr = m_picBase + (int)m.disp;
-            auto *g = m_types.globalAtAddress(addr);
+            auto *g = m_types.globalAtAddress(addr, m_curSourceFileIdx);
             if (g) return IRExpr::mkVar(g->name, g->typeRef);
             std::string s = tryString(addr);
             if (!s.empty()) return IRExpr::mkString(s);
@@ -1173,7 +1384,7 @@ private:
         // Direct address: [disp]
         if (m.base == X86_REG_INVALID && m.index == X86_REG_INVALID && m.disp) {
             uint32_t addr = (uint32_t)m.disp;
-            auto *g = m_types.globalAtAddress(addr);
+            auto *g = m_types.globalAtAddress(addr, m_curSourceFileIdx);
             if (g) return IRExpr::mkVar(g->name, g->typeRef);
             // Check function map for import pointers
             auto fit = m_mf.functionMap().find(addr);
@@ -1184,7 +1395,7 @@ private:
             // Try nlist symbol table for named globals
             std::string symName = m_mf.symbolNameAtAddress(addr);
             if (!symName.empty()) {
-                auto *gn = m_types.globalByName(symName);
+                auto *gn = m_types.globalByName(symName, m_curSourceFileIdx);
                 if (gn && gn->typeRef != NullType) {
                     auto *gt = m_types.resolveType(gn->typeRef);
                     if (gt && gt->kind == StabsTypeKind::Pointer)
@@ -1329,22 +1540,22 @@ private:
         // Direct address store: [disp] with no base/index
         if (m.base == X86_REG_INVALID && m.index == X86_REG_INVALID && m.disp) {
             uint32_t addr = (uint32_t)m.disp;
-            auto *g = m_types.globalAtAddress(addr);
+            auto *g = m_types.globalAtAddress(addr, m_curSourceFileIdx);
             if (g) {
-                bb.stmts.push_back(IRStmt::mkVarSet(g->name, std::move(val), g->typeRef));
+                bb.stmts.push_back(IRStmt::mkVarSet(g->name, std::move(val), g->typeRef, storeSize));
                 return;
             }
             // Try nlist symbol table
             std::string symName = m_mf.symbolNameAtAddress(addr);
             if (!symName.empty()) {
-                bb.stmts.push_back(IRStmt::mkVarSet(symName, std::move(val)));
+                bb.stmts.push_back(IRStmt::mkVarSet(symName, std::move(val), NullType, storeSize));
                 return;
             }
             // Synthetic global name for data section addresses
             const Section *dSec = m_mf.sectionForAddress(addr);
             if (dSec && (dSec->segname == "__DATA" || dSec->segname == "__IMPORT")) {
                 char gn[32]; snprintf(gn, sizeof(gn), "g_%X", addr);
-                bb.stmts.push_back(IRStmt::mkVarSet(gn, std::move(val)));
+                bb.stmts.push_back(IRStmt::mkVarSet(gn, std::move(val), NullType, storeSize));
                 return;
             }
         }
@@ -1539,7 +1750,7 @@ private:
                         uint32_t loadAddr = (uint32_t)smem.disp;
                         // Check if the loaded value is a named global with struct type
                         if (src->op == IROp::Var && !src->name.empty()) {
-                            auto *g = m_types.globalByName(src->name);
+                            auto *g = m_types.globalByName(src->name, m_curSourceFileIdx);
                             if (g && g->typeRef != NullType) {
                                 auto *gt = m_types.resolveType(g->typeRef);
                                 if (gt && (gt->kind == StabsTypeKind::Struct ||
@@ -1562,7 +1773,7 @@ private:
                                     std::string gname = nearest.substr(1, plus - 1);
                                     unsigned goff = 0;
                                     sscanf(nearest.c_str() + plus + 3, "%x", &goff);
-                                    auto *g = m_types.globalByName(gname);
+                                    auto *g = m_types.globalByName(gname, m_curSourceFileIdx);
                                     if (g && g->typeRef != NullType) {
                                         auto *gt = m_types.resolveType(g->typeRef);
                                         if (gt && (gt->kind == StabsTypeKind::Struct ||
@@ -1654,7 +1865,7 @@ private:
             if (m_hasPIC && o[1].mem.base == X86_REG_EBX &&
                 o[1].mem.index == X86_REG_INVALID && m_picBase) {
                 uint32_t target = m_picBase + (int)o[1].mem.disp;
-                auto *g = m_types.globalAtAddress(target);
+                auto *g = m_types.globalAtAddress(target, m_curSourceFileIdx);
                 if (g) addr = IRExpr::mkAddrOf(IRExpr::mkVar(g->name, g->typeRef));
                 else {
                     std::string s = tryString(target);
@@ -2047,6 +2258,12 @@ private:
                         // If the last statement is a Call (void call), the function is void
                         if (lastStmt.kind == IRStmtKind::Call)
                             isVoid = true;
+                        // If the last statement assigns from a Call and the function just
+                        // returns that value, the function is a void wrapper: it calls a
+                        // void function and returns whatever happened to be in EAX.
+                        if (lastStmt.kind == IRStmtKind::Assign && lastStmt.expr &&
+                            lastStmt.expr->op == IROp::Call)
+                            isVoid = true;
                     }
                     if (isVoid) {
                         m_func->detectedVoid = true;
@@ -2122,7 +2339,7 @@ private:
                                 std::string gname = nearest.substr(1, plus - 1);
                                 unsigned offset = 0;
                                 sscanf(nearest.c_str() + plus + 3, "%x", &offset);
-                                auto *g = m_types.globalByName(gname);
+                                auto *g = m_types.globalByName(gname, m_curSourceFileIdx);
                                 if (g && g->typeRef != NullType) {
                                     auto *gt = m_types.resolveType(g->typeRef);
                                     if (gt && (gt->kind == StabsTypeKind::Struct ||
@@ -2537,7 +2754,11 @@ private:
                     m_espArgs[(int)o[0].mem.disp] = std::move(st0);
                     if (mn == "fstp") fpuPop();
                 } else {
-                    writeOp(o[0], std::move(st0), bb);
+                    // For memory stores, mark as float store size
+                    if (o[0].type == X86_OP_MEM)
+                        writeMem(o[0].mem, std::move(st0), bb, 5);
+                    else
+                        writeOp(o[0], std::move(st0), bb);
                     if (mn == "fstp") fpuPop();
                 }
             }
@@ -2748,15 +2969,23 @@ private:
     bool liftSSE(const std::string &mn, cs_x86_op *o, int n, BasicBlock &bb, cs_insn &in) {
         // ── Scalar moves: movss, movsd ──────────────────────────────
         if ((mn == "movss" || mn == "movsd") && n == 2) {
+            bool dbl = (mn == "movsd");
             // movss/movsd [esp+N], xmm → collect as call argument
             if (o[0].type == X86_OP_MEM && o[0].mem.base == X86_REG_ESP &&
                 o[0].mem.index == X86_REG_INVALID) {
-                auto src = readSSEOp(o[1], mn == "movsd");
+                auto src = readSSEOp(o[1], dbl);
                 if (src) m_espArgs[(int)o[0].mem.disp] = std::move(src);
                 return true;
             }
-            auto src = readSSEOp(o[1], mn == "movsd");
-            if (src) writeOp(o[0], std::move(src), bb);
+            auto src = readSSEOp(o[1], dbl);
+            if (src) {
+                // For memory stores, use float/double store size so the
+                // decompiler emits *(float*) instead of *(int*)
+                if (o[0].type == X86_OP_MEM)
+                    writeMem(o[0].mem, std::move(src), bb, dbl ? 9 : 5);
+                else
+                    writeOp(o[0], std::move(src), bb);
+            }
             return true;
         }
         // ── Packed moves (treat as scalar for decompilation) ────────
@@ -2809,7 +3038,7 @@ private:
             if (src) writeOp(o[0], IRExpr::mkCast(CastKind::FloatToInt, std::move(src)), bb);
             return true;
         }
-        if ((mn == "cvtss2sd" || mn == "cvtsd2ss") && n == 2) {
+        if ((mn == "cvtss2sd" || mn == "cvtsd2ss") && n == 2) { 
             auto src = readSSEOp(o[1], mn == "cvtsd2ss");
             if (src) writeOp(o[0], std::move(src), bb); // just propagate, C handles float<->double
             return true;
@@ -3036,8 +3265,28 @@ private:
             // Try to resolve the memory address to an actual float constant
             auto resolved = resolveFloatConst(op.mem, isDouble);
             if (resolved) return resolved;
-            // Fall back to regular memory read
-            return readMem(op.mem);
+            // Fall back to regular memory read. For SSE float instructions,
+            // mark Loads as float (loadSize=5) and drill into union Fields
+            // to select the float member (e.g., dvar->current → current.value).
+            auto mem = readMem(op.mem);
+            if (mem) {
+                if (mem->op == IROp::Load) {
+                    mem->loadSize = isDouble ? 9 : 5;
+                } else if (mem->op == IROp::Field && !isDouble && mem->typeRef != NullType) {
+                    auto *fti = m_types.resolveType(mem->typeRef);
+                    if (fti && fti->kind == StabsTypeKind::Union) {
+                        for (auto &uf : fti->fields) {
+                            auto *uft = m_types.resolveType(uf.typeRef);
+                            if (uft && uft->kind == StabsTypeKind::Float) {
+                                mem = IRExpr::mkField(std::move(mem), uf.name,
+                                    uf.bitOffset / 8, uf.typeRef);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            return mem;
         }
         return IRExpr::mkConst(0);
     }
@@ -3075,7 +3324,7 @@ private:
         if (off < 0) return nullptr;
 
         // Check for global variable first
-        auto *g = m_types.globalAtAddress(addr);
+        auto *g = m_types.globalAtAddress(addr, m_curSourceFileIdx);
         if (g) return IRExpr::mkVar(g->name, g->typeRef);
 
         if (isDouble) {

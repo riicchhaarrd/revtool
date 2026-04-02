@@ -15,6 +15,7 @@ DECOMP = './build/decomp'
 APPLE_GCC = '/tmp/apple-gcc-build/gcc/xgcc'
 GCC_FLAGS = ['-B/tmp/apple-gcc-build/gcc/', '-m32', '-O2', '-mdynamic-no-pic',
              '-fno-schedule-insns', '-fno-schedule-insns2', '-mtune=pentium4',
+             '-fno-if-conversion',
              '-std=c99', '-w']
 
 TYPES_HEADER = 'stabs_types.h.gen'
@@ -38,12 +39,12 @@ typedef unsigned char byte;
 typedef int OSStatus; typedef short OSErr; typedef int Boolean;
 typedef unsigned int OSType; typedef void *CursHandle;
 typedef void *WindowRef; typedef void *MenuRef; typedef void *CGrafPtr;
-typedef void *ControlRef; typedef void *ControlPartCode;
+typedef void *ControlRef;
 typedef const char *LPCSTR; typedef const char *LPCTSTR;
 typedef char *LPSTR; typedef void *LARGE_INTEGER;
 typedef struct { short v; short h; } Point;
 typedef void *ControlHandle; typedef void *DialogRef;
-typedef int CGRect; extern CGRect CGRectZero;
+extern int CGRectZero;
 typedef int HCURSOR; typedef int HWND; typedef int HINSTANCE;
 typedef void *GDHandle; typedef void *CursPtr;
 typedef unsigned int CGDirectDisplayID;
@@ -110,11 +111,46 @@ typedef struct { int dwLowDateTime; int dwHighDateTime; } FILETIME;
 typedef struct { int _[80]; } WIN32_FIND_DATAA;
 typedef void *HANDLE;
 typedef int HRESULT;
+typedef unsigned long ULONG;
+/* D3D9 opaque types */
+typedef struct IDirect3D9 IDirect3D9;
+typedef struct IDirect3DDevice9 IDirect3DDevice9;
+typedef struct IDirect3DTexture9 IDirect3DTexture9;
+typedef struct IDirect3DBaseTexture9 IDirect3DBaseTexture9;
+typedef struct IDirect3DCubeTexture9 IDirect3DCubeTexture9;
+typedef struct IDirect3DVolumeTexture9 IDirect3DVolumeTexture9;
+typedef struct IDirect3DSurface9 IDirect3DSurface9;
+typedef struct IDirect3DVolume9 IDirect3DVolume9;
+typedef struct IDirect3DVertexBuffer9 IDirect3DVertexBuffer9;
+typedef struct IDirect3DIndexBuffer9 IDirect3DIndexBuffer9;
+typedef struct IDirect3DVertexShader9 IDirect3DVertexShader9;
+typedef struct IDirect3DPixelShader9 IDirect3DPixelShader9;
+typedef struct IDirect3DVertexDeclaration9 IDirect3DVertexDeclaration9;
+typedef struct IDirect3DStateBlock9 IDirect3DStateBlock9;
+typedef struct IDirect3DQuery9 IDirect3DQuery9;
+typedef struct IDirect3DSwapChain9 IDirect3DSwapChain9;
+typedef unsigned short ScriptString;
+/* Wavelet types */
+struct WaveletHuffmanDecode { short value; short bits; };
+extern const struct WaveletHuffmanDecode waveletDecodeAlpha[4096];
+extern const struct WaveletHuffmanDecode waveletDecodeRedGreen[4096];
+extern const struct WaveletHuffmanDecode waveletDecodeBlue[4096];
+typedef int D3DLOCKED_BOX; typedef int D3DBOX; typedef int D3DLOCKED_RECT;
+typedef int D3DFORMAT; typedef int D3DPOOL; typedef int D3DSURFACE_DESC;
+typedef int D3DVIEWPORT9; typedef int D3DGAMMARAMP;
+typedef int D3DPRIMITIVETYPE; typedef int D3DCAPS9; typedef int D3DDISPLAYMODE;
+typedef int D3DMULTISAMPLE_TYPE; typedef int D3DDEVTYPE; typedef int D3DADAPTER_IDENTIFIER9;
+typedef int D3DRENDERSTATETYPE; typedef int D3DTEXTURESTAGESTATETYPE;
+typedef int D3DTRANSFORMSTATETYPE; typedef int D3DSTATEBLOCKTYPE;
+typedef int D3DTEXTUREFILTERTYPE; typedef int D3DSAMPLERSTATETYPE;
+typedef int D3DLIGHT9; typedef int D3DRASTER_STATUS;
 /* Game engine types */
 typedef int scr_thread_t;
 typedef void *scr_func_t;
 typedef int TextureID;
 typedef int isNegative;
+typedef struct { int _[4]; } GUID;
+typedef unsigned long u_long;
 /* Network types */
 typedef int SOCKET;
 typedef struct { int _[4]; } fd_set;
@@ -125,16 +161,51 @@ typedef struct { int _[256]; } jpeg_decompress_struct;
 typedef jpeg_decompress_struct* j_decompress_ptr;
 typedef jpeg_compress_struct* j_compress_ptr;
 typedef int JDIMENSION; typedef int JSAMPLE; typedef short JCOEF;
+typedef unsigned short *histptr; typedef unsigned short histcell;
+typedef int JMETHOD; typedef void *j_common_ptr;
 typedef int boolean;
 typedef short DCTELEM;
 typedef int *JSAMPARRAY; typedef int *JSAMPROW; typedef int *JBLOCKROW;
 /* Dvar struct types (needed for -> field access) */
 union DvarValue { int enabled; int integer; float value; float *vector; const char *string; unsigned char color[4]; };
 union DvarLimits { struct { int min; int max; } integer; struct { float min; float max; } value; int enumCount; };
-struct dvar_s { const char *name; unsigned short flags; unsigned char type; int modified; union DvarValue current; union DvarValue latched; union DvarValue reset; union DvarLimits domain; struct dvar_s *next; struct dvar_s *hashNext; };
+struct dvar_s { const char *name; unsigned short flags; unsigned char type; unsigned char modified; union DvarValue current; union DvarValue latched; union DvarValue reset; union DvarLimits domain; struct dvar_s *next; struct dvar_s *hashNext; };
 typedef struct dvar_s dvar_t;
+/* Auto-generated typedefs for struct _s → _t patterns */
+typedef struct archivedEntity_s archivedEntity_t;
+typedef struct archivedSnapshot_s archivedSnapshot_t;
+typedef struct cachedClient_s cachedClient_t;
+typedef struct clientState_s clientState_t;
+typedef struct displayContextDef_s displayContextDef_t;
+typedef struct editFieldDef_s editFieldDef_t;
+typedef struct fileData_s fileData_t;
+typedef struct fileInPack_s fileInPack_t;
+typedef struct game_hudelem_s game_hudelem_t;
+typedef struct gitem_s gitem_t;
+typedef struct indent_s indent_t;
+typedef struct ipFilter_s ipFilter_t;
+typedef struct itemDef_s itemDef_t;
+typedef struct keywordHash_s keywordHash_t;
+typedef struct listBoxDef_s listBoxDef_t;
+typedef struct localEntity_s localEntity_t;
+typedef struct multiDef_s multiDef_t;
+typedef struct pc_token_s pc_token_t;
+typedef struct punctuation_s punctuation_t;
+typedef struct qtime_s qtime_t;
+typedef struct refdef_s refdef_t;
+typedef struct scr_anim_s scr_anim_t;
+typedef struct scrollInfo_s scrollInfo_t;
+typedef struct serverFilter_s serverFilter_t;
+typedef struct statmonitor_s statmonitor_t;
+typedef struct stringDef_s stringDef_t;
+typedef struct turretInfo_s turretInfo_t;
+typedef struct viewLerpWaypoint_s viewLerpWaypoint_t;
+typedef struct weaponInfo_s weaponInfo_t;
+/* Forward declarations for function pointer struct params */
+typedef struct DObjAnimMat DObjAnimMat;
+typedef struct XSurface_s XSurface_s;
 /* Misc missing */
-typedef int scr_anim_t;
+/* scr_anim_t handled by auto-generated typedef */
 typedef struct { int _[32]; } SpeexBits;
 typedef void *ogg_stream_state;
 typedef struct { int _[64]; } inflate_state;
@@ -155,6 +226,10 @@ dvar_t *Dvar_RegisterVec2(const char*,float,float,float,float,int);
 dvar_t *Dvar_RegisterVec3(const char*,float,float,float,float,float,float,int);
 dvar_t *Dvar_RegisterVec4(const char*,float,float,float,float,float,float,float,float,int);
 int Scr_AddFloat(float);
+int Dvar_SetInt(dvar_t*,int);
+int Dvar_SetFloat(dvar_t*,float);
+int Dvar_SetString(dvar_t*,const char*);
+int Dvar_SetBool(dvar_t*,int);
 #endif
 '''
 
@@ -279,7 +354,7 @@ def extract_struct_from_header(name):
     for line in lines:
         stripped = line.strip()
         if stripped.startswith('typedef ') and stripped.endswith(';'):
-            if f' {name};' in stripped or f' {name}[' in stripped:
+            if f' {name};' in stripped or f' {name}[' in stripped or f'*{name};' in stripped:
                 result = line
                 # If it's typedef struct X name, also extract struct X
                 m = re.match(r'typedef\s+struct\s+(\w+)\s+' + re.escape(name), stripped)
@@ -309,7 +384,7 @@ def compile_to_asm(c_code, orig_check=None):
     # Pre-extract all struct/typedef types referenced in the code from the types header
     extracted = {}  # name -> definition (ordered by dependency)
     # Find struct references AND typedef names (Type_t patterns used as pointer types)
-    refs = set(re.findall(r'(?:struct|union)\s+(\w+)', c_code))
+    refs = set(re.findall(r'(?:struct|union)\s+([\w$]+)', c_code))
     # Also find typedef names used as pointer base types: "type_t *var"
     # Skip simple types already in STUBS (vec_t, qboolean, etc.)
     stubs_types = set(re.findall(r'typedef\s+\S+.*?\s+(\w+)\s*[;\[]', STUBS))
@@ -322,26 +397,75 @@ def compile_to_asm(c_code, orig_check=None):
         name = m.group(1)
         if name not in stubs_types and name not in ('NULL', 'BOOL', 'Bool', 'DWORD', 'UINT'):
             refs.add(name)
+    # Find globals used with .field access and look up their struct types.
+    # Pattern: "globalName.field" in code → find "extern struct X globalName;" in header
+    global_externs = []
+    lines_h = _load_types_header()
+    if lines_h:
+        # Build a map of global → struct type from extern declarations
+        global_types = {}
+        for line in lines_h:
+            m = re.match(r'extern\s+(?:const\s+)?struct\s+(\w+)\s+\*?\s*(\w+)\s*(?:\[[\d]*\])?\s*;', line.strip())
+            if m:
+                global_types[m.group(2)] = m.group(1)
+        # Find globals used with .field or ->field, extract their struct types
+        # AND add extern declarations so the compiler knows the variable type
+        global_externs = []
+        # Also store the original extern lines for exact reproduction
+        global_extern_lines = {}
+        for line in lines_h:
+            m2 = re.match(r'(extern\s+(?:const\s+)?struct\s+\w+\s+\*?\s*(\w+)\s*(?:\[[\d]*\])?\s*;)', line.strip())
+            if m2:
+                global_extern_lines[m2.group(2)] = m2.group(1)
+        for m in re.finditer(r'\b(\w+)[.](\w+)', c_code):
+            gname = m.group(1)
+            if gname in global_types:
+                stype = global_types[gname]
+                refs.add(stype)
+                # Only add extern if the struct is fully defined in the header
+                if extract_struct_from_header(stype) and gname in global_extern_lines:
+                    global_externs.append(global_extern_lines[gname])
+        # Also handle ->field access on pointer globals
+        for m in re.finditer(r'\b(\w+)->(\w+)', c_code):
+            gname = m.group(1)
+            if gname in global_types:
+                stype = global_types[gname]
+                refs.add(stype)
+                if extract_struct_from_header(stype) and gname in global_extern_lines:
+                    global_externs.append(global_extern_lines[gname])
+    # Types already defined in STUBS — don't extract from header
+    stubs_structs = {'DvarValue', 'DvarLimits', 'dvar_s', 'dvar_t', 'Point', 'MacPoint',
+                     'CGPoint', 'CGSize', 'CGRect', 'MacRGBColor', 'WaveletHuffmanDecode',
+                     'z_stream', 'unz_global_info', 'unz_file_info', 'FILETIME',
+                     'WIN32_FIND_DATAA', 'fd_set', 'timeval', 'Rect',
+                     'jpeg_compress_struct', 'jpeg_decompress_struct', 'SpeexBits', 'inflate_state'}
     queue = list(refs)
     visited = set()
     while queue:
         name = queue.pop(0)
         if name in visited: continue
         visited.add(name)
+        if name in stubs_structs: continue
         defn = extract_struct_from_header(name)
         if defn:
             # Skip structs with invalid C (vtable pointers, C++ artifacts)
-            if '$' in defn or '(*)()' in defn or '::' in defn:
+            # Note: $_NNNN anonymous types are valid GCC extensions, don't skip those
+            if '::' in defn or '_vptr' in defn:
                 continue
             extracted[name] = defn
             # Also register any struct tags defined in this block
             for m in re.finditer(r'struct\s+(\w+)\s*\{', defn):
                 extracted.setdefault(m.group(1), defn)
-            # Extract dependencies: struct fields by value AND typedef references
-            for m in re.finditer(r'(?:struct|union)\s+(\w+)\s+\w+', defn):
+            # Extract dependencies: struct/union/enum fields AND typedef references
+            for m in re.finditer(r'(?:struct|union|enum)\s+([\w$]+)\s+[\w$]+', defn):
                 if m.group(1) not in visited:
                     queue.append(m.group(1))
             for m in re.finditer(r'\b(\w+_t)\s+\*?\s*\w+', defn):
+                dep = m.group(1)
+                if dep not in visited and dep not in stubs_types:
+                    queue.append(dep)
+            # Also follow CamelCase type names used as pointer types in struct fields
+            for m in re.finditer(r'\b([A-Z]\w+)\s+\*', defn):
                 dep = m.group(1)
                 if dep not in visited and dep not in stubs_types:
                     queue.append(dep)
@@ -418,8 +542,8 @@ def compile_to_asm(c_code, orig_check=None):
             emitted_set.add(m.group(1))
         for m in re.finditer(r'typedef\s+struct\s+\w+\s+(\w+)\s*;', defn):
             emitted_set.add(m.group(1))
-        # Emit dependencies first
-        for m in re.finditer(r'(?:struct|union)\s+(\w+)\s+\w+', defn):
+        # Emit dependencies first (struct, union, enum)
+        for m in re.finditer(r'(?:struct|union|enum)\s+([\w$]+)\s+[\w$]+', defn):
             emit_type(m.group(1))
         for m in re.finditer(r'\b(\w+_t)\s+\*?\s*\w+', defn):
             if m.group(1) not in emitted_set:
@@ -433,6 +557,40 @@ def compile_to_asm(c_code, orig_check=None):
     for name in extracted:
         emit_type(name)
     types_block = '\n'.join(ordered)
+    # Remove extracted type lines that conflict with STUBS definitions
+    for sname in stubs_structs:
+        # Remove standalone typedef lines like "typedef struct { ... } Point;"
+        types_block = re.sub(r'typedef\s+struct\s*\{[^}]*\}\s+' + re.escape(sname) + r'\s*;', '', types_block)
+        # Remove "union Name { ... };" or "struct Name { ... };" blocks
+        types_block = re.sub(r'(?:union|struct)\s+' + re.escape(sname) + r'\s*\{[^}]*\}\s*;', '', types_block)
+    # Auto-generate typedefs: if the code uses "TypeName *" or "TypeName var"
+    # and "struct TypeName" or "struct TypeName_s" is extracted, add typedef
+    # Auto-typedef: when code uses CamelCase types that match a struct in
+    # the types header, add "typedef struct X X;" so the type is known.
+    # Only for types explicitly used as pointer types in the function code
+    # (e.g., "TypeName *var") to avoid generating typedefs that conflict.
+    auto_typedefs = []
+    all_defined = set(re.findall(r'typedef\s+\S.*?\s+(\w+)\s*[\[;]', STUBS + types_block))
+    for m in re.finditer(r'\b([A-Z]\w+)\s+\*', c_code):
+        name = m.group(1)
+        if name in all_defined or name in emitted_set: continue
+        if name in ('NULL', 'BOOL', 'Bool', 'DWORD', 'UINT'): continue
+        sname = name if name in extracted else (name + '_s' if name + '_s' in extracted else None)
+        if not sname:
+            for suffix in ('', '_s'):
+                defn = extract_struct_from_header(name + suffix)
+                if defn and '::' not in defn and '_vptr' not in defn:
+                    sname = name + suffix
+                    extracted[sname] = defn
+                    emit_type(sname)
+                    break
+        if sname:
+            auto_typedefs.append(f'typedef struct {sname} {name};')
+    if auto_typedefs:
+        types_block += '\n' + '\n'.join(set(auto_typedefs))
+    # Add extern declarations for globals with struct types
+    if global_externs:
+        types_block += '\n' + '\n'.join(set(global_externs))
     # Always include Dvar function prototypes.
     # Only include the 'typedef int dvar_t' stub if the real dvar_t isn't extracted.
     # dvar_t struct is defined in STUBS. Always include DVAR_PROTOS for
@@ -516,6 +674,7 @@ def compile_to_asm(c_code, orig_check=None):
             full = re.sub(r'\bvoid\s+' + re.escape(vname) + r'\s*=',
                          'int ' + vname + ' =', full)
         # Handle "assignment of read-only member" — strip const from pointer params
+        # (aggregate value errors are fixed in the decompiler, not here)
         if 'read-only' in stderr:
             full = re.sub(r'\bconst\s+((?:struct\s+)?\w+\s*\*)', r'\1', full)
         # Handle "label at end of compound statement" - add empty statement after label
@@ -696,6 +855,9 @@ def compile_to_asm(c_code, orig_check=None):
                         stubs += f'int {name}(void);\n'
                     else:
                         stubs += f'{qual}void *{name};\n'
+            elif re.search(r'\(int\)\s*' + re.escape(name) + r'\b', full):
+                # Used in (int)NAME — it's a function address, declare as function
+                stubs += f'int {name}(void);\n'
             elif name[0].isupper() or name.endswith('_t'):
                 stubs += f'typedef int {name};\n'
             else:
@@ -753,6 +915,13 @@ def norm(s):
     s = re.sub(r'^calll\b', 'call', s)
     s = re.sub(r'^leave$', 'popl %ebp', s)
     s = re.sub(r'^cvtsi2ssl\b', 'cvtsi2ss', s)
+    # sall/sarl → shll/shrl (same x86 encoding for shift)
+    s = re.sub(r'^sall\b', 'shll', s)
+    s = re.sub(r'^sarl\b', 'shrl', s)
+    # xorl %reg, %reg → movl $0, %reg (both zero a register, same semantics)
+    m = re.match(r'^xorl (%\w+), \1$', s)
+    if m:
+        s = f'movl $0, {m.group(1)}'
     # Normalize addl $-N → subl $N and subl $-N → addl $N
     m = re.match(r'^(addl|subl) \$-(\d+)(.*)', s)
     if m:
@@ -775,9 +944,13 @@ def norm(s):
     # Normalize address constants, labels, and non_lazy_ptrs to <C>
     s = re.sub(r'L_\w+\$(?:non_lazy_ptr|stub)', '<C>', s)
     s = re.sub(r'LC\d+', '<C>', s)
-    s = re.sub(r'-?\b\d{5,}\b', '<C>', s)
+    s = re.sub(r'-\d+\b', '<C>', s)  # negative numbers are always constants
+    s = re.sub(r'\b\d{5,}\b', '<C>', s)  # large positive numbers too
+    s = re.sub(r'\b0x[0-9a-fA-F]{5,}\b', '<C>', s)  # hex constants ≥5 digits
     # Normalize bare global symbol names (e.g., _sv_master, _com_sv_running)
-    s = re.sub(r'\b_[a-zA-Z]\w{3,}\b', '<C>', s)
+    s = re.sub(r'\b_[a-zA-Z]\w{2,}\b', '<C>', s)
+    # Collapse adjacent <C> patterns: <C>+<C> → <C>, <C>-<C> → <C>
+    s = re.sub(r'<C>[+-]<C>', '<C>', s)
     # Strip $ before <C> (e.g., $<C> → <C>)
     s = re.sub(r'\$<C>', '<C>', s)
     # Normalize register choice in parameter loads and stores
@@ -984,10 +1157,10 @@ def norm_stream(insns):
     j = 0
     while j < len(result):
         rn = norm(result[j])
-        # repz + cmpsb → repz cmpsb (GCC emits prefix as separate instruction)
-        if (j + 1 < len(result) and rn == 'repz' and
-            norm(result[j+1]).startswith('cmps')):
-            collapsed.append('repz ' + norm(result[j+1]))
+        # rep/repz + string op → combined (GCC emits prefix as separate instruction)
+        if (j + 1 < len(result) and rn in ('repz', 'rep') and
+            any(norm(result[j+1]).startswith(p) for p in ('cmps', 'movs', 'stos', 'scas', 'lods'))):
+            collapsed.append(rn + ' ' + norm(result[j+1]))
             j += 2
             continue
         # movl <C>, %reg; movl %reg, <C> → movl <C>, <C>

@@ -575,14 +575,43 @@ private:
             }
             case N_GSYM: {
                 auto parsed = m_typeTable.parseSymbol(sym.name);
-                if (parsed.descriptor == 'G')
-                    m_typeTable.addGlobal(parsed.name, sym.n_value, parsed.typeRef, false);
+                if (parsed.descriptor == 'G') {
+                    TypeRef useType = parsed.typeRef;
+                    // Validate: skip mismatched struct types from CU-scoped refs
+                    auto *rt = m_typeTable.resolveType(parsed.typeRef);
+                    if (rt && (rt->kind == StabsTypeKind::Struct || rt->kind == StabsTypeKind::Union) &&
+                        !rt->name.empty() && rt->name.find("$_") == std::string::npos &&
+                        parsed.name.size() >= 5) {  // skip for short names (ri, rg, re, tess, etc.)
+                        std::string sn = rt->name, gn = parsed.name;
+                        for (auto &c : sn) c = tolower(c);
+                        for (auto &c : gn) c = tolower(c);
+                        if (sn.size() > 2 && sn.substr(sn.size()-2) == "_t") sn = sn.substr(0, sn.size()-2);
+                        bool related = (gn.find(sn) != std::string::npos || sn.find(gn) != std::string::npos);
+                        if (!related && sn.size() >= 4) related = (gn.find(sn.substr(0,4)) != std::string::npos);
+                        if (!related) useType = NullType;
+                    }
+                    m_typeTable.addGlobal(parsed.name, sym.n_value, useType, false);
+                }
                 break;
             }
             case N_STSYM:
             case N_LCSYM: {
                 auto parsed = m_typeTable.parseSymbol(sym.name);
-                m_typeTable.addGlobal(parsed.name, sym.n_value, parsed.typeRef, true);
+                TypeRef useType = parsed.typeRef;
+                // Validate struct types (same as N_GSYM)
+                auto *rt2 = m_typeTable.resolveType(parsed.typeRef);
+                if (rt2 && (rt2->kind == StabsTypeKind::Struct || rt2->kind == StabsTypeKind::Union) &&
+                    !rt2->name.empty() && rt2->name.find("$_") == std::string::npos &&
+                    parsed.name.size() >= 5) {
+                    std::string sn = rt2->name, gn = parsed.name;
+                    for (auto &c : sn) c = tolower(c);
+                    for (auto &c : gn) c = tolower(c);
+                    if (sn.size() > 2 && sn.substr(sn.size()-2) == "_t") sn = sn.substr(0, sn.size()-2);
+                    bool related = (gn.find(sn) != std::string::npos || sn.find(gn) != std::string::npos);
+                    if (!related && sn.size() >= 4) related = (gn.find(sn.substr(0,4)) != std::string::npos);
+                    if (!related) useType = NullType;
+                }
+                m_typeTable.addGlobal(parsed.name, sym.n_value, useType, true);
                 break;
             }
             case N_RSYM: {
@@ -631,6 +660,114 @@ private:
             }
         }
 
+        // Fix parameter types using demangled function signatures.
+        // N_PSYM entries use CU-scoped type refs that can resolve to wrong types
+        // (e.g., int instead of struct WaveletDecode *). The mangled function name
+        // encodes the correct parameter types. When a param's STABS type resolves
+        // to a basic type (int) but the demangled name says it's a struct pointer,
+        // search the type table for the struct and override the param's type.
+        for (auto &fn : m_stabsFuncs) {
+            if (fn.params.empty() || fn.rawName.empty()) continue;
+            // Demangle to get full signature: "func(type1, type2, ...)"
+            // rawName has STABS suffix (":F(0,1)") — strip it first
+            std::string full = demangle(cleanStabsName(fn.rawName));
+            // Fix return type: if demangled name starts with "void " but
+            // STABS says int, override to void
+            if (full.substr(0, 5) == "void " && fn.returnType != NullType) {
+                auto *rrt = m_typeTable.resolveType(fn.returnType);
+                if (rrt && (rrt->kind == StabsTypeKind::Int || rrt->kind == StabsTypeKind::UInt)) {
+                    // Find a void type in the table
+                    for (auto &[tref, ti] : m_typeTable.allTypes()) {
+                        if (ti.kind == StabsTypeKind::Void) {
+                            fn.returnType = tref;
+                            break;
+                        }
+                    }
+                }
+            }
+            // Only process if demangled name has parameter list
+            if (fn.params.empty()) continue;
+            size_t parenOpen = full.rfind('(');
+            if (parenOpen == std::string::npos) continue;
+            size_t parenClose = full.rfind(')');
+            if (parenClose == std::string::npos || parenClose <= parenOpen) continue;
+            std::string paramStr = full.substr(parenOpen + 1, parenClose - parenOpen - 1);
+            // Split params by comma (simplified — doesn't handle nested templates)
+            std::vector<std::string> paramTypes;
+            {
+                size_t start = 0;
+                int depth = 0;
+                for (size_t i = 0; i <= paramStr.size(); ++i) {
+                    if (i < paramStr.size() && paramStr[i] == '<') depth++;
+                    else if (i < paramStr.size() && paramStr[i] == '>') depth--;
+                    else if ((i == paramStr.size() || paramStr[i] == ',') && depth == 0) {
+                        std::string pt = paramStr.substr(start, i - start);
+                        // Trim whitespace
+                        while (!pt.empty() && pt.front() == ' ') pt.erase(pt.begin());
+                        while (!pt.empty() && pt.back() == ' ') pt.pop_back();
+                        if (!pt.empty()) paramTypes.push_back(pt);
+                        start = i + 1;
+                    }
+                }
+            }
+            // Match params by position and fix types
+            for (size_t pi = 0; pi < fn.params.size() && pi < paramTypes.size(); ++pi) {
+                auto &param = fn.params[pi];
+                auto *pt = m_typeTable.resolveType(param.typeRef);
+                // Only fix if current type is a basic type (int, etc.)
+                if (!pt || (pt->kind != StabsTypeKind::Int && pt->kind != StabsTypeKind::UInt))
+                    continue;
+                // Check if demangled type says float but STABS says int (CU type mismatch)
+                std::string &dType = paramTypes[pi];
+                {
+                    std::string dt = dType;
+                    if (dt.compare(0, 6, "const ") == 0) dt = dt.substr(6);
+                    if (dt.compare(0, 9, "volatile ") == 0) dt = dt.substr(9);
+                    if (dt == "float" || dt == "double") {
+                        // Mark parameter as float by storing the demangled name info
+                        // The decompiler's Call emission handles the actual cast
+                        continue;
+                    }
+                }
+                // Check if demangled type suggests a struct pointer
+                if (dType.find('*') == std::string::npos) continue;
+                // Extract struct name: "struct Foo *" or "Foo *" or "const Foo *"
+                std::string structName;
+                size_t starPos = dType.rfind('*');
+                std::string before = dType.substr(0, starPos);
+                while (!before.empty() && before.back() == ' ') before.pop_back();
+                size_t lastSpace = before.rfind(' ');
+                structName = (lastSpace != std::string::npos) ? before.substr(lastSpace + 1) : before;
+                if (structName.empty() || structName == "char" || structName == "void" ||
+                    structName == "int" || structName == "byte" || structName == "unsigned")
+                    continue;
+                // Search type table for a struct with this name
+                if (structName == "float" || structName == "double" || structName == "long" ||
+                    structName == "short" || structName == "const" || structName == "signed")
+                    continue;
+                for (auto &[tref, ti] : m_typeTable.allTypes()) {
+                    if ((ti.kind == StabsTypeKind::Struct || ti.kind == StabsTypeKind::Union ||
+                         ti.kind == StabsTypeKind::ForwardRef) &&
+                        (ti.name == structName || ti.forwardTag == structName) &&
+                        (ti.kind == StabsTypeKind::ForwardRef || !ti.fields.empty())) {
+                        // Found the struct. Create a pointer type reference.
+                        // Look for an existing pointer-to-struct type
+                        for (auto &[pref, pti] : m_typeTable.allTypes()) {
+                            if (pti.kind == StabsTypeKind::Pointer && pti.targetType == tref) {
+                                param.typeRef = pref;
+                                goto next_param;
+                            }
+                        }
+                        // No pointer type found — use the struct type directly
+                        // (the lifter handles struct types for field access)
+                        param.typeRef = tref;
+                        goto next_param;
+                    }
+                }
+                next_param:;
+            }
+        }
+
         // Recover orphaned global type info: scan STABS strings for "name:G(CU,ID)"
         // patterns that weren't processed as N_GSYM entries. Match against nlist symbols
         // to get the address. This handles binaries where N_GSYM entries are missing.
@@ -661,8 +798,44 @@ private:
                     auto it = nlSyms.find(gname);
                     if (it != nlSyms.end()) {
                         auto parsed = m_typeTable.parseSymbol(entry);
-                        if (parsed.typeRef != NullType)
-                            m_typeTable.addGlobal(gname, it->second, parsed.typeRef, false);
+                        if (parsed.typeRef != NullType) {
+                            // Validate: if the type resolves to a struct, check if
+                            // the struct name is related to the global name.
+                            // Mismatched struct types from CU-scoped refs cause
+                            // compile errors ("not a structure or union").
+                            TypeRef useType = parsed.typeRef;
+                            auto *rt = m_typeTable.resolveType(parsed.typeRef);
+                            if (rt && (rt->kind == StabsTypeKind::Struct ||
+                                       rt->kind == StabsTypeKind::Union)) {
+                                // Check if struct name relates to global name
+                                std::string sn = rt->name;
+                                std::string gn = gname;
+                                // Convert both to lowercase for comparison
+                                for (auto &c : sn) c = tolower(c);
+                                for (auto &c : gn) c = tolower(c);
+                                // Check if either contains the other (partial match)
+                                bool related = false;
+                                if (sn.size() >= 3 && gn.size() >= 5) {  // skip for short names
+                                    // Strip common prefixes/suffixes
+                                    std::string sn2 = sn;
+                                    if (sn2.size() > 2 && sn2.substr(sn2.size()-2) == "_t")
+                                        sn2 = sn2.substr(0, sn2.size()-2);
+                                    if (gn.find(sn2) != std::string::npos ||
+                                        sn2.find(gn) != std::string::npos)
+                                        related = true;
+                                    // Also check if the global name starts with a
+                                    // common prefix of the struct name
+                                    if (sn2.size() >= 4 && gn.find(sn2.substr(0,4)) != std::string::npos)
+                                        related = true;
+                                }
+                                // Anonymous structs ($_NNNN) are always OK
+                                if (rt->name.find("$_") != std::string::npos)
+                                    related = true;
+                                if (!related)
+                                    useType = NullType;
+                            }
+                            m_typeTable.addGlobal(gname, it->second, useType, false);
+                        }
                     }
                 }
                 spos += slen + 1;

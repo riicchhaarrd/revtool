@@ -249,6 +249,32 @@ public:
             return interference.count({x, y}) > 0;
         };
 
+        // Build set of temps used in bitwise/shift operations
+        std::set<int> arithTemps;
+        for (auto &bb : func.blocks) {
+            for (auto &stmt : bb.stmts) {
+                if (stmt.kind != IRStmtKind::Assign || !stmt.expr) continue;
+                auto op = stmt.expr->op;
+                if (op == IROp::And || op == IROp::Or || op == IROp::Xor ||
+                    op == IROp::Shl || op == IROp::Shr || op == IROp::Sar ||
+                    op == IROp::Mul || op == IROp::SDiv || op == IROp::UDiv) {
+                    arithTemps.insert(stmt.destTemp);
+                    // Also mark operand temps as arithmetic-involved
+                    for (auto &k : stmt.expr->kids)
+                        if (k && k->op == IROp::Temp) arithTemps.insert(k->tempId());
+                }
+            }
+        }
+        // Build set of temps with struct/pointer types
+        std::set<int> structTemps;
+        for (auto &[tid, tref] : func.tempTypes) {
+            if (tref == NullType) continue;
+            auto *rt = types.resolveType(tref);
+            if (rt && (rt->kind == StabsTypeKind::Struct || rt->kind == StabsTypeKind::Union ||
+                       rt->kind == StabsTypeKind::Pointer || rt->kind == StabsTypeKind::ForwardRef))
+                structTemps.insert(tid);
+        }
+
         // Process copy edges: merge if no interference between representatives
         // Skip edges involving phi temps (loop variable phis must stay separate
         // from their initial/updated values to preserve loop semantics)
@@ -256,6 +282,13 @@ public:
             int ta = tempList[a], tb = tempList[b];
             if (func.phiTemps.count(ta) || func.phiTemps.count(tb))
                 continue; // don't coalesce phi temps with their sources
+            // Don't merge struct/pointer temps with arithmetic temps
+            bool aIsStruct = structTemps.count(ta);
+            bool bIsStruct = structTemps.count(tb);
+            bool aIsArith = arithTemps.count(ta);
+            bool bIsArith = arithTemps.count(tb);
+            if ((aIsStruct && bIsArith) || (bIsStruct && aIsArith))
+                continue;
             int ra = ufFind(a), rb = ufFind(b);
             if (ra == rb) continue;
             if (!interferes(ra, rb))
@@ -378,7 +411,10 @@ public:
                                 if (e->op == IROp::Temp && groupTids.count(e->tempId()) && parentIsArith)
                                     return true;
                                 bool isArith = (e->op == IROp::Mul || e->op == IROp::SDiv ||
-                                                e->op == IROp::UDiv);
+                                                e->op == IROp::UDiv || e->op == IROp::And ||
+                                                e->op == IROp::Or || e->op == IROp::Xor ||
+                                                e->op == IROp::Shl || e->op == IROp::Shr ||
+                                                e->op == IROp::Sar);
                                 for (auto &k : e->kids)
                                     if (scan(k.get(), isArith)) return true;
                                 return false;
@@ -393,7 +429,10 @@ public:
                                 std::function<bool(const IRExpr*)> hasMul;
                                 hasMul = [&](const IRExpr *e) -> bool {
                                     if (!e) return false;
-                                    if (e->op == IROp::Mul || e->op == IROp::SDiv) return true;
+                                    if (e->op == IROp::Mul || e->op == IROp::SDiv ||
+                                        e->op == IROp::And || e->op == IROp::Or ||
+                                        e->op == IROp::Xor || e->op == IROp::Shl ||
+                                        e->op == IROp::Shr || e->op == IROp::Sar) return true;
                                     for (auto &k : e->kids)
                                         if (hasMul(k.get())) return true;
                                     return false;

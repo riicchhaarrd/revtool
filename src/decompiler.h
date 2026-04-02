@@ -814,8 +814,8 @@ public:
 
     // Remove empty if blocks from output text
     static QString cleanupOutput(const QString &code) {
-        // Pre-pass: fix &EXPR->field_X patterns → (EXPR + 0xX)
         QString cleaned = code;
+
         auto isSimpleIdentifier = [](const QString &name) {
             if (name.isEmpty()) return false;
             for (int i = 0; i < name.size(); ++i) {
@@ -1811,10 +1811,18 @@ private:
                     auto &p = m_func.params[i];
                     std::string decl;
                     if (p.typeRef != NullType) {
-                        decl = m_types.formatDecl(p.typeRef, p.name);
-                        // Strip const from 'this' pointer (C++ const methods make this const T*)
-                        if (p.name == "this" && decl.find("const ") == 0)
-                            decl = decl.substr(6);
+                        // Small structs (≤4 bytes) passed by value are equivalent
+                        // to int on x86. Use int to avoid invalid C like
+                        // "(unsigned)(struct_var)" when the code treats it as int.
+                        auto *pt = m_types.resolveType(p.typeRef);
+                        if (pt && pt->kind == StabsTypeKind::Struct &&
+                            pt->sizeBytes > 0 && pt->sizeBytes <= 4) {
+                            decl = "int " + p.name;
+                        } else {
+                            decl = m_types.formatDecl(p.typeRef, p.name);
+                            if (p.name == "this" && decl.find("const ") == 0)
+                                decl = decl.substr(6);
+                        }
                     } else {
                         decl = "int " + p.name;
                     }
@@ -2034,10 +2042,29 @@ private:
             for (auto &bb : m_func.blocks)
                 for (auto &stmt : bb.stmts)
                     collectSynthVars(stmt, synthVars);
+            // Detect variables that should be short: ALL assignments have Trunc16 cast
+            std::map<std::string, int> varTrunc16;  // name → count of Trunc16 assigns
+            std::map<std::string, int> varAnyAssign; // name → count of any assigns
+            for (auto &bb : m_func.blocks) {
+                for (auto &stmt : bb.stmts) {
+                    if (stmt.kind == IRStmtKind::VarSet && !stmt.destVar.empty() && stmt.expr) {
+                        varAnyAssign[stmt.destVar]++;
+                        if (stmt.expr->op == IROp::Cast &&
+                            stmt.expr->castKind == CastKind::Trunc16)
+                            varTrunc16[stmt.destVar]++;
+                    }
+                }
+            }
             for (auto &name : synthVars) {
                 if (declared.count(name) || paramNames.count(name)) continue;
                 declared.insert(name);
-                out += "    int " + QString::fromStdString(name) + ";\n";
+                // If ALL assignments to this var use Trunc16, declare as short
+                bool isShort = (varTrunc16.count(name) && varAnyAssign.count(name) &&
+                                varTrunc16[name] == varAnyAssign[name] && varTrunc16[name] > 0);
+                if (isShort)
+                    out += "    short " + QString::fromStdString(name) + ";\n";
+                else
+                    out += "    int " + QString::fromStdString(name) + ";\n";
             }
             if (!declared.empty()) out += "\n";
 
@@ -2169,17 +2196,56 @@ private:
                 if (!canonicalReturn.count(retExpr))
                     canonicalReturn[retExpr] = bbId;
             }
-            // Emit flat blocks
-            for (int bbId = 0; bbId < (int)m_func.blocks.size(); ++bbId) {
+            // Emit flat blocks in DFS order so GCC sees natural code flow.
+            // This prevents the optimizer from eliminating "unreachable" blocks
+            // that are actually reachable via gotos from later blocks.
+            std::vector<int> blockOrder;
+            {
+                int n = (int)m_func.blocks.size();
+                std::vector<bool> visited(n, false);
+                std::vector<int> stack;
+                stack.push_back(0);
+                while (!stack.empty()) {
+                    int bbId = stack.back();
+                    stack.pop_back();
+                    if (bbId < 0 || bbId >= n || visited[bbId]) continue;
+                    visited[bbId] = true;
+                    blockOrder.push_back(bbId);
+                    // Push successors (reverse order for DFS left-first)
+                    auto &bb = m_func.blocks[bbId];
+                    std::vector<int> succs;
+                    for (auto &s : bb.stmts) {
+                        if (s.kind == IRStmtKind::Branch) {
+                            succs.push_back(s.falseTarget);
+                            succs.push_back(s.trueTarget);
+                        } else if (s.kind == IRStmtKind::Jump) {
+                            succs.push_back(s.jumpTarget);
+                        }
+                    }
+                    for (auto it = succs.rbegin(); it != succs.rend(); ++it)
+                        stack.push_back(*it);
+                }
+                // Add any remaining unvisited blocks
+                for (int i = 0; i < n; ++i)
+                    if (!visited[i]) blockOrder.push_back(i);
+            }
+            for (int bbId : blockOrder) {
                 auto &bb = m_func.blocks[bbId];
                 out += QString("bb_%1:\n").arg(bbId);
                 for (int si = 0; si < (int)bb.stmts.size(); ++si) {
                     auto &stmt = bb.stmts[si];
                     if (stmt.kind == IRStmtKind::Branch) {
                         std::string cond = stmt.expr ? emitExpr(stmt.expr.get()) : "1";
-                        out += QString("    if (%1) goto bb_%2; else goto bb_%3;\n")
-                            .arg(QString::fromStdString(cond))
-                            .arg(stmt.trueTarget).arg(stmt.falseTarget);
+                        // Simplify constant branches to plain gotos
+                        if (cond == "1" || cond == "(1)") {
+                            out += QString("    goto bb_%1;\n").arg(stmt.trueTarget);
+                        } else if (cond == "0" || cond == "(0)") {
+                            out += QString("    goto bb_%1;\n").arg(stmt.falseTarget);
+                        } else {
+                            out += QString("    if (%1) goto bb_%2; else goto bb_%3;\n")
+                                .arg(QString::fromStdString(cond))
+                                .arg(stmt.trueTarget).arg(stmt.falseTarget);
+                        }
                     } else if (stmt.kind == IRStmtKind::Jump) {
                         out += QString("    goto bb_%1;\n").arg(stmt.jumpTarget);
                     } else if (stmt.kind == IRStmtKind::Return) {
@@ -2213,6 +2279,80 @@ private:
                     }
                 }
             }
+            // Post-pass: find any undeclared variables in the flat body and add declarations.
+            {
+                std::set<std::string> declared, used;
+                std::string outStr = out.toStdString();
+                // Find all identifiers that look like variable names
+                // (vNNN, tNNN, var_XX, wavelet*, bb_N labels are excluded)
+                auto scanIdents = [](const std::string &s, std::set<std::string> &out) {
+                    for (size_t i = 0; i < s.size(); ++i) {
+                        if (!isalpha(s[i]) && s[i] != '_') continue;
+                        if (i > 0 && (isalnum(s[i-1]) || s[i-1] == '_')) continue;
+                        size_t start = i;
+                        while (i < s.size() && (isalnum(s[i]) || s[i] == '_')) i++;
+                        std::string word = s.substr(start, i - start);
+                        // Only track vN, tN patterns (synthetic temp names)
+                        if ((word[0] == 'v' || word[0] == 't') && word.size() > 1 &&
+                            isdigit(word[1])) {
+                            out.insert(word);
+                        }
+                    }
+                };
+                // Find declarations
+                for (auto &line : out.split('\n')) {
+                    QString t = line.trimmed();
+                    if (t.startsWith("int ") || t.startsWith("float ") || t.startsWith("char ") ||
+                        t.startsWith("byte ") || t.startsWith("short ") || t.startsWith("unsigned ") ||
+                        t.startsWith("DWORD ") || t.startsWith("const ") || t.startsWith("struct ")) {
+                        scanIdents(t.toStdString(), declared);
+                    }
+                }
+                // Find all references
+                scanIdents(outStr, used);
+                // Add missing declarations
+                QString decls;
+                for (auto &v : used) {
+                    if (!declared.count(v))
+                        decls += "    int " + QString::fromStdString(v) + ";\n";
+                }
+                if (!decls.isEmpty()) {
+                    int insertPos = out.indexOf("\nbb_");
+                    if (insertPos >= 0) out.insert(insertPos + 1, decls);
+                }
+            }
+
+            // Fix float→int: if a variable is declared float but used in
+            // bitwise/shift operations (>>, <<, &, |, ^), redeclare as int.
+            {
+                QStringList oLines = out.split('\n');
+                for (int li = 0; li < oLines.size(); ++li) {
+                    QString t = oLines[li].trimmed();
+                    if (!t.startsWith("float ") && !t.startsWith("byte ")) continue;
+                    // Extract variable name
+                    int semi = t.indexOf(';');
+                    if (semi < 0) continue;
+                    QString typePart = t.startsWith("float ") ? "float " : "byte ";
+                    QString varName = t.mid(typePart.size(), semi - typePart.size()).trimmed();
+                    if (varName.isEmpty()) continue;
+                    // Check if this var is used in bitwise/shift ops
+                    bool usedInBitwise = false;
+                    for (int lj = li + 1; lj < oLines.size(); ++lj) {
+                        if (oLines[lj].contains(varName + " >>") || oLines[lj].contains(varName + " <<") ||
+                            oLines[lj].contains(varName + " &") || oLines[lj].contains(varName + " |") ||
+                            oLines[lj].contains(varName + " ^") ||
+                            oLines[lj].contains(varName + ") >>") || oLines[lj].contains(varName + ") <<")) {
+                            usedInBitwise = true;
+                            break;
+                        }
+                    }
+                    if (usedInBitwise) {
+                        oLines[li].replace(typePart + varName, "int " + varName);
+                    }
+                }
+                out = oLines.join('\n');
+            }
+
             out += "}\n";
             return out;
         }
@@ -2839,6 +2979,8 @@ private:
                 std::string storeCast = "int";
                 if (stmt.storeSize == 1) storeCast = "char";
                 else if (stmt.storeSize == 2) storeCast = "short";
+                else if (stmt.storeSize == 5) storeCast = "float";
+                else if (stmt.storeSize == 9) storeCast = "double";
                 // Field expression → base->field = val
                 if (a->op == IROp::Field) {
                     out += pad(indent) + QString::fromStdString(emitExpr(a) + " = " + val) + ";\n";
@@ -2969,9 +3111,25 @@ private:
                     std::string base = emitExpr(a->kids[0]->kids[0].get());
                     std::string idx = emitExpr(a->kids[0]->kids[1]->kids[0].get());
                     int off = (int)a->kids[1]->value;
-                    char fname[64]; snprintf(fname, sizeof(fname), "arr_%X[%s]", (unsigned)off, idx.c_str());
-                    out += pad(indent) + QString::fromStdString(
-                        base + "->" + fname + " = " + val) + ";\n";
+                    // Try to resolve field name from struct type
+                    std::string fieldAccess;
+                    TypeRef stBaseType = exprType(a->kids[0]->kids[0].get());
+                    if (stBaseType != NullType && m_types.isStructPointer(stBaseType)) {
+                        TypeRef structRef = m_types.getPointedStruct(stBaseType);
+                        if (structRef != NullType)
+                            fieldAccess = m_types.formatFieldAccess(structRef, off);
+                    }
+                    if (!fieldAccess.empty()) {
+                        size_t bracket = fieldAccess.find('[');
+                        if (bracket != std::string::npos && fieldAccess.substr(bracket) == "[0]")
+                            fieldAccess = fieldAccess.substr(0, bracket);
+                        out += pad(indent) + QString::fromStdString(
+                            base + "->" + fieldAccess + "[" + idx + "] = " + val) + ";\n";
+                    } else {
+                        char fname[64]; snprintf(fname, sizeof(fname), "arr_%X[%s]", (unsigned)off, idx.c_str());
+                        out += pad(indent) + QString::fromStdString(
+                            base + "->" + fname + " = " + val) + ";\n";
+                    }
                 }
                 // General Add/Sub expression → *(type *)((char *)(expr)) = val
                 else if ((a->op == IROp::Add || a->op == IROp::Sub) && a->kids.size() == 2) {
@@ -3047,7 +3205,17 @@ private:
                         break;
                     }
                 }
-                out += pad(indent) + QString::fromStdString(cName(dest) + " = " + val) + ";\n";
+                // For sub-word stores (16-bit/8-bit), use pointer cast to force
+                // the correct store width: *(short *)(&dest) = val
+                if (stmt.storeSize == 2) {
+                    out += pad(indent) + QString::fromStdString(
+                        "*(short *)(&" + cName(dest) + ") = " + val) + ";\n";
+                } else if (stmt.storeSize == 1) {
+                    out += pad(indent) + QString::fromStdString(
+                        "*(char *)(&" + cName(dest) + ") = " + val) + ";\n";
+                } else {
+                    out += pad(indent) + QString::fromStdString(cName(dest) + " = " + val) + ";\n";
+                }
                 break;
             }
             case IRStmtKind::Call: {
@@ -3201,6 +3369,8 @@ private:
             switch (loadSize) {
             case 1: return "unsigned char";
             case 2: return "unsigned short";
+            case 5: return "float";   // special: 4-byte float load (from SSE)
+            case 9: return "double";  // special: 8-byte double load
             default: return "int";
             }
         }
@@ -3345,6 +3515,7 @@ private:
 
             case IROp::Load: {
                 auto *addr = e->kids[0].get();
+                if (e->loadSize == 5 || e->loadSize == 9)
                 m_addrDepth++;
                 // (base + index*scale + const) → base->array_NN[index] pattern
                 if (addr && addr->op == IROp::Add && addr->kids.size() == 2 &&
@@ -3367,12 +3538,31 @@ private:
                         std::string baseStr = emitExpr(base);
                         std::string idxStr = emitExpr(index);
                         int off = (int)addr->kids[1]->value;
-                        char fname[64];
-                        if (elemSize == 4)
-                            snprintf(fname, sizeof(fname), "arr_%X[%s]", (unsigned)off, idxStr.c_str());
-                        else
-                            snprintf(fname, sizeof(fname), "arr_%X_%d[%s]", (unsigned)off, elemSize, idxStr.c_str());
-                        result = baseStr + "->" + fname;
+                        // Try to resolve the field name from struct type info
+                        std::string fieldAccess;
+                        TypeRef baseType = exprType(base);
+                        if (baseType != NullType && m_types.isStructPointer(baseType)) {
+                            TypeRef structRef = m_types.getPointedStruct(baseType);
+                            if (structRef != NullType)
+                                fieldAccess = m_types.formatFieldAccess(structRef, off);
+                        }
+                        if (!fieldAccess.empty()) {
+                            // Got a real field name — use array subscript on it
+                            // If fieldAccess is "name[0]", strip the [0] to get just "name"
+                            // so the dynamic index applies directly: name[idx]
+                            size_t bracket = fieldAccess.find('[');
+                            if (bracket != std::string::npos &&
+                                fieldAccess.substr(bracket) == "[0]")
+                                fieldAccess = fieldAccess.substr(0, bracket);
+                            result = baseStr + "->" + fieldAccess + "[" + idxStr + "]";
+                        } else {
+                            char fname[64];
+                            if (elemSize == 4)
+                                snprintf(fname, sizeof(fname), "arr_%X[%s]", (unsigned)off, idxStr.c_str());
+                            else
+                                snprintf(fname, sizeof(fname), "arr_%X_%d[%s]", (unsigned)off, elemSize, idxStr.c_str());
+                            result = baseStr + "->" + fname;
+                        }
                         break;
                     }
                 }
@@ -3530,8 +3720,12 @@ private:
                 }
                 // If result uses *(expr), ensure it's a valid dereference
                 // Cast through (char *) to handle int→pointer and const→pointer safely
+                // Skip when result already has a proper type cast from Load emission
                 if (!result.empty() && result[0] == '*' && result.find("*(int *)") != 0 &&
-                    result.find("*(char *)") != 0 && result.find("*(short *)") != 0) {
+                    result.find("*(char *)") != 0 && result.find("*(short *)") != 0 &&
+                    result.find("*(float *)") != 0 && result.find("*(double *)") != 0 &&
+                    result.find("*(unsigned char *)") != 0 &&
+                    result.find("*(unsigned short *)") != 0) {
                     std::string addrStr = emitExpr(addr);
                     TypeRef addrT = exprType(addr);
                     bool isPtr = false;
@@ -3994,6 +4188,29 @@ private:
                 if (e->op == IROp::Shr) {
                     // Logical shift right needs unsigned cast to avoid sar
                     result = "((unsigned)(" + lhs + ") >> " + rhs + ")";
+                } else if (e->op == IROp::Add) {
+                    // When adding to an address-of or struct/array expression,
+                    // cast to (char*) to prevent pointer arithmetic scaling.
+                    auto needsCast = [&](const std::string &s, IRExpr *kid) -> bool {
+                        if (s.find("&") != std::string::npos) return true;
+                        // Check if the operand is a struct/array typed variable
+                        if (kid && kid->op == IROp::Var && kid->typeRef != NullType) {
+                            auto *t = m_types.resolveType(kid->typeRef);
+                            if (t && (t->kind == StabsTypeKind::Struct ||
+                                      t->kind == StabsTypeKind::Union ||
+                                      t->kind == StabsTypeKind::Array))
+                                return true;
+                        }
+                        return false;
+                    };
+                    bool lhsNeedsCast = needsCast(lhs, e->kids[0].get());
+                    bool rhsNeedsCast = needsCast(rhs, e->kids[1].get());
+                    if (lhsNeedsCast)
+                        result = "(" + rhs + " + (char*)" + lhs + ")";
+                    else if (rhsNeedsCast)
+                        result = "(" + lhs + " + (char*)" + rhs + ")";
+                    else
+                        result = "(" + lhs + op + rhs + ")";
                 } else {
                     result = "(" + lhs + op + rhs + ")";
                 }
@@ -4122,11 +4339,11 @@ private:
                 }
                 if (vslot >= 0 && !e->kids.empty()) {
                     std::string thisArg = emitExpr(e->kids[0].get());
-                    // Use _Bool return type for vtable calls (most return bool,
-                    // and _Bool generates testb instead of testl for condition checks)
+                    // Use int return type for vtable calls (void* would also
+                    // work, but int matches testl in condition checks)
                     char buf[128];
                     snprintf(buf, sizeof(buf),
-                        "((_Bool(*)(void*))(((void**)(*(void**)%s))[%d]))(",
+                        "((int(*)(void*))(((void**)(*(void**)%s))[%d]))(",
                         thisArg.c_str(), vslot);
                     result = buf;
                     for (size_t i = 0; i < e->kids.size(); ++i) {
@@ -4135,10 +4352,49 @@ private:
                     }
                     result += ")";
                 } else {
+                    // Look up the called function's demangled parameter types
+                    // to cast integer args to float when the parameter is float.
+                    // STABS parameter typeRefs may resolve to wrong types due to
+                    // CU scoping, so use the demangled C++ signature instead.
+                    std::vector<std::string> dParamTypes;
+                    {
+                        const StabsFunction *calledFn = m_mf.stabsFunctionByName(e->name);
+                        if (calledFn && !calledFn->rawName.empty() &&
+                            calledFn->rawName.find("_Z") != std::string::npos) {
+                            std::string rn = calledFn->rawName;
+                            auto col = rn.find(':');
+                            if (col != std::string::npos) rn = rn.substr(0, col);
+                            std::string full = demangle(rn);
+                            size_t po = full.rfind('('), pc = full.rfind(')');
+                            if (po != std::string::npos && pc != std::string::npos && pc > po) {
+                                std::string ps = full.substr(po + 1, pc - po - 1);
+                                size_t start = 0; int depth = 0;
+                                for (size_t c = 0; c <= ps.size(); ++c) {
+                                    if (c < ps.size() && ps[c] == '<') depth++;
+                                    else if (c < ps.size() && ps[c] == '>') depth--;
+                                    else if ((c == ps.size() || ps[c] == ',') && depth == 0) {
+                                        std::string pt = ps.substr(start, c - start);
+                                        while (!pt.empty() && pt.front() == ' ') pt.erase(pt.begin());
+                                        while (!pt.empty() && pt.back() == ' ') pt.pop_back();
+                                        if (pt.compare(0, 6, "const ") == 0) pt = pt.substr(6);
+                                        dParamTypes.push_back(pt);
+                                        start = c + 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
                     result = funcName + "(";
                     for (size_t i = 0; i < e->kids.size(); ++i) {
                         if (i) result += ", ";
-                        result += emitExpr(e->kids[i].get());
+                        std::string arg = emitExpr(e->kids[i].get());
+                        // Cast *(int *) loads to *(float *) for float params
+                        if (i < dParamTypes.size() &&
+                            (dParamTypes[i] == "float" || dParamTypes[i] == "double") &&
+                            arg.find("*(int *)") == 0) {
+                            arg = "*(float *)" + arg.substr(8);
+                        }
+                        result += arg;
                     }
                     result += ")";
                 }
