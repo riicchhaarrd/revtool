@@ -717,10 +717,20 @@ private:
                 // Only fix if current type is a basic type (int, etc.)
                 if (!pt || (pt->kind != StabsTypeKind::Int && pt->kind != StabsTypeKind::UInt))
                     continue;
-                // Check if demangled type suggests a struct pointer
+                // Check if demangled type says float but STABS says int (CU type mismatch)
                 std::string &dType = paramTypes[pi];
-                bool isStructPtr = (dType.find('*') != std::string::npos);
-                if (!isStructPtr) continue;
+                {
+                    std::string dt = dType;
+                    if (dt.compare(0, 6, "const ") == 0) dt = dt.substr(6);
+                    if (dt.compare(0, 9, "volatile ") == 0) dt = dt.substr(9);
+                    if (dt == "float" || dt == "double") {
+                        // Mark parameter as float by storing the demangled name info
+                        // The decompiler's Call emission handles the actual cast
+                        continue;
+                    }
+                }
+                // Check if demangled type suggests a struct pointer
+                if (dType.find('*') == std::string::npos) continue;
                 // Extract struct name: "struct Foo *" or "Foo *" or "const Foo *"
                 std::string structName;
                 size_t starPos = dType.rfind('*');

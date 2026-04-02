@@ -2751,7 +2751,11 @@ private:
                     m_espArgs[(int)o[0].mem.disp] = std::move(st0);
                     if (mn == "fstp") fpuPop();
                 } else {
-                    writeOp(o[0], std::move(st0), bb);
+                    // For memory stores, mark as float store size
+                    if (o[0].type == X86_OP_MEM)
+                        writeMem(o[0].mem, std::move(st0), bb, 5);
+                    else
+                        writeOp(o[0], std::move(st0), bb);
                     if (mn == "fstp") fpuPop();
                 }
             }
@@ -2962,15 +2966,23 @@ private:
     bool liftSSE(const std::string &mn, cs_x86_op *o, int n, BasicBlock &bb, cs_insn &in) {
         // ── Scalar moves: movss, movsd ──────────────────────────────
         if ((mn == "movss" || mn == "movsd") && n == 2) {
+            bool dbl = (mn == "movsd");
             // movss/movsd [esp+N], xmm → collect as call argument
             if (o[0].type == X86_OP_MEM && o[0].mem.base == X86_REG_ESP &&
                 o[0].mem.index == X86_REG_INVALID) {
-                auto src = readSSEOp(o[1], mn == "movsd");
+                auto src = readSSEOp(o[1], dbl);
                 if (src) m_espArgs[(int)o[0].mem.disp] = std::move(src);
                 return true;
             }
-            auto src = readSSEOp(o[1], mn == "movsd");
-            if (src) writeOp(o[0], std::move(src), bb);
+            auto src = readSSEOp(o[1], dbl);
+            if (src) {
+                // For memory stores, use float/double store size so the
+                // decompiler emits *(float*) instead of *(int*)
+                if (o[0].type == X86_OP_MEM)
+                    writeMem(o[0].mem, std::move(src), bb, dbl ? 9 : 5);
+                else
+                    writeOp(o[0], std::move(src), bb);
+            }
             return true;
         }
         // ── Packed moves (treat as scalar for decompilation) ────────

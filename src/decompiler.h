@@ -2958,6 +2958,8 @@ private:
                 std::string storeCast = "int";
                 if (stmt.storeSize == 1) storeCast = "char";
                 else if (stmt.storeSize == 2) storeCast = "short";
+                else if (stmt.storeSize == 5) storeCast = "float";
+                else if (stmt.storeSize == 9) storeCast = "double";
                 // Field expression → base->field = val
                 if (a->op == IROp::Field) {
                     out += pad(indent) + QString::fromStdString(emitExpr(a) + " = " + val) + ";\n";
@@ -4294,10 +4296,49 @@ private:
                     }
                     result += ")";
                 } else {
+                    // Look up the called function's demangled parameter types
+                    // to cast integer args to float when the parameter is float.
+                    // STABS parameter typeRefs may resolve to wrong types due to
+                    // CU scoping, so use the demangled C++ signature instead.
+                    std::vector<std::string> dParamTypes;
+                    {
+                        const StabsFunction *calledFn = m_mf.stabsFunctionByName(e->name);
+                        if (calledFn && !calledFn->rawName.empty() &&
+                            calledFn->rawName.find("_Z") != std::string::npos) {
+                            std::string rn = calledFn->rawName;
+                            auto col = rn.find(':');
+                            if (col != std::string::npos) rn = rn.substr(0, col);
+                            std::string full = demangle(rn);
+                            size_t po = full.rfind('('), pc = full.rfind(')');
+                            if (po != std::string::npos && pc != std::string::npos && pc > po) {
+                                std::string ps = full.substr(po + 1, pc - po - 1);
+                                size_t start = 0; int depth = 0;
+                                for (size_t c = 0; c <= ps.size(); ++c) {
+                                    if (c < ps.size() && ps[c] == '<') depth++;
+                                    else if (c < ps.size() && ps[c] == '>') depth--;
+                                    else if ((c == ps.size() || ps[c] == ',') && depth == 0) {
+                                        std::string pt = ps.substr(start, c - start);
+                                        while (!pt.empty() && pt.front() == ' ') pt.erase(pt.begin());
+                                        while (!pt.empty() && pt.back() == ' ') pt.pop_back();
+                                        if (pt.compare(0, 6, "const ") == 0) pt = pt.substr(6);
+                                        dParamTypes.push_back(pt);
+                                        start = c + 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
                     result = funcName + "(";
                     for (size_t i = 0; i < e->kids.size(); ++i) {
                         if (i) result += ", ";
-                        result += emitExpr(e->kids[i].get());
+                        std::string arg = emitExpr(e->kids[i].get());
+                        // Cast *(int *) loads to *(float *) for float params
+                        if (i < dParamTypes.size() &&
+                            (dParamTypes[i] == "float" || dParamTypes[i] == "double") &&
+                            arg.find("*(int *)") == 0) {
+                            arg = "*(float *)" + arg.substr(8);
+                        }
+                        result += arg;
                     }
                     result += ")";
                 }
