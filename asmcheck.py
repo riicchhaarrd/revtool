@@ -337,7 +337,7 @@ def compile_to_asm(c_code, orig_check=None):
     # Pre-extract all struct/typedef types referenced in the code from the types header
     extracted = {}  # name -> definition (ordered by dependency)
     # Find struct references AND typedef names (Type_t patterns used as pointer types)
-    refs = set(re.findall(r'(?:struct|union)\s+(\w+)', c_code))
+    refs = set(re.findall(r'(?:struct|union)\s+([\w$]+)', c_code))
     # Also find typedef names used as pointer base types: "type_t *var"
     # Skip simple types already in STUBS (vec_t, qboolean, etc.)
     stubs_types = set(re.findall(r'typedef\s+\S+.*?\s+(\w+)\s*[;\[]', STUBS))
@@ -352,6 +352,7 @@ def compile_to_asm(c_code, orig_check=None):
             refs.add(name)
     # Find globals used with .field access and look up their struct types.
     # Pattern: "globalName.field" in code → find "extern struct X globalName;" in header
+    global_externs = []
     lines_h = _load_types_header()
     if lines_h:
         # Build a map of global → struct type from extern declarations
@@ -360,11 +361,17 @@ def compile_to_asm(c_code, orig_check=None):
             m = re.match(r'extern\s+struct\s+(\w+)\s+(\w+)\s*;', line.strip())
             if m:
                 global_types[m.group(2)] = m.group(1)
-        # Find globals used with .field in the code
+        # Find globals used with .field in the code, extract their struct types
+        # AND add extern declarations so the compiler knows the variable type
+        global_externs = []
         for m in re.finditer(r'\b(\w+)\.(\w+)', c_code):
             gname = m.group(1)
             if gname in global_types:
-                refs.add(global_types[gname])
+                stype = global_types[gname]
+                refs.add(stype)
+                # Only add extern if the struct is fully defined in the header
+                if extract_struct_from_header(stype):
+                    global_externs.append(f'extern struct {stype} {gname};')
     queue = list(refs)
     visited = set()
     while queue:
@@ -374,14 +381,15 @@ def compile_to_asm(c_code, orig_check=None):
         defn = extract_struct_from_header(name)
         if defn:
             # Skip structs with invalid C (vtable pointers, C++ artifacts)
-            if '$' in defn or '(*)()' in defn or '::' in defn:
+            # Note: $_NNNN anonymous types are valid GCC extensions, don't skip those
+            if '(*)()' in defn or '::' in defn:
                 continue
             extracted[name] = defn
             # Also register any struct tags defined in this block
             for m in re.finditer(r'struct\s+(\w+)\s*\{', defn):
                 extracted.setdefault(m.group(1), defn)
-            # Extract dependencies: struct fields by value AND typedef references
-            for m in re.finditer(r'(?:struct|union)\s+(\w+)\s+\w+', defn):
+            # Extract dependencies: struct/union/enum fields AND typedef references
+            for m in re.finditer(r'(?:struct|union|enum)\s+([\w$]+)\s+[\w$]+', defn):
                 if m.group(1) not in visited:
                     queue.append(m.group(1))
             for m in re.finditer(r'\b(\w+_t)\s+\*?\s*\w+', defn):
@@ -461,8 +469,8 @@ def compile_to_asm(c_code, orig_check=None):
             emitted_set.add(m.group(1))
         for m in re.finditer(r'typedef\s+struct\s+\w+\s+(\w+)\s*;', defn):
             emitted_set.add(m.group(1))
-        # Emit dependencies first
-        for m in re.finditer(r'(?:struct|union)\s+(\w+)\s+\w+', defn):
+        # Emit dependencies first (struct, union, enum)
+        for m in re.finditer(r'(?:struct|union|enum)\s+([\w$]+)\s+[\w$]+', defn):
             emit_type(m.group(1))
         for m in re.finditer(r'\b(\w+_t)\s+\*?\s*\w+', defn):
             if m.group(1) not in emitted_set:
@@ -476,6 +484,9 @@ def compile_to_asm(c_code, orig_check=None):
     for name in extracted:
         emit_type(name)
     types_block = '\n'.join(ordered)
+    # Add extern declarations for globals with struct types
+    if global_externs:
+        types_block += '\n' + '\n'.join(set(global_externs))
     # Always include Dvar function prototypes.
     # Only include the 'typedef int dvar_t' stub if the real dvar_t isn't extracted.
     # dvar_t struct is defined in STUBS. Always include DVAR_PROTOS for

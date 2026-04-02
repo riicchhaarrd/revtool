@@ -581,7 +581,7 @@ private:
                     auto *rt = m_typeTable.resolveType(parsed.typeRef);
                     if (rt && (rt->kind == StabsTypeKind::Struct || rt->kind == StabsTypeKind::Union) &&
                         !rt->name.empty() && rt->name.find("$_") == std::string::npos &&
-                        parsed.name.size() >= 4) {  // skip for short names (ri, rg, re, etc.)
+                        parsed.name.size() >= 5) {  // skip for short names (ri, rg, re, tess, etc.)
                         std::string sn = rt->name, gn = parsed.name;
                         for (auto &c : sn) c = tolower(c);
                         for (auto &c : gn) c = tolower(c);
@@ -597,7 +597,21 @@ private:
             case N_STSYM:
             case N_LCSYM: {
                 auto parsed = m_typeTable.parseSymbol(sym.name);
-                m_typeTable.addGlobal(parsed.name, sym.n_value, parsed.typeRef, true);
+                TypeRef useType = parsed.typeRef;
+                // Validate struct types (same as N_GSYM)
+                auto *rt2 = m_typeTable.resolveType(parsed.typeRef);
+                if (rt2 && (rt2->kind == StabsTypeKind::Struct || rt2->kind == StabsTypeKind::Union) &&
+                    !rt2->name.empty() && rt2->name.find("$_") == std::string::npos &&
+                    parsed.name.size() >= 5) {
+                    std::string sn = rt2->name, gn = parsed.name;
+                    for (auto &c : sn) c = tolower(c);
+                    for (auto &c : gn) c = tolower(c);
+                    if (sn.size() > 2 && sn.substr(sn.size()-2) == "_t") sn = sn.substr(0, sn.size()-2);
+                    bool related = (gn.find(sn) != std::string::npos || sn.find(gn) != std::string::npos);
+                    if (!related && sn.size() >= 4) related = (gn.find(sn.substr(0,4)) != std::string::npos);
+                    if (!related) useType = NullType;
+                }
+                m_typeTable.addGlobal(parsed.name, sym.n_value, useType, true);
                 break;
             }
             case N_RSYM: {
@@ -776,7 +790,7 @@ private:
                                 for (auto &c : gn) c = tolower(c);
                                 // Check if either contains the other (partial match)
                                 bool related = false;
-                                if (sn.size() >= 3 && gn.size() >= 4) {  // skip for short names
+                                if (sn.size() >= 3 && gn.size() >= 5) {  // skip for short names
                                     // Strip common prefixes/suffixes
                                     std::string sn2 = sn;
                                     if (sn2.size() > 2 && sn2.substr(sn2.size()-2) == "_t")
