@@ -2274,6 +2274,37 @@ private:
                 }
             }
 
+            // Fix float→int: if a variable is declared float but used in
+            // bitwise/shift operations (>>, <<, &, |, ^), redeclare as int.
+            {
+                QStringList oLines = out.split('\n');
+                for (int li = 0; li < oLines.size(); ++li) {
+                    QString t = oLines[li].trimmed();
+                    if (!t.startsWith("float ") && !t.startsWith("byte ")) continue;
+                    // Extract variable name
+                    int semi = t.indexOf(';');
+                    if (semi < 0) continue;
+                    QString typePart = t.startsWith("float ") ? "float " : "byte ";
+                    QString varName = t.mid(typePart.size(), semi - typePart.size()).trimmed();
+                    if (varName.isEmpty()) continue;
+                    // Check if this var is used in bitwise/shift ops
+                    bool usedInBitwise = false;
+                    for (int lj = li + 1; lj < oLines.size(); ++lj) {
+                        if (oLines[lj].contains(varName + " >>") || oLines[lj].contains(varName + " <<") ||
+                            oLines[lj].contains(varName + " &") || oLines[lj].contains(varName + " |") ||
+                            oLines[lj].contains(varName + " ^") ||
+                            oLines[lj].contains(varName + ") >>") || oLines[lj].contains(varName + ") <<")) {
+                            usedInBitwise = true;
+                            break;
+                        }
+                    }
+                    if (usedInBitwise) {
+                        oLines[li].replace(typePart + varName, "int " + varName);
+                    }
+                }
+                out = oLines.join('\n');
+            }
+
             out += "}\n";
             return out;
         }

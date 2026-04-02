@@ -478,6 +478,21 @@ public:
             if (bit != addrToBlock.end()) {
                 int prevBlock = curBlock;
                 curBlock = bit->second;
+                // For large functions (30+ blocks): clear stale register state
+                // when the previous linear block is NOT a CFG predecessor.
+                // This prevents register values from one code path leaking into
+                // an unrelated block reached via a different jump.
+                // Only for large functions — small functions work correctly with
+                // linear state because their code layout matches execution order.
+                if (nBlocks >= 50 && curBlock > 0 && curBlock < nBlocks &&
+                    prevBlock >= 0 && prevBlock != curBlock) {
+                    if (!prePreds[curBlock].count(prevBlock)) {
+                        m_regTemps.clear();
+                        m_regGlobalSource.clear();
+                        m_regFuncPtrName.clear();
+                        m_flags = {-1, IROp::Eq, nullptr, nullptr};
+                    }
+                }
                 // At loop header blocks, create phi temps
                 if (curBlock > 0 && loopHeaderAddrs.count(in.address)) {
                     auto &hdr = func.blocks[curBlock];
