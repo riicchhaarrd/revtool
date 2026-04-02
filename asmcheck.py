@@ -153,6 +153,8 @@ typedef struct { int _[256]; } jpeg_decompress_struct;
 typedef jpeg_decompress_struct* j_decompress_ptr;
 typedef jpeg_compress_struct* j_compress_ptr;
 typedef int JDIMENSION; typedef int JSAMPLE; typedef short JCOEF;
+typedef unsigned short *histptr; typedef unsigned short histcell;
+typedef int JMETHOD; typedef void *j_common_ptr;
 typedef int boolean;
 typedef short DCTELEM;
 typedef int *JSAMPARRAY; typedef int *JSAMPROW; typedef int *JBLOCKROW;
@@ -161,6 +163,36 @@ union DvarValue { int enabled; int integer; float value; float *vector; const ch
 union DvarLimits { struct { int min; int max; } integer; struct { float min; float max; } value; int enumCount; };
 struct dvar_s { const char *name; unsigned short flags; unsigned char type; int modified; union DvarValue current; union DvarValue latched; union DvarValue reset; union DvarLimits domain; struct dvar_s *next; struct dvar_s *hashNext; };
 typedef struct dvar_s dvar_t;
+/* Auto-generated typedefs for struct _s → _t patterns */
+typedef struct archivedEntity_s archivedEntity_t;
+typedef struct archivedSnapshot_s archivedSnapshot_t;
+typedef struct cachedClient_s cachedClient_t;
+typedef struct clientState_s clientState_t;
+typedef struct displayContextDef_s displayContextDef_t;
+typedef struct editFieldDef_s editFieldDef_t;
+typedef struct fileData_s fileData_t;
+typedef struct fileInPack_s fileInPack_t;
+typedef struct game_hudelem_s game_hudelem_t;
+typedef struct gitem_s gitem_t;
+typedef struct indent_s indent_t;
+typedef struct ipFilter_s ipFilter_t;
+typedef struct itemDef_s itemDef_t;
+typedef struct keywordHash_s keywordHash_t;
+typedef struct listBoxDef_s listBoxDef_t;
+typedef struct localEntity_s localEntity_t;
+typedef struct multiDef_s multiDef_t;
+typedef struct pc_token_s pc_token_t;
+typedef struct punctuation_s punctuation_t;
+typedef struct qtime_s qtime_t;
+typedef struct refdef_s refdef_t;
+typedef struct scr_anim_s scr_anim_t;
+typedef struct scrollInfo_s scrollInfo_t;
+typedef struct serverFilter_s serverFilter_t;
+typedef struct statmonitor_s statmonitor_t;
+typedef struct stringDef_s stringDef_t;
+typedef struct turretInfo_s turretInfo_t;
+typedef struct viewLerpWaypoint_s viewLerpWaypoint_t;
+typedef struct weaponInfo_s weaponInfo_t;
 /* Misc missing */
 typedef int scr_anim_t;
 typedef struct { int _[32]; } SpeexBits;
@@ -498,6 +530,27 @@ def compile_to_asm(c_code, orig_check=None):
     for name in extracted:
         emit_type(name)
     types_block = '\n'.join(ordered)
+    # Auto-generate typedefs: if the code uses "TypeName *" or "TypeName var"
+    # and "struct TypeName" or "struct TypeName_s" is extracted, add typedef
+    auto_typedefs = []
+    all_defined = set(re.findall(r'typedef\s+\S.*?\s+(\w+)\s*;', STUBS + types_block))
+    for name in set(re.findall(r'\b([A-Z]\w+)\b', c_code)):
+        if name in all_defined or name in emitted_set: continue
+        # Check if struct with same name or _s suffix exists (extract if needed)
+        sname = name if name in extracted else (name + '_s' if name + '_s' in extracted else None)
+        if not sname:
+            # Try to extract from header
+            for suffix in ('', '_s'):
+                defn = extract_struct_from_header(name + suffix)
+                if defn and '(*)()' not in defn and '::' not in defn:
+                    sname = name + suffix
+                    extracted[sname] = defn
+                    emit_type(sname)
+                    break
+        if sname:
+            auto_typedefs.append(f'typedef struct {sname} {name};')
+    if auto_typedefs:
+        types_block += '\n' + '\n'.join(set(auto_typedefs))
     # Add extern declarations for globals with struct types
     if global_externs:
         types_block += '\n' + '\n'.join(set(global_externs))

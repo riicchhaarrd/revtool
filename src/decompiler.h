@@ -4086,13 +4086,26 @@ private:
                 if (e->op == IROp::Shr) {
                     // Logical shift right needs unsigned cast to avoid sar
                     result = "((unsigned)(" + lhs + ") >> " + rhs + ")";
-                } else if (e->op == IROp::Add &&
-                           (lhs.find("&") != std::string::npos || rhs.find("&") != std::string::npos)) {
-                    // When adding to an address-of expression, cast to (char*)
-                    // to prevent pointer arithmetic scaling by element size.
-                    if (lhs.find("&") == 0 || (lhs.size() > 1 && lhs[0] == '(' && lhs.find("&") != std::string::npos))
+                } else if (e->op == IROp::Add) {
+                    // When adding to an address-of or struct/array expression,
+                    // cast to (char*) to prevent pointer arithmetic scaling.
+                    auto needsCast = [&](const std::string &s, IRExpr *kid) -> bool {
+                        if (s.find("&") != std::string::npos) return true;
+                        // Check if the operand is a struct/array typed variable
+                        if (kid && kid->op == IROp::Var && kid->typeRef != NullType) {
+                            auto *t = m_types.resolveType(kid->typeRef);
+                            if (t && (t->kind == StabsTypeKind::Struct ||
+                                      t->kind == StabsTypeKind::Union ||
+                                      t->kind == StabsTypeKind::Array))
+                                return true;
+                        }
+                        return false;
+                    };
+                    bool lhsNeedsCast = needsCast(lhs, e->kids[0].get());
+                    bool rhsNeedsCast = needsCast(rhs, e->kids[1].get());
+                    if (lhsNeedsCast)
                         result = "(" + rhs + " + (char*)" + lhs + ")";
-                    else if (rhs.find("&") == 0 || (rhs.size() > 1 && rhs[0] == '(' && rhs.find("&") != std::string::npos))
+                    else if (rhsNeedsCast)
                         result = "(" + lhs + " + (char*)" + rhs + ")";
                     else
                         result = "(" + lhs + op + rhs + ")";
