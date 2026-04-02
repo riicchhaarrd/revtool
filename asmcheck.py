@@ -223,6 +223,10 @@ dvar_t *Dvar_RegisterVec2(const char*,float,float,float,float,int);
 dvar_t *Dvar_RegisterVec3(const char*,float,float,float,float,float,float,int);
 dvar_t *Dvar_RegisterVec4(const char*,float,float,float,float,float,float,float,float,int);
 int Scr_AddFloat(float);
+int Dvar_SetInt(dvar_t*,int);
+int Dvar_SetFloat(dvar_t*,float);
+int Dvar_SetString(dvar_t*,const char*);
+int Dvar_SetBool(dvar_t*,int);
 #endif
 '''
 
@@ -827,6 +831,9 @@ def compile_to_asm(c_code, orig_check=None):
                         stubs += f'int {name}(void);\n'
                     else:
                         stubs += f'{qual}void *{name};\n'
+            elif re.search(r'\(int\)\s*' + re.escape(name) + r'\b', full):
+                # Used in (int)NAME — it's a function address, declare as function
+                stubs += f'int {name}(void);\n'
             elif name[0].isupper() or name.endswith('_t'):
                 stubs += f'typedef int {name};\n'
             else:
