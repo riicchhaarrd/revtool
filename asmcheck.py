@@ -350,6 +350,21 @@ def compile_to_asm(c_code, orig_check=None):
         name = m.group(1)
         if name not in stubs_types and name not in ('NULL', 'BOOL', 'Bool', 'DWORD', 'UINT'):
             refs.add(name)
+    # Find globals used with .field access and look up their struct types.
+    # Pattern: "globalName.field" in code → find "extern struct X globalName;" in header
+    lines_h = _load_types_header()
+    if lines_h:
+        # Build a map of global → struct type from extern declarations
+        global_types = {}
+        for line in lines_h:
+            m = re.match(r'extern\s+struct\s+(\w+)\s+(\w+)\s*;', line.strip())
+            if m:
+                global_types[m.group(2)] = m.group(1)
+        # Find globals used with .field in the code
+        for m in re.finditer(r'\b(\w+)\.(\w+)', c_code):
+            gname = m.group(1)
+            if gname in global_types:
+                refs.add(global_types[gname])
     queue = list(refs)
     visited = set()
     while queue:

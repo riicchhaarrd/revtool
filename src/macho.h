@@ -575,8 +575,22 @@ private:
             }
             case N_GSYM: {
                 auto parsed = m_typeTable.parseSymbol(sym.name);
-                if (parsed.descriptor == 'G')
-                    m_typeTable.addGlobal(parsed.name, sym.n_value, parsed.typeRef, false);
+                if (parsed.descriptor == 'G') {
+                    TypeRef useType = parsed.typeRef;
+                    // Validate: skip mismatched struct types from CU-scoped refs
+                    auto *rt = m_typeTable.resolveType(parsed.typeRef);
+                    if (rt && (rt->kind == StabsTypeKind::Struct || rt->kind == StabsTypeKind::Union) &&
+                        !rt->name.empty() && rt->name.find("$_") == std::string::npos) {
+                        std::string sn = rt->name, gn = parsed.name;
+                        for (auto &c : sn) c = tolower(c);
+                        for (auto &c : gn) c = tolower(c);
+                        if (sn.size() > 2 && sn.substr(sn.size()-2) == "_t") sn = sn.substr(0, sn.size()-2);
+                        bool related = (gn.find(sn) != std::string::npos || sn.find(gn) != std::string::npos);
+                        if (!related && sn.size() >= 4) related = (gn.find(sn.substr(0,4)) != std::string::npos);
+                        if (!related) useType = NullType;
+                    }
+                    m_typeTable.addGlobal(parsed.name, sym.n_value, useType, false);
+                }
                 break;
             }
             case N_STSYM:
@@ -744,8 +758,44 @@ private:
                     auto it = nlSyms.find(gname);
                     if (it != nlSyms.end()) {
                         auto parsed = m_typeTable.parseSymbol(entry);
-                        if (parsed.typeRef != NullType)
-                            m_typeTable.addGlobal(gname, it->second, parsed.typeRef, false);
+                        if (parsed.typeRef != NullType) {
+                            // Validate: if the type resolves to a struct, check if
+                            // the struct name is related to the global name.
+                            // Mismatched struct types from CU-scoped refs cause
+                            // compile errors ("not a structure or union").
+                            TypeRef useType = parsed.typeRef;
+                            auto *rt = m_typeTable.resolveType(parsed.typeRef);
+                            if (rt && (rt->kind == StabsTypeKind::Struct ||
+                                       rt->kind == StabsTypeKind::Union)) {
+                                // Check if struct name relates to global name
+                                std::string sn = rt->name;
+                                std::string gn = gname;
+                                // Convert both to lowercase for comparison
+                                for (auto &c : sn) c = tolower(c);
+                                for (auto &c : gn) c = tolower(c);
+                                // Check if either contains the other (partial match)
+                                bool related = false;
+                                if (sn.size() >= 3 && gn.size() >= 3) {
+                                    // Strip common prefixes/suffixes
+                                    std::string sn2 = sn;
+                                    if (sn2.size() > 2 && sn2.substr(sn2.size()-2) == "_t")
+                                        sn2 = sn2.substr(0, sn2.size()-2);
+                                    if (gn.find(sn2) != std::string::npos ||
+                                        sn2.find(gn) != std::string::npos)
+                                        related = true;
+                                    // Also check if the global name starts with a
+                                    // common prefix of the struct name
+                                    if (sn2.size() >= 4 && gn.find(sn2.substr(0,4)) != std::string::npos)
+                                        related = true;
+                                }
+                                // Anonymous structs ($_NNNN) are always OK
+                                if (rt->name.find("$_") != std::string::npos)
+                                    related = true;
+                                if (!related)
+                                    useType = NullType;
+                            }
+                            m_typeTable.addGlobal(gname, it->second, useType, false);
+                        }
                     }
                 }
                 spos += slen + 1;
