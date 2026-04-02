@@ -580,7 +580,8 @@ private:
                     // Validate: skip mismatched struct types from CU-scoped refs
                     auto *rt = m_typeTable.resolveType(parsed.typeRef);
                     if (rt && (rt->kind == StabsTypeKind::Struct || rt->kind == StabsTypeKind::Union) &&
-                        !rt->name.empty() && rt->name.find("$_") == std::string::npos) {
+                        !rt->name.empty() && rt->name.find("$_") == std::string::npos &&
+                        parsed.name.size() >= 4) {  // skip for short names (ri, rg, re, etc.)
                         std::string sn = rt->name, gn = parsed.name;
                         for (auto &c : sn) c = tolower(c);
                         for (auto &c : gn) c = tolower(c);
@@ -775,7 +776,7 @@ private:
                                 for (auto &c : gn) c = tolower(c);
                                 // Check if either contains the other (partial match)
                                 bool related = false;
-                                if (sn.size() >= 3 && gn.size() >= 3) {
+                                if (sn.size() >= 3 && gn.size() >= 4) {  // skip for short names
                                     // Strip common prefixes/suffixes
                                     std::string sn2 = sn;
                                     if (sn2.size() > 2 && sn2.substr(sn2.size()-2) == "_t")
