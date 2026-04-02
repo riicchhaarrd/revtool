@@ -544,16 +544,18 @@ def compile_to_asm(c_code, orig_check=None):
     types_block = '\n'.join(ordered)
     # Auto-generate typedefs: if the code uses "TypeName *" or "TypeName var"
     # and "struct TypeName" or "struct TypeName_s" is extracted, add typedef
+    # Auto-typedef: when code uses CamelCase types that match a struct in
+    # the types header, add "typedef struct X X;" so the type is known.
+    # Only for types explicitly used as pointer types in the function code
+    # (e.g., "TypeName *var") to avoid generating typedefs that conflict.
     auto_typedefs = []
-    all_defined = set(re.findall(r'typedef\s+\S.*?\s+(\w+)\s*;', STUBS + types_block))
-    # Scan code AND extracted types for CamelCase types needing typedefs
-    all_text = c_code + '\n' + types_block
-    for name in set(re.findall(r'\b([A-Z]\w+)\b', all_text)):
+    all_defined = set(re.findall(r'typedef\s+\S.*?\s+(\w+)\s*[\[;]', STUBS + types_block))
+    for m in re.finditer(r'\b([A-Z]\w+)\s+\*', c_code):
+        name = m.group(1)
         if name in all_defined or name in emitted_set: continue
-        # Check if struct with same name or _s suffix exists (extract if needed)
+        if name in ('NULL', 'BOOL', 'Bool', 'DWORD', 'UINT'): continue
         sname = name if name in extracted else (name + '_s' if name + '_s' in extracted else None)
         if not sname:
-            # Try to extract from header
             for suffix in ('', '_s'):
                 defn = extract_struct_from_header(name + suffix)
                 if defn and '::' not in defn and '_vptr' not in defn:
@@ -651,6 +653,7 @@ def compile_to_asm(c_code, orig_check=None):
             full = re.sub(r'\bvoid\s+' + re.escape(vname) + r'\s*=',
                          'int ' + vname + ' =', full)
         # Handle "assignment of read-only member" — strip const from pointer params
+        # (aggregate value errors are fixed in the decompiler, not here)
         if 'read-only' in stderr:
             full = re.sub(r'\bconst\s+((?:struct\s+)?\w+\s*\*)', r'\1', full)
         # Handle "label at end of compound statement" - add empty statement after label

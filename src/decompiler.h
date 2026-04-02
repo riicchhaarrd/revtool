@@ -1790,10 +1790,18 @@ private:
                     auto &p = m_func.params[i];
                     std::string decl;
                     if (p.typeRef != NullType) {
-                        decl = m_types.formatDecl(p.typeRef, p.name);
-                        // Strip const from 'this' pointer (C++ const methods make this const T*)
-                        if (p.name == "this" && decl.find("const ") == 0)
-                            decl = decl.substr(6);
+                        // Small structs (≤4 bytes) passed by value are equivalent
+                        // to int on x86. Use int to avoid invalid C like
+                        // "(unsigned)(struct_var)" when the code treats it as int.
+                        auto *pt = m_types.resolveType(p.typeRef);
+                        if (pt && pt->kind == StabsTypeKind::Struct &&
+                            pt->sizeBytes > 0 && pt->sizeBytes <= 4) {
+                            decl = "int " + p.name;
+                        } else {
+                            decl = m_types.formatDecl(p.typeRef, p.name);
+                            if (p.name == "this" && decl.find("const ") == 0)
+                                decl = decl.substr(6);
+                        }
                     } else {
                         decl = "int " + p.name;
                     }
