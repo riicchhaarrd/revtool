@@ -138,6 +138,11 @@ typedef int D3DLOCKED_BOX; typedef int D3DBOX; typedef int D3DLOCKED_RECT;
 typedef int D3DFORMAT; typedef int D3DPOOL; typedef int D3DSURFACE_DESC;
 typedef int D3DVIEWPORT9; typedef int D3DGAMMARAMP;
 typedef int D3DPRIMITIVETYPE; typedef int D3DCAPS9; typedef int D3DDISPLAYMODE;
+typedef int D3DMULTISAMPLE_TYPE; typedef int D3DDEVTYPE; typedef int D3DADAPTER_IDENTIFIER9;
+typedef int D3DRENDERSTATETYPE; typedef int D3DTEXTURESTAGESTATETYPE;
+typedef int D3DTRANSFORMSTATETYPE; typedef int D3DSTATEBLOCKTYPE;
+typedef int D3DTEXTUREFILTERTYPE; typedef int D3DSAMPLERSTATETYPE;
+typedef int D3DLIGHT9; typedef int D3DRASTER_STATUS;
 /* Game engine types */
 typedef int scr_thread_t;
 typedef void *scr_func_t;
@@ -161,7 +166,7 @@ typedef int *JSAMPARRAY; typedef int *JSAMPROW; typedef int *JBLOCKROW;
 /* Dvar struct types (needed for -> field access) */
 union DvarValue { int enabled; int integer; float value; float *vector; const char *string; unsigned char color[4]; };
 union DvarLimits { struct { int min; int max; } integer; struct { float min; float max; } value; int enumCount; };
-struct dvar_s { const char *name; unsigned short flags; unsigned char type; int modified; union DvarValue current; union DvarValue latched; union DvarValue reset; union DvarLimits domain; struct dvar_s *next; struct dvar_s *hashNext; };
+struct dvar_s { const char *name; unsigned short flags; unsigned char type; unsigned char modified; union DvarValue current; union DvarValue latched; union DvarValue reset; union DvarLimits domain; struct dvar_s *next; struct dvar_s *hashNext; };
 typedef struct dvar_s dvar_t;
 /* Auto-generated typedefs for struct _s → _t patterns */
 typedef struct archivedEntity_s archivedEntity_t;
@@ -193,8 +198,11 @@ typedef struct stringDef_s stringDef_t;
 typedef struct turretInfo_s turretInfo_t;
 typedef struct viewLerpWaypoint_s viewLerpWaypoint_t;
 typedef struct weaponInfo_s weaponInfo_t;
+/* Forward declarations for function pointer struct params */
+typedef struct DObjAnimMat DObjAnimMat;
+typedef struct XSurface_s XSurface_s;
 /* Misc missing */
-typedef int scr_anim_t;
+/* scr_anim_t handled by auto-generated typedef */
 typedef struct { int _[32]; } SpeexBits;
 typedef void *ogg_stream_state;
 typedef struct { int _[64]; } inflate_state;
@@ -428,7 +436,7 @@ def compile_to_asm(c_code, orig_check=None):
         if defn:
             # Skip structs with invalid C (vtable pointers, C++ artifacts)
             # Note: $_NNNN anonymous types are valid GCC extensions, don't skip those
-            if '(*)()' in defn or '::' in defn:
+            if '::' in defn:
                 continue
             extracted[name] = defn
             # Also register any struct tags defined in this block
@@ -534,7 +542,9 @@ def compile_to_asm(c_code, orig_check=None):
     # and "struct TypeName" or "struct TypeName_s" is extracted, add typedef
     auto_typedefs = []
     all_defined = set(re.findall(r'typedef\s+\S.*?\s+(\w+)\s*;', STUBS + types_block))
-    for name in set(re.findall(r'\b([A-Z]\w+)\b', c_code)):
+    # Scan code AND extracted types for CamelCase types needing typedefs
+    all_text = c_code + '\n' + types_block
+    for name in set(re.findall(r'\b([A-Z]\w+)\b', all_text)):
         if name in all_defined or name in emitted_set: continue
         # Check if struct with same name or _s suffix exists (extract if needed)
         sname = name if name in extracted else (name + '_s' if name + '_s' in extracted else None)
@@ -542,7 +552,7 @@ def compile_to_asm(c_code, orig_check=None):
             # Try to extract from header
             for suffix in ('', '_s'):
                 defn = extract_struct_from_header(name + suffix)
-                if defn and '(*)()' not in defn and '::' not in defn:
+                if defn and '::' not in defn:
                     sname = name + suffix
                     extracted[sname] = defn
                     emit_type(sname)
