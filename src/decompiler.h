@@ -2156,9 +2156,16 @@ private:
                     auto &stmt = bb.stmts[si];
                     if (stmt.kind == IRStmtKind::Branch) {
                         std::string cond = stmt.expr ? emitExpr(stmt.expr.get()) : "1";
-                        out += QString("    if (%1) goto bb_%2; else goto bb_%3;\n")
-                            .arg(QString::fromStdString(cond))
-                            .arg(stmt.trueTarget).arg(stmt.falseTarget);
+                        // Simplify constant branches to plain gotos
+                        if (cond == "1" || cond == "(1)") {
+                            out += QString("    goto bb_%1;\n").arg(stmt.trueTarget);
+                        } else if (cond == "0" || cond == "(0)") {
+                            out += QString("    goto bb_%1;\n").arg(stmt.falseTarget);
+                        } else {
+                            out += QString("    if (%1) goto bb_%2; else goto bb_%3;\n")
+                                .arg(QString::fromStdString(cond))
+                                .arg(stmt.trueTarget).arg(stmt.falseTarget);
+                        }
                     } else if (stmt.kind == IRStmtKind::Jump) {
                         out += QString("    goto bb_%1;\n").arg(stmt.jumpTarget);
                     } else if (stmt.kind == IRStmtKind::Return) {
@@ -2192,6 +2199,53 @@ private:
                     }
                 }
             }
+            // Post-pass: find any undeclared variables in the flat body and add declarations.
+            {
+                std::set<std::string> declared, used;
+                std::string outStr = out.toStdString();
+                // Find declarations: lines with type keyword + vNNN;
+                for (auto &line : out.split('\n')) {
+                    QString t = line.trimmed();
+                    if (t.startsWith("int ") || t.startsWith("float ") || t.startsWith("char ") ||
+                        t.startsWith("byte ") || t.startsWith("short ") || t.startsWith("unsigned ") ||
+                        t.startsWith("DWORD ") || t.startsWith("const ") || t.startsWith("struct ")) {
+                        // Extract vNNN from this line
+                        std::string s = t.toStdString();
+                        size_t pos = 0;
+                        while ((pos = s.find('v', pos)) != std::string::npos) {
+                            if (pos > 0 && isalnum(s[pos-1])) { pos++; continue; }
+                            size_t start = pos + 1;
+                            while (start < s.size() && isdigit(s[start])) start++;
+                            if (start > pos + 1 && (start >= s.size() || !isalnum(s[start])))
+                                declared.insert(s.substr(pos, start - pos));
+                            pos = start;
+                        }
+                    }
+                }
+                // Find all vNNN references in code
+                {
+                    size_t pos = 0;
+                    while ((pos = outStr.find('v', pos)) != std::string::npos) {
+                        if (pos > 0 && (isalnum(outStr[pos-1]) || outStr[pos-1] == '_')) { pos++; continue; }
+                        size_t start = pos + 1;
+                        while (start < outStr.size() && isdigit(outStr[start])) start++;
+                        if (start > pos + 1 && (start >= outStr.size() || !isalnum(outStr[start])))
+                            used.insert(outStr.substr(pos, start - pos));
+                        pos = start;
+                    }
+                }
+                // Add missing declarations
+                QString decls;
+                for (auto &v : used) {
+                    if (!declared.count(v))
+                        decls += "    int " + QString::fromStdString(v) + ";\n";
+                }
+                if (!decls.isEmpty()) {
+                    int insertPos = out.indexOf("\nbb_");
+                    if (insertPos >= 0) out.insert(insertPos + 1, decls);
+                }
+            }
+
             out += "}\n";
             return out;
         }
