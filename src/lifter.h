@@ -2234,6 +2234,12 @@ private:
                         // If the last statement is a Call (void call), the function is void
                         if (lastStmt.kind == IRStmtKind::Call)
                             isVoid = true;
+                        // If the last statement assigns from a Call and the function just
+                        // returns that value, the function is a void wrapper: it calls a
+                        // void function and returns whatever happened to be in EAX.
+                        if (lastStmt.kind == IRStmtKind::Assign && lastStmt.expr &&
+                            lastStmt.expr->op == IROp::Call)
+                            isVoid = true;
                     }
                     if (isVoid) {
                         m_func->detectedVoid = true;
