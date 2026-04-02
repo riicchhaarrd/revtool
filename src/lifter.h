@@ -48,6 +48,9 @@ public:
             func.params = sfn->params;
             func.locals = sfn->locals;
             func.sourceFileIdx = sfn->sourceFileIdx;
+            m_curSourceFileIdx = sfn->sourceFileIdx;
+        } else {
+            m_curSourceFileIdx = -1;
         }
 
         // Disassemble
@@ -494,6 +497,19 @@ public:
                         m_flags = {-1, IROp::Eq, nullptr, nullptr};
                     }
                 }
+                // At blocks with back-edge predecessors (loop headers),
+                // clear stale global source info — registers may be modified
+                // in the loop body (e.g., linked list traversal)
+                if (curBlock > 0 && curBlock < nBlocks &&
+                    !loopHeaderAddrs.count(in.address)) {
+                    for (int pred : prePreds[curBlock]) {
+                        if (pred > curBlock) {
+                            m_regGlobalSource.clear();
+                            m_regFuncPtrName.clear();
+                            break;
+                        }
+                    }
+                }
                 // At loop header blocks, create phi temps
                 if (curBlock > 0 && loopHeaderAddrs.count(in.address)) {
                     auto &hdr = func.blocks[curBlock];
@@ -511,6 +527,10 @@ public:
                                 IRExpr::mkTemp(oldTemp, func.tempType(oldTemp)),
                                 func.tempType(oldTemp)));
                             m_regTemps[reg] = newTemp;
+                            // Clear stale global source info — the register may be
+                            // updated in the loop body (e.g., linked list traversal)
+                            m_regGlobalSource.erase(reg);
+                            m_regFuncPtrName.erase(reg);
                         }
                     }
                 }
@@ -893,6 +913,7 @@ private:
     const MachOFile      &m_mf;
     const StabsTypeTable &m_types;
     IRFunc               *m_func = nullptr;
+    int                   m_curSourceFileIdx = -1;  // CU of current function
     csh                   m_cs;
 
     // Prologue/PIC state
@@ -1208,7 +1229,7 @@ private:
         // Global variable address (from STABS)?
         // An immediate that matches a global address is &global, not *global.
         // Loading the value would be mov eax, [addr] (memory operand), not mov eax, addr (imm).
-        auto *g = m_types.globalAtAddress(v);
+        auto *g = m_types.globalAtAddress(v, m_curSourceFileIdx);
         if (g) return IRExpr::mkAddrOf(IRExpr::mkVar(g->name, g->typeRef));
         // Don't resolve function addresses here — they'd be misidentified as data.
         // Function refs are handled in the 'call' and 'lea' instruction handlers.
@@ -1268,7 +1289,7 @@ private:
         // PIC-relative (EBX + disp)
         if (m_hasPIC && m.base == X86_REG_EBX && m.index == X86_REG_INVALID && m_picBase) {
             uint32_t addr = m_picBase + (int)m.disp;
-            auto *g = m_types.globalAtAddress(addr);
+            auto *g = m_types.globalAtAddress(addr, m_curSourceFileIdx);
             if (g) return IRExpr::mkVar(g->name, g->typeRef);
             std::string s = tryString(addr);
             if (!s.empty()) return IRExpr::mkString(s);
@@ -1363,7 +1384,7 @@ private:
         // Direct address: [disp]
         if (m.base == X86_REG_INVALID && m.index == X86_REG_INVALID && m.disp) {
             uint32_t addr = (uint32_t)m.disp;
-            auto *g = m_types.globalAtAddress(addr);
+            auto *g = m_types.globalAtAddress(addr, m_curSourceFileIdx);
             if (g) return IRExpr::mkVar(g->name, g->typeRef);
             // Check function map for import pointers
             auto fit = m_mf.functionMap().find(addr);
@@ -1374,7 +1395,7 @@ private:
             // Try nlist symbol table for named globals
             std::string symName = m_mf.symbolNameAtAddress(addr);
             if (!symName.empty()) {
-                auto *gn = m_types.globalByName(symName);
+                auto *gn = m_types.globalByName(symName, m_curSourceFileIdx);
                 if (gn && gn->typeRef != NullType) {
                     auto *gt = m_types.resolveType(gn->typeRef);
                     if (gt && gt->kind == StabsTypeKind::Pointer)
@@ -1519,7 +1540,7 @@ private:
         // Direct address store: [disp] with no base/index
         if (m.base == X86_REG_INVALID && m.index == X86_REG_INVALID && m.disp) {
             uint32_t addr = (uint32_t)m.disp;
-            auto *g = m_types.globalAtAddress(addr);
+            auto *g = m_types.globalAtAddress(addr, m_curSourceFileIdx);
             if (g) {
                 bb.stmts.push_back(IRStmt::mkVarSet(g->name, std::move(val), g->typeRef, storeSize));
                 return;
@@ -1729,7 +1750,7 @@ private:
                         uint32_t loadAddr = (uint32_t)smem.disp;
                         // Check if the loaded value is a named global with struct type
                         if (src->op == IROp::Var && !src->name.empty()) {
-                            auto *g = m_types.globalByName(src->name);
+                            auto *g = m_types.globalByName(src->name, m_curSourceFileIdx);
                             if (g && g->typeRef != NullType) {
                                 auto *gt = m_types.resolveType(g->typeRef);
                                 if (gt && (gt->kind == StabsTypeKind::Struct ||
@@ -1752,7 +1773,7 @@ private:
                                     std::string gname = nearest.substr(1, plus - 1);
                                     unsigned goff = 0;
                                     sscanf(nearest.c_str() + plus + 3, "%x", &goff);
-                                    auto *g = m_types.globalByName(gname);
+                                    auto *g = m_types.globalByName(gname, m_curSourceFileIdx);
                                     if (g && g->typeRef != NullType) {
                                         auto *gt = m_types.resolveType(g->typeRef);
                                         if (gt && (gt->kind == StabsTypeKind::Struct ||
@@ -1844,7 +1865,7 @@ private:
             if (m_hasPIC && o[1].mem.base == X86_REG_EBX &&
                 o[1].mem.index == X86_REG_INVALID && m_picBase) {
                 uint32_t target = m_picBase + (int)o[1].mem.disp;
-                auto *g = m_types.globalAtAddress(target);
+                auto *g = m_types.globalAtAddress(target, m_curSourceFileIdx);
                 if (g) addr = IRExpr::mkAddrOf(IRExpr::mkVar(g->name, g->typeRef));
                 else {
                     std::string s = tryString(target);
@@ -2315,7 +2336,7 @@ private:
                                 std::string gname = nearest.substr(1, plus - 1);
                                 unsigned offset = 0;
                                 sscanf(nearest.c_str() + plus + 3, "%x", &offset);
-                                auto *g = m_types.globalByName(gname);
+                                auto *g = m_types.globalByName(gname, m_curSourceFileIdx);
                                 if (g && g->typeRef != NullType) {
                                     auto *gt = m_types.resolveType(g->typeRef);
                                     if (gt && (gt->kind == StabsTypeKind::Struct ||
@@ -3288,7 +3309,7 @@ private:
         if (off < 0) return nullptr;
 
         // Check for global variable first
-        auto *g = m_types.globalAtAddress(addr);
+        auto *g = m_types.globalAtAddress(addr, m_curSourceFileIdx);
         if (g) return IRExpr::mkVar(g->name, g->typeRef);
 
         if (isDouble) {

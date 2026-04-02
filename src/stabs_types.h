@@ -167,7 +167,7 @@ public:
     // Register a global/static variable
     void addGlobal(const std::string &name, uint32_t addr, TypeRef type, bool isStatic, int srcIdx = -1) {
         m_globals.push_back({name, addr, type, isStatic, srcIdx >= 0 ? srcIdx : m_unit});
-        if (addr) m_globalByAddr[addr] = m_globals.size() - 1;
+        if (addr) m_globalByAddr[addr].push_back(m_globals.size() - 1);
     }
 
     // Register an include file
@@ -194,14 +194,20 @@ public:
                 return resolveType(t->targetType, depth + 1);
         }
         // Resolve forward references by searching for a struct/union with the same tag
+        // Prefer a match from the same CU (same m_unit * 10000 prefix)
         if (t->kind == StabsTypeKind::ForwardRef && !t->forwardTag.empty()) {
+            int refCU = ref.first / 10000;
+            const StabsTypeInfo *fallback = nullptr;
             for (auto &[tref, ti] : m_types) {
                 if (tref == ref) continue;
                 if ((ti.kind == StabsTypeKind::Struct || ti.kind == StabsTypeKind::Union) &&
                     ti.name == t->forwardTag && !ti.fields.empty()) {
-                    return &ti;
+                    if (tref.first / 10000 == refCU)
+                        return &ti;  // same CU — best match
+                    if (!fallback) fallback = &ti;
                 }
             }
+            if (fallback) return fallback;
         }
         return t;
     }
@@ -507,16 +513,42 @@ public:
     // Global/static variable lookups
     const std::vector<StabsGlobalVar>& globals() const { return m_globals; }
 
-    const StabsGlobalVar* globalAtAddress(uint32_t addr) const {
+    const StabsGlobalVar* globalAtAddress(uint32_t addr, int cuIdx = -1) const {
         auto it = m_globalByAddr.find(addr);
-        if (it != m_globalByAddr.end()) return &m_globals[it->second];
-        return nullptr;
+        if (it == m_globalByAddr.end()) return nullptr;
+        auto &indices = it->second;
+        if (indices.empty()) return nullptr;
+        // If a CU is specified, prefer the entry from that CU
+        if (cuIdx >= 0) {
+            // First pass: exact CU match with valid type
+            for (size_t idx : indices)
+                if (m_globals[idx].sourceFileIdx == cuIdx && m_globals[idx].typeRef != NullType)
+                    return &m_globals[idx];
+            // Second pass: any entry with a struct/union type that has fields
+            for (size_t idx : indices) {
+                if (m_globals[idx].typeRef == NullType) continue;
+                auto *t = resolveType(m_globals[idx].typeRef);
+                if (t && (t->kind == StabsTypeKind::Struct || t->kind == StabsTypeKind::Union)
+                       && !t->fields.empty())
+                    return &m_globals[idx];
+            }
+        }
+        // Fallback: prefer entry with non-null type, then any entry
+        for (size_t idx : indices)
+            if (m_globals[idx].typeRef != NullType) return &m_globals[idx];
+        return &m_globals[indices.back()];
     }
 
-    const StabsGlobalVar* globalByName(const std::string &name) const {
-        for (auto &g : m_globals)
-            if (g.name == name) return &g;
-        return nullptr;
+    const StabsGlobalVar* globalByName(const std::string &name, int cuIdx = -1) const {
+        const StabsGlobalVar *best = nullptr;
+        for (auto &g : m_globals) {
+            if (g.name != name) continue;
+            if (cuIdx >= 0 && g.sourceFileIdx == cuIdx && g.typeRef != NullType)
+                return &g;  // exact CU match — best possible
+            if (!best || (best->typeRef == NullType && g.typeRef != NullType))
+                best = &g;
+        }
+        return best;
     }
 
     // Include files
@@ -575,7 +607,7 @@ public:
 private:
     std::map<TypeRef, StabsTypeInfo>         m_types;
     std::vector<StabsGlobalVar>              m_globals;
-    std::unordered_map<uint32_t, size_t>     m_globalByAddr;
+    std::unordered_map<uint32_t, std::vector<size_t>> m_globalByAddr;
     std::vector<std::string>                 m_includes;
     int                                      m_unit = 0;
 

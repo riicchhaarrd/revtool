@@ -3662,8 +3662,12 @@ private:
                 }
                 // If result uses *(expr), ensure it's a valid dereference
                 // Cast through (char *) to handle int→pointer and const→pointer safely
+                // Skip when result already has a proper type cast from Load emission
                 if (!result.empty() && result[0] == '*' && result.find("*(int *)") != 0 &&
-                    result.find("*(char *)") != 0 && result.find("*(short *)") != 0) {
+                    result.find("*(char *)") != 0 && result.find("*(short *)") != 0 &&
+                    result.find("*(float *)") != 0 && result.find("*(double *)") != 0 &&
+                    result.find("*(unsigned char *)") != 0 &&
+                    result.find("*(unsigned short *)") != 0) {
                     std::string addrStr = emitExpr(addr);
                     TypeRef addrT = exprType(addr);
                     bool isPtr = false;
