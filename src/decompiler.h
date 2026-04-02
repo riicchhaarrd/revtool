@@ -4086,6 +4086,16 @@ private:
                 if (e->op == IROp::Shr) {
                     // Logical shift right needs unsigned cast to avoid sar
                     result = "((unsigned)(" + lhs + ") >> " + rhs + ")";
+                } else if (e->op == IROp::Add &&
+                           (lhs.find("&") != std::string::npos || rhs.find("&") != std::string::npos)) {
+                    // When adding to an address-of expression, cast to (char*)
+                    // to prevent pointer arithmetic scaling by element size.
+                    if (lhs.find("&") == 0 || (lhs.size() > 1 && lhs[0] == '(' && lhs.find("&") != std::string::npos))
+                        result = "(" + rhs + " + (char*)" + lhs + ")";
+                    else if (rhs.find("&") == 0 || (rhs.size() > 1 && rhs[0] == '(' && rhs.find("&") != std::string::npos))
+                        result = "(" + lhs + " + (char*)" + rhs + ")";
+                    else
+                        result = "(" + lhs + op + rhs + ")";
                 } else {
                     result = "(" + lhs + op + rhs + ")";
                 }

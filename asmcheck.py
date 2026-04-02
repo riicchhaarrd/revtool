@@ -821,6 +821,9 @@ def norm(s):
     s = re.sub(r'^calll\b', 'call', s)
     s = re.sub(r'^leave$', 'popl %ebp', s)
     s = re.sub(r'^cvtsi2ssl\b', 'cvtsi2ss', s)
+    # sall/sarl → shll/shrl (same x86 encoding for shift)
+    s = re.sub(r'^sall\b', 'shll', s)
+    s = re.sub(r'^sarl\b', 'shrl', s)
     # Normalize addl $-N → subl $N and subl $-N → addl $N
     m = re.match(r'^(addl|subl) \$-(\d+)(.*)', s)
     if m:
