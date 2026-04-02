@@ -20,6 +20,7 @@ public:
 
     // Lift one function into an IRFunc.  Returns empty blocks on failure.
     IRFunc liftFunction(uint32_t funcAddr) {
+
         IRFunc func;
         const StabsFunction *sfn = m_mf.stabsFunctionAt(funcAddr);
         uint32_t endAddr;
@@ -541,7 +542,6 @@ public:
                         if (in.detail->groups[g] == CS_GRP_RET) isRet = true;
                 }
 
-                                   in.mnemonic, (unsigned long long)in.address);
             }
             liftInsn(in, func.blocks[curBlock], func, addrToBlock);
         }
@@ -553,7 +553,6 @@ public:
         if (sfn && sfn->returnType != NullType && !func.blocks.empty()) {
             auto *rt = m_types.resolveType(sfn->returnType);
 
-                    (void*)rt, rt ? (int)rt->kind : -1, (int)m_fpuStack.size(), m_lastFpuTop);
             if (rt && (rt->kind == StabsTypeKind::Float ||
                        rt->kind == StabsTypeKind::Double ||
                        rt->kind == StabsTypeKind::LongDouble)) {
@@ -2997,7 +2996,7 @@ private:
             if (src) writeOp(o[0], IRExpr::mkCast(CastKind::FloatToInt, std::move(src)), bb);
             return true;
         }
-        if ((mn == "cvtss2sd" || mn == "cvtsd2ss") && n == 2) {
+        if ((mn == "cvtss2sd" || mn == "cvtsd2ss") && n == 2) { 
             auto src = readSSEOp(o[1], mn == "cvtsd2ss");
             if (src) writeOp(o[0], std::move(src), bb); // just propagate, C handles float<->double
             return true;
@@ -3224,8 +3223,28 @@ private:
             // Try to resolve the memory address to an actual float constant
             auto resolved = resolveFloatConst(op.mem, isDouble);
             if (resolved) return resolved;
-            // Fall back to regular memory read
-            return readMem(op.mem);
+            // Fall back to regular memory read. For SSE float instructions,
+            // mark Loads as float (loadSize=5) and drill into union Fields
+            // to select the float member (e.g., dvar->current → current.value).
+            auto mem = readMem(op.mem);
+            if (mem) {
+                if (mem->op == IROp::Load) {
+                    mem->loadSize = isDouble ? 9 : 5;
+                } else if (mem->op == IROp::Field && !isDouble && mem->typeRef != NullType) {
+                    auto *fti = m_types.resolveType(mem->typeRef);
+                    if (fti && fti->kind == StabsTypeKind::Union) {
+                        for (auto &uf : fti->fields) {
+                            auto *uft = m_types.resolveType(uf.typeRef);
+                            if (uft && uft->kind == StabsTypeKind::Float) {
+                                mem = IRExpr::mkField(std::move(mem), uf.name,
+                                    uf.bitOffset / 8, uf.typeRef);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            return mem;
         }
         return IRExpr::mkConst(0);
     }

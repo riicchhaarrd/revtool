@@ -810,8 +810,8 @@ public:
 
     // Remove empty if blocks from output text
     static QString cleanupOutput(const QString &code) {
-        // Pre-pass: fix &EXPR->field_X patterns → (EXPR + 0xX)
         QString cleaned = code;
+        // Pre-pass: fix &EXPR->field_X patterns → (EXPR + 0xX)
         // &0->field_X → 0xX
         cleaned.replace("&0->field_", "0x__F");
         cleaned.replace("&(0)->field_", "0x__F");
@@ -3293,6 +3293,8 @@ private:
             switch (loadSize) {
             case 1: return "unsigned char";
             case 2: return "unsigned short";
+            case 5: return "float";   // special: 4-byte float load (from SSE)
+            case 9: return "double";  // special: 8-byte double load
             default: return "int";
             }
         }
@@ -3437,6 +3439,7 @@ private:
 
             case IROp::Load: {
                 auto *addr = e->kids[0].get();
+                if (e->loadSize == 5 || e->loadSize == 9)
                 m_addrDepth++;
                 // (base + index*scale + const) → base->array_NN[index] pattern
                 if (addr && addr->op == IROp::Add && addr->kids.size() == 2 &&

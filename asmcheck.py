@@ -440,7 +440,7 @@ def compile_to_asm(c_code, orig_check=None):
         if defn:
             # Skip structs with invalid C (vtable pointers, C++ artifacts)
             # Note: $_NNNN anonymous types are valid GCC extensions, don't skip those
-            if '::' in defn:
+            if '::' in defn or '_vptr' in defn:
                 continue
             extracted[name] = defn
             # Also register any struct tags defined in this block
@@ -556,7 +556,7 @@ def compile_to_asm(c_code, orig_check=None):
             # Try to extract from header
             for suffix in ('', '_s'):
                 defn = extract_struct_from_header(name + suffix)
-                if defn and '::' not in defn:
+                if defn and '::' not in defn and '_vptr' not in defn:
                     sname = name + suffix
                     extracted[sname] = defn
                     emit_type(sname)
