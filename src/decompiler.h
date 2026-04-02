@@ -2148,8 +2148,40 @@ private:
                 if (!canonicalReturn.count(retExpr))
                     canonicalReturn[retExpr] = bbId;
             }
-            // Emit flat blocks
-            for (int bbId = 0; bbId < (int)m_func.blocks.size(); ++bbId) {
+            // Emit flat blocks in DFS order so GCC sees natural code flow.
+            // This prevents the optimizer from eliminating "unreachable" blocks
+            // that are actually reachable via gotos from later blocks.
+            std::vector<int> blockOrder;
+            {
+                int n = (int)m_func.blocks.size();
+                std::vector<bool> visited(n, false);
+                std::vector<int> stack;
+                stack.push_back(0);
+                while (!stack.empty()) {
+                    int bbId = stack.back();
+                    stack.pop_back();
+                    if (bbId < 0 || bbId >= n || visited[bbId]) continue;
+                    visited[bbId] = true;
+                    blockOrder.push_back(bbId);
+                    // Push successors (reverse order for DFS left-first)
+                    auto &bb = m_func.blocks[bbId];
+                    std::vector<int> succs;
+                    for (auto &s : bb.stmts) {
+                        if (s.kind == IRStmtKind::Branch) {
+                            succs.push_back(s.falseTarget);
+                            succs.push_back(s.trueTarget);
+                        } else if (s.kind == IRStmtKind::Jump) {
+                            succs.push_back(s.jumpTarget);
+                        }
+                    }
+                    for (auto it = succs.rbegin(); it != succs.rend(); ++it)
+                        stack.push_back(*it);
+                }
+                // Add any remaining unvisited blocks
+                for (int i = 0; i < n; ++i)
+                    if (!visited[i]) blockOrder.push_back(i);
+            }
+            for (int bbId : blockOrder) {
                 auto &bb = m_func.blocks[bbId];
                 out += QString("bb_%1:\n").arg(bbId);
                 for (int si = 0; si < (int)bb.stmts.size(); ++si) {
@@ -2203,37 +2235,33 @@ private:
             {
                 std::set<std::string> declared, used;
                 std::string outStr = out.toStdString();
-                // Find declarations: lines with type keyword + vNNN;
+                // Find all identifiers that look like variable names
+                // (vNNN, tNNN, var_XX, wavelet*, bb_N labels are excluded)
+                auto scanIdents = [](const std::string &s, std::set<std::string> &out) {
+                    for (size_t i = 0; i < s.size(); ++i) {
+                        if (!isalpha(s[i]) && s[i] != '_') continue;
+                        if (i > 0 && (isalnum(s[i-1]) || s[i-1] == '_')) continue;
+                        size_t start = i;
+                        while (i < s.size() && (isalnum(s[i]) || s[i] == '_')) i++;
+                        std::string word = s.substr(start, i - start);
+                        // Only track vN, tN patterns (synthetic temp names)
+                        if ((word[0] == 'v' || word[0] == 't') && word.size() > 1 &&
+                            isdigit(word[1])) {
+                            out.insert(word);
+                        }
+                    }
+                };
+                // Find declarations
                 for (auto &line : out.split('\n')) {
                     QString t = line.trimmed();
                     if (t.startsWith("int ") || t.startsWith("float ") || t.startsWith("char ") ||
                         t.startsWith("byte ") || t.startsWith("short ") || t.startsWith("unsigned ") ||
                         t.startsWith("DWORD ") || t.startsWith("const ") || t.startsWith("struct ")) {
-                        // Extract vNNN from this line
-                        std::string s = t.toStdString();
-                        size_t pos = 0;
-                        while ((pos = s.find('v', pos)) != std::string::npos) {
-                            if (pos > 0 && isalnum(s[pos-1])) { pos++; continue; }
-                            size_t start = pos + 1;
-                            while (start < s.size() && isdigit(s[start])) start++;
-                            if (start > pos + 1 && (start >= s.size() || !isalnum(s[start])))
-                                declared.insert(s.substr(pos, start - pos));
-                            pos = start;
-                        }
+                        scanIdents(t.toStdString(), declared);
                     }
                 }
-                // Find all vNNN references in code
-                {
-                    size_t pos = 0;
-                    while ((pos = outStr.find('v', pos)) != std::string::npos) {
-                        if (pos > 0 && (isalnum(outStr[pos-1]) || outStr[pos-1] == '_')) { pos++; continue; }
-                        size_t start = pos + 1;
-                        while (start < outStr.size() && isdigit(outStr[start])) start++;
-                        if (start > pos + 1 && (start >= outStr.size() || !isalnum(outStr[start])))
-                            used.insert(outStr.substr(pos, start - pos));
-                        pos = start;
-                    }
-                }
+                // Find all references
+                scanIdents(outStr, used);
                 // Add missing declarations
                 QString decls;
                 for (auto &v : used) {

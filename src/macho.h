@@ -631,6 +631,83 @@ private:
             }
         }
 
+        // Fix parameter types using demangled function signatures.
+        // N_PSYM entries use CU-scoped type refs that can resolve to wrong types
+        // (e.g., int instead of struct WaveletDecode *). The mangled function name
+        // encodes the correct parameter types. When a param's STABS type resolves
+        // to a basic type (int) but the demangled name says it's a struct pointer,
+        // search the type table for the struct and override the param's type.
+        for (auto &fn : m_stabsFuncs) {
+            if (fn.params.empty() || fn.rawName.empty()) continue;
+            // Demangle to get full signature: "func(type1, type2, ...)"
+            std::string full = demangle(fn.rawName);
+            // Only process if demangled name has parameter list
+            size_t parenOpen = full.rfind('(');
+            if (parenOpen == std::string::npos) continue;
+            size_t parenClose = full.rfind(')');
+            if (parenClose == std::string::npos || parenClose <= parenOpen) continue;
+            std::string paramStr = full.substr(parenOpen + 1, parenClose - parenOpen - 1);
+            // Split params by comma (simplified — doesn't handle nested templates)
+            std::vector<std::string> paramTypes;
+            {
+                size_t start = 0;
+                int depth = 0;
+                for (size_t i = 0; i <= paramStr.size(); ++i) {
+                    if (i < paramStr.size() && paramStr[i] == '<') depth++;
+                    else if (i < paramStr.size() && paramStr[i] == '>') depth--;
+                    else if ((i == paramStr.size() || paramStr[i] == ',') && depth == 0) {
+                        std::string pt = paramStr.substr(start, i - start);
+                        // Trim whitespace
+                        while (!pt.empty() && pt.front() == ' ') pt.erase(pt.begin());
+                        while (!pt.empty() && pt.back() == ' ') pt.pop_back();
+                        if (!pt.empty()) paramTypes.push_back(pt);
+                        start = i + 1;
+                    }
+                }
+            }
+            // Match params by position and fix types
+            for (size_t pi = 0; pi < fn.params.size() && pi < paramTypes.size(); ++pi) {
+                auto &param = fn.params[pi];
+                auto *pt = m_typeTable.resolveType(param.typeRef);
+                // Only fix if current type is a basic type (int, etc.)
+                if (!pt || (pt->kind != StabsTypeKind::Int && pt->kind != StabsTypeKind::UInt))
+                    continue;
+                // Check if demangled type suggests a struct pointer
+                std::string &dType = paramTypes[pi];
+                bool isStructPtr = (dType.find('*') != std::string::npos);
+                if (!isStructPtr) continue;
+                // Extract struct name: "struct Foo *" or "Foo *" or "const Foo *"
+                std::string structName;
+                size_t starPos = dType.rfind('*');
+                std::string before = dType.substr(0, starPos);
+                while (!before.empty() && before.back() == ' ') before.pop_back();
+                size_t lastSpace = before.rfind(' ');
+                structName = (lastSpace != std::string::npos) ? before.substr(lastSpace + 1) : before;
+                if (structName.empty() || structName == "char" || structName == "void" ||
+                    structName == "int" || structName == "byte" || structName == "unsigned")
+                    continue;
+                // Search type table for a struct with this name
+                for (auto &[tref, ti] : m_typeTable.allTypes()) {
+                    if ((ti.kind == StabsTypeKind::Struct || ti.kind == StabsTypeKind::Union) &&
+                        ti.name == structName && !ti.fields.empty()) {
+                        // Found the struct. Create a pointer type reference.
+                        // Look for an existing pointer-to-struct type
+                        for (auto &[pref, pti] : m_typeTable.allTypes()) {
+                            if (pti.kind == StabsTypeKind::Pointer && pti.targetType == tref) {
+                                param.typeRef = pref;
+                                goto next_param;
+                            }
+                        }
+                        // No pointer type found — use the struct type directly
+                        // (the lifter handles struct types for field access)
+                        param.typeRef = tref;
+                        goto next_param;
+                    }
+                }
+                next_param:;
+            }
+        }
+
         // Recover orphaned global type info: scan STABS strings for "name:G(CU,ID)"
         // patterns that weren't processed as N_GSYM entries. Match against nlist symbols
         // to get the address. This handles binaries where N_GSYM entries are missing.
