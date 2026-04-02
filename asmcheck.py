@@ -431,12 +431,19 @@ def compile_to_asm(c_code, orig_check=None):
                 refs.add(stype)
                 if extract_struct_from_header(stype) and gname in global_extern_lines:
                     global_externs.append(global_extern_lines[gname])
+    # Types already defined in STUBS — don't extract from header
+    stubs_structs = {'DvarValue', 'DvarLimits', 'dvar_s', 'dvar_t', 'Point', 'MacPoint',
+                     'CGPoint', 'CGSize', 'CGRect', 'MacRGBColor', 'WaveletHuffmanDecode',
+                     'z_stream', 'unz_global_info', 'unz_file_info', 'FILETIME',
+                     'WIN32_FIND_DATAA', 'fd_set', 'timeval', 'Rect',
+                     'jpeg_compress_struct', 'jpeg_decompress_struct', 'SpeexBits', 'inflate_state'}
     queue = list(refs)
     visited = set()
     while queue:
         name = queue.pop(0)
         if name in visited: continue
         visited.add(name)
+        if name in stubs_structs: continue
         defn = extract_struct_from_header(name)
         if defn:
             # Skip structs with invalid C (vtable pointers, C++ artifacts)
@@ -543,6 +550,12 @@ def compile_to_asm(c_code, orig_check=None):
     for name in extracted:
         emit_type(name)
     types_block = '\n'.join(ordered)
+    # Remove extracted type lines that conflict with STUBS definitions
+    for sname in stubs_structs:
+        # Remove standalone typedef lines like "typedef struct { ... } Point;"
+        types_block = re.sub(r'typedef\s+struct\s*\{[^}]*\}\s+' + re.escape(sname) + r'\s*;', '', types_block)
+        # Remove "union Name { ... };" or "struct Name { ... };" blocks
+        types_block = re.sub(r'(?:union|struct)\s+' + re.escape(sname) + r'\s*\{[^}]*\}\s*;', '', types_block)
     # Auto-generate typedefs: if the code uses "TypeName *" or "TypeName var"
     # and "struct TypeName" or "struct TypeName_s" is extracted, add typedef
     # Auto-typedef: when code uses CamelCase types that match a struct in

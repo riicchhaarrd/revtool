@@ -378,9 +378,26 @@ public:
                 if (ft && ft->kind == StabsTypeKind::Array) {
                     auto *elemT = resolveType(ft->targetType);
                     int elemSize = elemT ? elemT->sizeBytes : 4;
+                    // For array-of-array (2D), compute element size from inner array
+                    if (elemSize <= 0 && elemT && elemT->kind == StabsTypeKind::Array) {
+                        auto *innerElem = resolveType(elemT->targetType);
+                        int innerSize = innerElem ? innerElem->sizeBytes : 4;
+                        if (innerSize <= 0) innerSize = 4;
+                        int innerCount = elemT->arrayHigh - elemT->arrayLow + 1;
+                        if (innerCount > 0) elemSize = innerSize * innerCount;
+                    }
                     if (elemSize <= 0) elemSize = 4;
                     int idx = offsetInField / elemSize;
                     int subOff = offsetInField % elemSize;
+                    // For 2D arrays (element is also an array), emit [row][col]
+                    if (elemT && elemT->kind == StabsTypeKind::Array) {
+                        auto *innerElem = resolveType(elemT->targetType);
+                        int innerSize = innerElem ? innerElem->sizeBytes : 4;
+                        if (innerSize <= 0) innerSize = 4;
+                        int col = subOff / innerSize;
+                        if (subOff % innerSize == 0)
+                            return f.name + "[" + std::to_string(idx) + "][" + std::to_string(col) + "]";
+                    }
                     if (subOff == 0)
                         return f.name + "[" + std::to_string(idx) + "]";
                 }
@@ -410,12 +427,38 @@ public:
                         // This offset is inside a larger array field — prefer array access
                         auto *elemT = resolveType(aft->targetType);
                         int elemSize = elemT ? elemT->sizeBytes : 4;
+                        // For 2D arrays, compute outer element size from inner array
+                        if (elemSize <= 0 && elemT && elemT->kind == StabsTypeKind::Array) {
+                            auto *innerE = resolveType(elemT->targetType);
+                            int iSz = innerE ? innerE->sizeBytes : 4;
+                            if (iSz <= 0) iSz = 4;
+                            int iCnt = elemT->arrayHigh - elemT->arrayLow + 1;
+                            if (iCnt > 0) elemSize = iSz * iCnt;
+                        }
                         if (elemSize <= 0) elemSize = 4;
                         int elemOff = (byteOffset - af.bitOffset/8);
                         int idx = elemOff / elemSize;
                         int subOff = elemOff % elemSize;
+                        // 2D array: emit [row][col]
+                        if (elemT && elemT->kind == StabsTypeKind::Array) {
+                            auto *innerE = resolveType(elemT->targetType);
+                            int iSz = innerE ? innerE->sizeBytes : 4;
+                            if (iSz <= 0) iSz = 4;
+                            int col = subOff / iSz;
+                            if (subOff % iSz == 0)
+                                return af.name + "[" + std::to_string(idx) + "][" + std::to_string(col) + "]";
+                        }
                         if (subOff == 0)
                             return af.name + "[" + std::to_string(idx) + "]";
+                    }
+                }
+                // If this field is a 2D array (array of arrays), return [0][0]
+                {
+                    auto *fta = resolveType(f.typeRef);
+                    if (fta && fta->kind == StabsTypeKind::Array) {
+                        auto *elemT = resolveType(fta->targetType);
+                        if (elemT && elemT->kind == StabsTypeKind::Array)
+                            return f.name + "[0][0]";
                     }
                 }
                 // If this field is a struct, the code might be accessing its first sub-field.
