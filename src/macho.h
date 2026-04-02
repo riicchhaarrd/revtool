@@ -640,7 +640,8 @@ private:
         for (auto &fn : m_stabsFuncs) {
             if (fn.params.empty() || fn.rawName.empty()) continue;
             // Demangle to get full signature: "func(type1, type2, ...)"
-            std::string full = demangle(fn.rawName);
+            // rawName has STABS suffix (":F(0,1)") — strip it first
+            std::string full = demangle(cleanStabsName(fn.rawName));
             // Only process if demangled name has parameter list
             size_t parenOpen = full.rfind('(');
             if (parenOpen == std::string::npos) continue;
@@ -687,6 +688,9 @@ private:
                     structName == "int" || structName == "byte" || structName == "unsigned")
                     continue;
                 // Search type table for a struct with this name
+                if (structName == "float" || structName == "double" || structName == "long" ||
+                    structName == "short" || structName == "const" || structName == "signed")
+                    continue;
                 for (auto &[tref, ti] : m_typeTable.allTypes()) {
                     if ((ti.kind == StabsTypeKind::Struct || ti.kind == StabsTypeKind::Union) &&
                         ti.name == structName && !ti.fields.empty()) {
