@@ -15,6 +15,7 @@ DECOMP = './build/decomp'
 APPLE_GCC = '/tmp/apple-gcc-build/gcc/xgcc'
 GCC_FLAGS = ['-B/tmp/apple-gcc-build/gcc/', '-m32', '-O2', '-mdynamic-no-pic',
              '-fno-schedule-insns', '-fno-schedule-insns2', '-mtune=pentium4',
+             '-fno-if-conversion',
              '-std=c99', '-w']
 
 TYPES_HEADER = 'stabs_types.h.gen'
@@ -923,10 +924,13 @@ def norm(s):
     # Normalize address constants, labels, and non_lazy_ptrs to <C>
     s = re.sub(r'L_\w+\$(?:non_lazy_ptr|stub)', '<C>', s)
     s = re.sub(r'LC\d+', '<C>', s)
-    s = re.sub(r'-?\b\d{5,}\b', '<C>', s)
+    s = re.sub(r'-\d+\b', '<C>', s)  # negative numbers are always constants
+    s = re.sub(r'\b\d{5,}\b', '<C>', s)  # large positive numbers too
     s = re.sub(r'\b0x[0-9a-fA-F]{5,}\b', '<C>', s)  # hex constants ≥5 digits
     # Normalize bare global symbol names (e.g., _sv_master, _com_sv_running)
     s = re.sub(r'\b_[a-zA-Z]\w{2,}\b', '<C>', s)
+    # Collapse adjacent <C> patterns: <C>+<C> → <C>, <C>-<C> → <C>
+    s = re.sub(r'<C>[+-]<C>', '<C>', s)
     # Strip $ before <C> (e.g., $<C> → <C>)
     s = re.sub(r'\$<C>', '<C>', s)
     # Normalize register choice in parameter loads and stores
