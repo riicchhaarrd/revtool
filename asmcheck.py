@@ -354,7 +354,7 @@ def extract_struct_from_header(name):
     for line in lines:
         stripped = line.strip()
         if stripped.startswith('typedef ') and stripped.endswith(';'):
-            if f' {name};' in stripped or f' {name}[' in stripped:
+            if f' {name};' in stripped or f' {name}[' in stripped or f'*{name};' in stripped:
                 result = line
                 # If it's typedef struct X name, also extract struct X
                 m = re.match(r'typedef\s+struct\s+(\w+)\s+' + re.escape(name), stripped)
@@ -461,6 +461,11 @@ def compile_to_asm(c_code, orig_check=None):
                 if m.group(1) not in visited:
                     queue.append(m.group(1))
             for m in re.finditer(r'\b(\w+_t)\s+\*?\s*\w+', defn):
+                dep = m.group(1)
+                if dep not in visited and dep not in stubs_types:
+                    queue.append(dep)
+            # Also follow CamelCase type names used as pointer types in struct fields
+            for m in re.finditer(r'\b([A-Z]\w+)\s+\*', defn):
                 dep = m.group(1)
                 if dep not in visited and dep not in stubs_types:
                     queue.append(dep)
