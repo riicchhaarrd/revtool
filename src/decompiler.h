@@ -2021,10 +2021,29 @@ private:
             for (auto &bb : m_func.blocks)
                 for (auto &stmt : bb.stmts)
                     collectSynthVars(stmt, synthVars);
+            // Detect variables that should be short: ALL assignments have Trunc16 cast
+            std::map<std::string, int> varTrunc16;  // name → count of Trunc16 assigns
+            std::map<std::string, int> varAnyAssign; // name → count of any assigns
+            for (auto &bb : m_func.blocks) {
+                for (auto &stmt : bb.stmts) {
+                    if (stmt.kind == IRStmtKind::VarSet && !stmt.destVar.empty() && stmt.expr) {
+                        varAnyAssign[stmt.destVar]++;
+                        if (stmt.expr->op == IROp::Cast &&
+                            stmt.expr->castKind == CastKind::Trunc16)
+                            varTrunc16[stmt.destVar]++;
+                    }
+                }
+            }
             for (auto &name : synthVars) {
                 if (declared.count(name) || paramNames.count(name)) continue;
                 declared.insert(name);
-                out += "    int " + QString::fromStdString(name) + ";\n";
+                // If ALL assignments to this var use Trunc16, declare as short
+                bool isShort = (varTrunc16.count(name) && varAnyAssign.count(name) &&
+                                varTrunc16[name] == varAnyAssign[name] && varTrunc16[name] > 0);
+                if (isShort)
+                    out += "    short " + QString::fromStdString(name) + ";\n";
+                else
+                    out += "    int " + QString::fromStdString(name) + ";\n";
             }
             if (!declared.empty()) out += "\n";
 
@@ -3147,7 +3166,17 @@ private:
                         break;
                     }
                 }
-                out += pad(indent) + QString::fromStdString(cName(dest) + " = " + val) + ";\n";
+                // For sub-word stores (16-bit/8-bit), use pointer cast to force
+                // the correct store width: *(short *)(&dest) = val
+                if (stmt.storeSize == 2) {
+                    out += pad(indent) + QString::fromStdString(
+                        "*(short *)(&" + cName(dest) + ") = " + val) + ";\n";
+                } else if (stmt.storeSize == 1) {
+                    out += pad(indent) + QString::fromStdString(
+                        "*(char *)(&" + cName(dest) + ") = " + val) + ";\n";
+                } else {
+                    out += pad(indent) + QString::fromStdString(cName(dest) + " = " + val) + ";\n";
+                }
                 break;
             }
             case IRStmtKind::Call: {

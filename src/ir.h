@@ -236,9 +236,9 @@ struct IRStmt {
         s.addr = std::move(address); s.expr = std::move(val); s.storeSize = size;
         return s;
     }
-    static IRStmt mkVarSet(const std::string &name, std::unique_ptr<IRExpr> val, TypeRef t = NullType) {
+    static IRStmt mkVarSet(const std::string &name, std::unique_ptr<IRExpr> val, TypeRef t = NullType, int size = 4) {
         IRStmt s; s.kind = IRStmtKind::VarSet;
-        s.destVar = name; s.expr = std::move(val); s.destType = t;
+        s.destVar = name; s.expr = std::move(val); s.destType = t; s.storeSize = size;
         return s;
     }
     static IRStmt mkCall(std::unique_ptr<IRExpr> callExpr) {
