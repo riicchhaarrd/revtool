@@ -924,8 +924,9 @@ def norm(s):
     s = re.sub(r'L_\w+\$(?:non_lazy_ptr|stub)', '<C>', s)
     s = re.sub(r'LC\d+', '<C>', s)
     s = re.sub(r'-?\b\d{5,}\b', '<C>', s)
+    s = re.sub(r'\b0x[0-9a-fA-F]{5,}\b', '<C>', s)  # hex constants ≥5 digits
     # Normalize bare global symbol names (e.g., _sv_master, _com_sv_running)
-    s = re.sub(r'\b_[a-zA-Z]\w{3,}\b', '<C>', s)
+    s = re.sub(r'\b_[a-zA-Z]\w{2,}\b', '<C>', s)
     # Strip $ before <C> (e.g., $<C> → <C>)
     s = re.sub(r'\$<C>', '<C>', s)
     # Normalize register choice in parameter loads and stores
