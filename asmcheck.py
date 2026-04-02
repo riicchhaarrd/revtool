@@ -149,6 +149,8 @@ typedef int scr_thread_t;
 typedef void *scr_func_t;
 typedef int TextureID;
 typedef int isNegative;
+typedef struct { int _[4]; } GUID;
+typedef unsigned long u_long;
 /* Network types */
 typedef int SOCKET;
 typedef struct { int _[4]; } fd_set;

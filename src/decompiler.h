@@ -3090,9 +3090,25 @@ private:
                     std::string base = emitExpr(a->kids[0]->kids[0].get());
                     std::string idx = emitExpr(a->kids[0]->kids[1]->kids[0].get());
                     int off = (int)a->kids[1]->value;
-                    char fname[64]; snprintf(fname, sizeof(fname), "arr_%X[%s]", (unsigned)off, idx.c_str());
-                    out += pad(indent) + QString::fromStdString(
-                        base + "->" + fname + " = " + val) + ";\n";
+                    // Try to resolve field name from struct type
+                    std::string fieldAccess;
+                    TypeRef stBaseType = exprType(a->kids[0]->kids[0].get());
+                    if (stBaseType != NullType && m_types.isStructPointer(stBaseType)) {
+                        TypeRef structRef = m_types.getPointedStruct(stBaseType);
+                        if (structRef != NullType)
+                            fieldAccess = m_types.formatFieldAccess(structRef, off);
+                    }
+                    if (!fieldAccess.empty()) {
+                        size_t bracket = fieldAccess.find('[');
+                        if (bracket != std::string::npos && fieldAccess.substr(bracket) == "[0]")
+                            fieldAccess = fieldAccess.substr(0, bracket);
+                        out += pad(indent) + QString::fromStdString(
+                            base + "->" + fieldAccess + "[" + idx + "] = " + val) + ";\n";
+                    } else {
+                        char fname[64]; snprintf(fname, sizeof(fname), "arr_%X[%s]", (unsigned)off, idx.c_str());
+                        out += pad(indent) + QString::fromStdString(
+                            base + "->" + fname + " = " + val) + ";\n";
+                    }
                 }
                 // General Add/Sub expression → *(type *)((char *)(expr)) = val
                 else if ((a->op == IROp::Add || a->op == IROp::Sub) && a->kids.size() == 2) {
@@ -3501,12 +3517,31 @@ private:
                         std::string baseStr = emitExpr(base);
                         std::string idxStr = emitExpr(index);
                         int off = (int)addr->kids[1]->value;
-                        char fname[64];
-                        if (elemSize == 4)
-                            snprintf(fname, sizeof(fname), "arr_%X[%s]", (unsigned)off, idxStr.c_str());
-                        else
-                            snprintf(fname, sizeof(fname), "arr_%X_%d[%s]", (unsigned)off, elemSize, idxStr.c_str());
-                        result = baseStr + "->" + fname;
+                        // Try to resolve the field name from struct type info
+                        std::string fieldAccess;
+                        TypeRef baseType = exprType(base);
+                        if (baseType != NullType && m_types.isStructPointer(baseType)) {
+                            TypeRef structRef = m_types.getPointedStruct(baseType);
+                            if (structRef != NullType)
+                                fieldAccess = m_types.formatFieldAccess(structRef, off);
+                        }
+                        if (!fieldAccess.empty()) {
+                            // Got a real field name — use array subscript on it
+                            // If fieldAccess is "name[0]", strip the [0] to get just "name"
+                            // so the dynamic index applies directly: name[idx]
+                            size_t bracket = fieldAccess.find('[');
+                            if (bracket != std::string::npos &&
+                                fieldAccess.substr(bracket) == "[0]")
+                                fieldAccess = fieldAccess.substr(0, bracket);
+                            result = baseStr + "->" + fieldAccess + "[" + idxStr + "]";
+                        } else {
+                            char fname[64];
+                            if (elemSize == 4)
+                                snprintf(fname, sizeof(fname), "arr_%X[%s]", (unsigned)off, idxStr.c_str());
+                            else
+                                snprintf(fname, sizeof(fname), "arr_%X_%d[%s]", (unsigned)off, elemSize, idxStr.c_str());
+                            result = baseStr + "->" + fname;
+                        }
                         break;
                     }
                 }
@@ -4283,11 +4318,11 @@ private:
                 }
                 if (vslot >= 0 && !e->kids.empty()) {
                     std::string thisArg = emitExpr(e->kids[0].get());
-                    // Use _Bool return type for vtable calls (most return bool,
-                    // and _Bool generates testb instead of testl for condition checks)
+                    // Use int return type for vtable calls (void* would also
+                    // work, but int matches testl in condition checks)
                     char buf[128];
                     snprintf(buf, sizeof(buf),
-                        "((_Bool(*)(void*))(((void**)(*(void**)%s))[%d]))(",
+                        "((int(*)(void*))(((void**)(*(void**)%s))[%d]))(",
                         thisArg.c_str(), vslot);
                     result = buf;
                     for (size_t i = 0; i < e->kids.size(); ++i) {
