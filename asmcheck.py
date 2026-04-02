@@ -358,20 +358,34 @@ def compile_to_asm(c_code, orig_check=None):
         # Build a map of global → struct type from extern declarations
         global_types = {}
         for line in lines_h:
-            m = re.match(r'extern\s+struct\s+(\w+)\s+(\w+)\s*;', line.strip())
+            m = re.match(r'extern\s+(?:const\s+)?struct\s+(\w+)\s+\*?\s*(\w+)\s*(?:\[[\d]*\])?\s*;', line.strip())
             if m:
                 global_types[m.group(2)] = m.group(1)
-        # Find globals used with .field in the code, extract their struct types
+        # Find globals used with .field or ->field, extract their struct types
         # AND add extern declarations so the compiler knows the variable type
         global_externs = []
-        for m in re.finditer(r'\b(\w+)\.(\w+)', c_code):
+        # Also store the original extern lines for exact reproduction
+        global_extern_lines = {}
+        for line in lines_h:
+            m2 = re.match(r'(extern\s+(?:const\s+)?struct\s+\w+\s+\*?\s*(\w+)\s*(?:\[[\d]*\])?\s*;)', line.strip())
+            if m2:
+                global_extern_lines[m2.group(2)] = m2.group(1)
+        for m in re.finditer(r'\b(\w+)[.](\w+)', c_code):
             gname = m.group(1)
             if gname in global_types:
                 stype = global_types[gname]
                 refs.add(stype)
                 # Only add extern if the struct is fully defined in the header
-                if extract_struct_from_header(stype):
-                    global_externs.append(f'extern struct {stype} {gname};')
+                if extract_struct_from_header(stype) and gname in global_extern_lines:
+                    global_externs.append(global_extern_lines[gname])
+        # Also handle ->field access on pointer globals
+        for m in re.finditer(r'\b(\w+)->(\w+)', c_code):
+            gname = m.group(1)
+            if gname in global_types:
+                stype = global_types[gname]
+                refs.add(stype)
+                if extract_struct_from_header(stype) and gname in global_extern_lines:
+                    global_externs.append(global_extern_lines[gname])
     queue = list(refs)
     visited = set()
     while queue:
