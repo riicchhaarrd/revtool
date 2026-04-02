@@ -540,7 +540,7 @@ public:
                     for (uint8_t g = 0; g < in.detail->groups_count; ++g)
                         if (in.detail->groups[g] == CS_GRP_RET) isRet = true;
                 }
-                if (isRet) fprintf(stderr, "RET_INSN: mn='%s' addr=0x%llx\n",
+
                                    in.mnemonic, (unsigned long long)in.address);
             }
             liftInsn(in, func.blocks[curBlock], func, addrToBlock);
@@ -552,7 +552,7 @@ public:
         // synthesize one from the last FPU stack value.
         if (sfn && sfn->returnType != NullType && !func.blocks.empty()) {
             auto *rt = m_types.resolveType(sfn->returnType);
-            fprintf(stderr, "PASS5B: rt=%p kind=%d fpuStack=%d lastFpuTop=%d\n",
+
                     (void*)rt, rt ? (int)rt->kind : -1, (int)m_fpuStack.size(), m_lastFpuTop);
             if (rt && (rt->kind == StabsTypeKind::Float ||
                        rt->kind == StabsTypeKind::Double ||
@@ -562,7 +562,7 @@ public:
                 for (auto &bb : func.blocks)
                     for (auto &s : bb.stmts)
                         if (s.kind == IRStmtKind::Return) { hasReturn = true; break; }
-                fprintf(stderr, "PASS5B_FLOAT: hasReturn=%d\n", hasReturn);
+
                 if (!hasReturn) {
                     auto &lastBB = func.blocks.back();
                     if (!m_fpuStack.empty()) {

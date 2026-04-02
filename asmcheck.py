@@ -824,6 +824,10 @@ def norm(s):
     # sall/sarl → shll/shrl (same x86 encoding for shift)
     s = re.sub(r'^sall\b', 'shll', s)
     s = re.sub(r'^sarl\b', 'shrl', s)
+    # xorl %reg, %reg → movl $0, %reg (both zero a register, same semantics)
+    m = re.match(r'^xorl (%\w+), \1$', s)
+    if m:
+        s = f'movl $0, {m.group(1)}'
     # Normalize addl $-N → subl $N and subl $-N → addl $N
     m = re.match(r'^(addl|subl) \$-(\d+)(.*)', s)
     if m:
@@ -1055,10 +1059,10 @@ def norm_stream(insns):
     j = 0
     while j < len(result):
         rn = norm(result[j])
-        # repz + cmpsb → repz cmpsb (GCC emits prefix as separate instruction)
-        if (j + 1 < len(result) and rn == 'repz' and
-            norm(result[j+1]).startswith('cmps')):
-            collapsed.append('repz ' + norm(result[j+1]))
+        # rep/repz + string op → combined (GCC emits prefix as separate instruction)
+        if (j + 1 < len(result) and rn in ('repz', 'rep') and
+            any(norm(result[j+1]).startswith(p) for p in ('cmps', 'movs', 'stos', 'scas', 'lods'))):
+            collapsed.append(rn + ' ' + norm(result[j+1]))
             j += 2
             continue
         # movl <C>, %reg; movl %reg, <C> → movl <C>, <C>

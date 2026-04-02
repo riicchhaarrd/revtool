@@ -671,7 +671,22 @@ private:
             // Demangle to get full signature: "func(type1, type2, ...)"
             // rawName has STABS suffix (":F(0,1)") — strip it first
             std::string full = demangle(cleanStabsName(fn.rawName));
+            // Fix return type: if demangled name starts with "void " but
+            // STABS says int, override to void
+            if (full.substr(0, 5) == "void " && fn.returnType != NullType) {
+                auto *rrt = m_typeTable.resolveType(fn.returnType);
+                if (rrt && (rrt->kind == StabsTypeKind::Int || rrt->kind == StabsTypeKind::UInt)) {
+                    // Find a void type in the table
+                    for (auto &[tref, ti] : m_typeTable.allTypes()) {
+                        if (ti.kind == StabsTypeKind::Void) {
+                            fn.returnType = tref;
+                            break;
+                        }
+                    }
+                }
+            }
             // Only process if demangled name has parameter list
+            if (fn.params.empty()) continue;
             size_t parenOpen = full.rfind('(');
             if (parenOpen == std::string::npos) continue;
             size_t parenClose = full.rfind(')');
