@@ -645,6 +645,10 @@ public:
                                 hdr.stmts.push_back(IRStmt::mkAssign(newTemp,
                                     IRExpr::mkTemp(oldTemp, tt), tt));
                                 m_regTemps[reg] = newTemp;
+                                // Propagate variable mapping so phi temp gets a name
+                                auto vit = func.tempToVar.find(oldTemp);
+                                if (vit != func.tempToVar.end())
+                                    func.tempToVar[newTemp] = vit->second;
                             }
                         }
                     }

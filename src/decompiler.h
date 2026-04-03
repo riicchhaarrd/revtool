@@ -2971,6 +2971,8 @@ private:
         void emitStmt(QString &out, IRStmt &stmt, int indent) {
             switch (stmt.kind) {
             case IRStmtKind::Assign: {
+                // Skip phi definitions — they are loop bookkeeping, not real assignments
+                if (m_func.phiTemps.count(stmt.destTemp)) return;
                 std::string rhs = stmt.expr ? emitExpr(stmt.expr.get()) : "0";
                 // Skip assignment for inlined temps — BUT keep calls with truly unused results
                 if (m_tempUseCount[stmt.destTemp] <= 1) {
@@ -3549,6 +3551,19 @@ private:
                         auto nit = m_func.varNames.find(vit->second);
                         if (nit != m_func.varNames.end())
                             return nit->second;
+                    }
+                    // If phi temp has no variable name, try to inherit from its
+                    // source temp (the pre-loop value it was assigned from)
+                    auto dit = m_tempDef.find(id);
+                    if (dit != m_tempDef.end() && dit->second &&
+                        dit->second->op == IROp::Temp) {
+                        int srcId = dit->second->tempId();
+                        auto svit = m_func.tempToVar.find(srcId);
+                        if (svit != m_func.tempToVar.end()) {
+                            auto snit = m_func.varNames.find(svit->second);
+                            if (snit != m_func.varNames.end())
+                                return snit->second;
+                        }
                     }
                     return tempName(id);
                 }

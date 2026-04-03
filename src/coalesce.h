@@ -55,6 +55,7 @@ public:
         // Safety: skip liveness for very large functions
         if (numTemps > 5000 || n > 500) {
             assignSimpleNames(func, types, allTemps);
+            namePhiTemps(func);
             return;
         }
 
@@ -559,6 +560,38 @@ private:
             auto it = func.tempTypes.find(tid);
             if (it != func.tempTypes.end() && it->second != NullType)
                 func.varTypes[varId] = it->second;
+        }
+
+        namePhiTemps(func);
+    }
+
+    // Map phi temps to variable names from their uses
+    void namePhiTemps(IRFunc &func) {
+        for (int phiId : func.phiTemps) {
+            if (func.tempToVar.count(phiId)) continue;
+            for (auto &bb : func.blocks) {
+                for (auto &s : bb.stmts) {
+                    if (s.kind == IRStmtKind::VarSet && s.expr &&
+                        s.expr->op == IROp::Temp && s.expr->tempId() == phiId) {
+                        int targetVar = -1;
+                        for (auto &[vid, vname] : func.varNames)
+                            if (vname == s.destVar) { targetVar = vid; break; }
+                        if (targetVar >= 0) {
+                            func.tempToVar[phiId] = targetVar;
+                            goto nextPhi;
+                        }
+                    }
+                    if (s.kind == IRStmtKind::Assign && s.expr &&
+                        s.expr->op == IROp::Temp && s.expr->tempId() == phiId) {
+                        auto tvit = func.tempToVar.find(s.destTemp);
+                        if (tvit != func.tempToVar.end()) {
+                            func.tempToVar[phiId] = tvit->second;
+                            goto nextPhi;
+                        }
+                    }
+                }
+            }
+            nextPhi:;
         }
     }
 };
