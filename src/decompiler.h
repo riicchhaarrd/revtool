@@ -2971,8 +2971,6 @@ private:
         void emitStmt(QString &out, IRStmt &stmt, int indent) {
             switch (stmt.kind) {
             case IRStmtKind::Assign: {
-                // Skip phi definitions — they are loop bookkeeping, not real assignments
-                if (m_func.phiTemps.count(stmt.destTemp)) return;
                 std::string rhs = stmt.expr ? emitExpr(stmt.expr.get()) : "0";
                 // Skip assignment for inlined temps — BUT keep calls with truly unused results
                 if (m_tempUseCount[stmt.destTemp] <= 1) {
