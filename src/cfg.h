@@ -47,6 +47,11 @@ struct StructNode {
     // For Goto
     int gotoTarget = -1;
 
+    // For While: if true, the first child is a Block containing header
+    // statements that must execute BEFORE the condition each iteration.
+    // Emitter renders as: while(1) { header_stmts; if(!cond) break; body; }
+    bool whileHasHeaderStmts = false;
+
     // For For: init and increment statement indices (in the header block)
     int forInitBB = -1;     // block containing the init statement
     int forInitStmt = -1;   // index of the init statement
@@ -557,7 +562,9 @@ private:
                         auto whileNode = StructNode::mkWhile(br.expr.get());
                         whileNode->negated = negCond;
                         // If header has loop body statements, wrap them with the body
+                        // and mark for while(1)+break emission
                         if (headerStmtsAreLoopBody && stmtEnd > 0) {
+                            whileNode->whileHasHeaderStmts = true;
                             auto wrapper = StructNode::mkBlock();
                             wrapper->children.push_back(StructNode::mkSeq(cur, 0, stmtEnd));
                             wrapper->children.push_back(std::move(body));

@@ -2826,10 +2826,30 @@ private:
                 // Dead while loops: while(false)
                 if (cond == "0 != 0" || cond == "0 == 1" || cond == "1 == 0" ||
                     cond == "0" || cond == "(0)") break;
-                out += pad(indent) + "while (" + QString::fromStdString(cond) + ") {\n";
-                for (auto &child : node->children)
-                    emitNode(out, child.get(), indent + 1);
-                out += pad(indent) + "}\n";
+                // When header statements are hoisted into the body, emit as:
+                //   while(1) { header_stmts; if (!cond) break; body; }
+                // This preserves correct execution order (body before condition).
+                if (node->whileHasHeaderStmts && !node->children.empty() &&
+                    node->children[0]->kind == StructKind::Block &&
+                    node->children[0]->children.size() >= 2) {
+                    out += pad(indent) + "while (1) {\n";
+                    // Emit first child of wrapper (header statements)
+                    emitNode(out, node->children[0]->children[0].get(), indent + 1);
+                    // Emit break condition
+                    std::string breakCond = node->cond ?
+                        emitExpr(node->cond, !node->negated) : "0";
+                    out += pad(indent + 1) + "if (" +
+                           QString::fromStdString(breakCond) + ") break;\n";
+                    // Emit remaining body children
+                    for (size_t ci = 1; ci < node->children[0]->children.size(); ++ci)
+                        emitNode(out, node->children[0]->children[ci].get(), indent + 1);
+                    out += pad(indent) + "}\n";
+                } else {
+                    out += pad(indent) + "while (" + QString::fromStdString(cond) + ") {\n";
+                    for (auto &child : node->children)
+                        emitNode(out, child.get(), indent + 1);
+                    out += pad(indent) + "}\n";
+                }
                 break;
             }
 
