@@ -148,6 +148,7 @@ typedef int D3DLIGHT9; typedef int D3DRASTER_STATUS;
 typedef int scr_thread_t;
 typedef void *scr_func_t;
 typedef int TextureID;
+typedef int MaterialHandle;
 typedef int isNegative;
 typedef struct { int _[4]; } GUID;
 typedef unsigned long u_long;
