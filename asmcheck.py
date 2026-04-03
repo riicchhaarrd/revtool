@@ -367,11 +367,12 @@ def extract_struct_from_header(name):
     return None
 
 
-def _try_compile(code):
+def _try_compile(code, extra_flags=None):
     with tempfile.NamedTemporaryFile(suffix='.c', mode='w', delete=False) as f:
         f.write(code); cpath = f.name
     try:
-        r = subprocess.run([APPLE_GCC] + GCC_FLAGS + ['-S', '-o', '-', cpath],
+        flags = GCC_FLAGS + (extra_flags or [])
+        r = subprocess.run([APPLE_GCC] + flags + ['-S', '-o', '-', cpath],
                            capture_output=True, text=True, timeout=30)
         return r.returncode == 0, r.stdout, r.stderr
     except subprocess.TimeoutExpired:
@@ -380,7 +381,7 @@ def _try_compile(code):
         os.unlink(cpath)
 
 
-def compile_to_asm(c_code, orig_check=None):
+def compile_to_asm(c_code, orig_check=None, extra_flags=None):
     # Pre-extract all struct/typedef types referenced in the code from the types header
     extracted = {}  # name -> definition (ordered by dependency)
     # Find struct references AND typedef names (Type_t patterns used as pointer types)
@@ -601,7 +602,7 @@ def compile_to_asm(c_code, orig_check=None):
     full = STUBS + '\n' + dvar_block + '\n' + types_block + '\n' + func_protos + '\n' + c_code
 
     # Try compile with extracted types
-    ok, stdout, stderr = _try_compile(full)
+    ok, stdout, stderr = _try_compile(full, extra_flags)
     if ok: return True, stdout, stderr
 
     # Retry: add simple stubs for remaining undeclared names
@@ -784,7 +785,7 @@ def compile_to_asm(c_code, orig_check=None):
                 full = full[:idx] + new_proto + full[idx:]
         if not undeclared:
             # Even with no undeclared names, try recompiling if we patched the code
-            ok, stdout, stderr = _try_compile(full)
+            ok, stdout, stderr = _try_compile(full, extra_flags)
             if ok: return True, stdout, stderr
             break
         already = set(re.findall(r'(?:typedef|struct|union|extern|enum)\s+\w+.*?\s+(\w+)\s*[;\{]', full))
@@ -865,7 +866,7 @@ def compile_to_asm(c_code, orig_check=None):
         if not stubs: break
         idx = full.find(STUBS) + len(STUBS) if STUBS in full else 0
         full = full[:idx] + stubs + full[idx:]
-        ok, stdout, stderr = _try_compile(full)
+        ok, stdout, stderr = _try_compile(full, extra_flags)
         if ok: return True, stdout, stderr
 
     return False, '', stderr
@@ -1390,6 +1391,11 @@ def check_function(name_or_addr, data, text_addr, text_off, verbose=True):
     # Strip callee-save register differences
     orig = strip_callee_save(orig, recomp)
     recomp = strip_callee_save(recomp, orig)
+    # Remove GCC's extra jp (NaN parity check) instructions when the original
+    # doesn't have them. These are always after ucomiss and before a jcc.
+    orig_has_jp = any(inst.strip().startswith('jp') for inst in orig)
+    if not orig_has_jp:
+        recomp = [inst for inst in recomp if not inst.strip().startswith('jp')]
 
     # Compare using LCS (longest common subsequence) for alignment-tolerant matching
     normed_o = [norm(x) for x in orig]
