@@ -160,7 +160,14 @@ typedef void *CFArrayRef;
 typedef void *CFDictionaryRef;
 typedef void *CFTypeRef;
 typedef void *AudioConverterRef;
+typedef unsigned int AudioUnitRenderActionFlags;
+typedef struct { int _[8]; } AudioTimeStamp;
+typedef struct { int mNumberBuffers; int _[32]; } AudioBufferList;
+typedef struct { int _[4]; } AudioStreamPacketDescription;
+typedef struct { int _[4]; } AudioStreamBasicDescription;
 typedef struct { char _[80]; } FSRef;
+typedef unsigned int UInt32;
+typedef float Float32;
 /* Network types */
 typedef int SOCKET;
 typedef struct { int _[4]; } fd_set;
