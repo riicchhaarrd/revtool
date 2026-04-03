@@ -1493,7 +1493,14 @@ private:
                         }
                         if (!skipField) {
                             base->typeRef = baseType;
-                            return IRExpr::mkField(std::move(base), access, (int)m.disp, ft);
+                            auto field = IRExpr::mkField(std::move(base), access, (int)m.disp, ft);
+                            // Mark float fields for correct load cast
+                            if (ft != NullType) {
+                                auto *fti = m_types.resolveType(ft);
+                                if (fti && fti->kind == StabsTypeKind::Float)
+                                    field->loadSize = 5;
+                            }
+                            return field;
                         }
                     }
                 }
