@@ -1723,7 +1723,7 @@ private:
                         } else if (byteSize <= 4) {
                             ftype = "int " + f.name;
                         } else {
-                            char buf[64];
+                            char buf[256];
                             snprintf(buf, sizeof(buf), "char %s[%d]", f.name.c_str(), byteSize);
                             ftype = buf;
                         }
@@ -3043,7 +3043,7 @@ private:
                             if (!folded) {
                                 // Can't resolve field — use raw pointer arithmetic on original base
                                 std::string origStr = emitExpr(origBase);
-                                char buf[128];
+                                char buf[512];
                                 snprintf(buf, sizeof(buf), "*(%s *)((char *)%s + 0x%X) = %s",
                                          storeCast.c_str(), origStr.c_str(), (unsigned)combinedOff, val.c_str());
                                 out += pad(indent) + QString::fromStdString(buf) + ";\n";
@@ -3175,7 +3175,7 @@ private:
                             out += pad(indent) + QString::fromStdString(
                                 base + "->" + access + " = " + val) + ";\n";
                         } else {
-                            char buf[128];
+                            char buf[512];
                             snprintf(buf, sizeof(buf), "*(%s *)((char *)%s + 0x%X) = %s",
                                      storeCast.c_str(), base.c_str(), (unsigned)off, val.c_str());
                             out += pad(indent) + QString::fromStdString(buf) + ";\n";
@@ -3747,7 +3747,7 @@ private:
                                     m_types.formatFieldAccess(structRef, combinedOff) : "";
                                 if (!access.empty()) {
                                     std::string origStr = emitExpr(origBase);
-                                    char buf[64];
+                                    char buf[256];
                                     snprintf(buf, sizeof(buf), "*(%s *)((char *)%s + 0x%llX)",
                                              loadCastType(e->loadSize), origStr.c_str(),
                                              (unsigned long long)combinedOff);
@@ -3838,7 +3838,7 @@ private:
                         }
                     }
                     if (result.empty()) {
-                        char buf[64];
+                        char buf[256];
                         snprintf(buf, sizeof(buf), "*(%s *)((char *)%s + 0x%llX)",
                                  loadCastType(e->loadSize), base.c_str(), (unsigned long long)off);
                         result = buf;
@@ -4501,7 +4501,7 @@ private:
                     std::string thisArg = emitExpr(e->kids[0].get());
                     // Use int return type for vtable calls (void* would also
                     // work, but int matches testl in condition checks)
-                    char buf[128];
+                    char buf[256];
                     snprintf(buf, sizeof(buf),
                         "((int(*)(void*))(((void**)(*(void**)%s))[%d]))(",
                         thisArg.c_str(), vslot);
