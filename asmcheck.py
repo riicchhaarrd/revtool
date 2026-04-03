@@ -714,6 +714,19 @@ def compile_to_asm(c_code, orig_check=None, extra_flags=None):
         if 'label at end of compound statement' in stderr:
             full = re.sub(r'(bb_\d+:)\s*\n(\s*\})', r'\1 ;\n\2', full)
             full = re.sub(r'(bb_\d+:)\s*\}', r'\1 ; }', full)
+        # Handle "array type has incomplete element type" — replace array field with char padding
+        for m in re.finditer(r':(\d+):.*array type has incomplete element type', stderr):
+            lineno = int(m.group(1))
+            code_lines = full.split('\n')
+            if lineno <= len(code_lines):
+                line_text = code_lines[lineno-1].strip()
+                # Match: "TypeName field[N];" and replace with "char field[N*4];"
+                am = re.match(r'\s*(\w+)\s+(\w+)\[(\d+)\]\s*;', code_lines[lineno-1])
+                if am:
+                    tname, fname, count = am.group(1), am.group(2), int(am.group(3))
+                    indent = len(code_lines[lineno-1]) - len(code_lines[lineno-1].lstrip())
+                    code_lines[lineno-1] = ' ' * indent + f'char {fname}[{count * 4}];'
+                    full = '\n'.join(code_lines)
         # Handle "dereferencing pointer to incomplete type" - add struct definition
         for m in re.finditer(r"dereferencing pointer to incomplete type", stderr):
             pass  # extract struct name from the error line
@@ -815,6 +828,16 @@ def compile_to_asm(c_code, orig_check=None, extra_flags=None):
                 new_proto = f'int {fname}({params});\n'
                 idx = full.find(STUBS) + len(STUBS) if STUBS in full else 0
                 full = full[:idx] + new_proto + full[idx:]
+        # Handle "invalid operands to binary &/|/+" — struct used in bitwise/arith ops
+        for m in re.finditer(r':(\d+):.*invalid operands to binary ([&|+*\-])', stderr):
+            lineno = int(m.group(1))
+            code_lines = full.split('\n')
+            if lineno <= len(code_lines):
+                line_text = code_lines[lineno-1]
+                # Cast struct variables in binary ops to (int)
+                code_lines[lineno-1] = re.sub(
+                    r'\b(\w+)\s*([&|^])\s*(\d+)', r'(*(int*)&\1) \2 \3', line_text)
+                full = '\n'.join(code_lines)
         if not undeclared:
             # Even with no undeclared names, try recompiling if we patched the code
             ok, stdout, stderr = _try_compile(full, extra_flags)
