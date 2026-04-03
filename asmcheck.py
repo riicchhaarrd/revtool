@@ -1005,8 +1005,11 @@ def norm(s):
     # Normalize string ops: repe/repz and repne/repnz
     s = re.sub(r'^repe\b', 'repz', s)
     s = re.sub(r'^repne\b', 'repnz', s)
-    # Strip operands from cmpsb (implicit esi/edi)
+    # Strip implicit operands from string ops (esi/edi/al)
     s = re.sub(r'^(repz cmpsb).*', r'\1', s)
+    s = re.sub(r'^(repnz scasb).*', r'\1', s)
+    s = re.sub(r'^(rep movs[blwd]).*', r'\1', s)
+    s = re.sub(r'^(rep stos[blwd]).*', r'\1', s)
     # testb %Xl, %Xl -> testl %eXx, %eXx (equivalent for zero-check)
     s = re.sub(r'^testb %([a-d])l, %\1l', r'testl %e\1x, %e\1x', s)
     # testw %Xx, %Xx -> testl %eXx, %eXx (equivalent for zero-check)

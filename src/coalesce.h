@@ -591,6 +591,31 @@ private:
                     }
                 }
             }
+            // If no direct use found, try matching the phi's type to a STABS local
+            // (e.g., phi holds cmd_function_t* and local 'cmd' is cmd_function_t*)
+            {
+                TypeRef phiType = func.tempType(phiId);
+                if (phiType != NullType) {
+                    for (auto &loc : func.locals) {
+                        if (loc.typeRef == phiType && !loc.name.empty()) {
+                            // Check this local isn't already used by another temp
+                            bool used = false;
+                            for (auto &[tid, vid] : func.tempToVar) {
+                                auto nit = func.varNames.find(vid);
+                                if (nit != func.varNames.end() && nit->second == loc.name)
+                                    { used = true; break; }
+                            }
+                            if (!used) {
+                                int varId = 0;
+                                for (auto &[v, _] : func.varNames) if (v >= varId) varId = v + 1;
+                                func.varNames[varId] = loc.name;
+                                func.tempToVar[phiId] = varId;
+                                goto nextPhi;
+                            }
+                        }
+                    }
+                }
+            }
             nextPhi:;
         }
     }

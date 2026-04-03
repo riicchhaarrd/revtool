@@ -3934,6 +3934,9 @@ private:
             }
 
             case IROp::Field: {
+                if (e->kids[0] && e->kids[0]->op == IROp::Temp)
+                    fprintf(stderr, "FIELD base temp=%d isPhi=%d\n",
+                            e->kids[0]->tempId(), (int)m_func.phiTemps.count(e->kids[0]->tempId()));
                 std::string base = emitExpr(e->kids[0].get());
                 // If base is literal 0 (NULL or Temp that inlined to "0"), emit as offset constant
                 // Also handle parenthesized zero: "(0)" from sub-expressions

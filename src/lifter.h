@@ -638,8 +638,6 @@ public:
                             if (it != m_regTemps.end()) {
                                 int oldTemp = it->second;
                                 TypeRef tt = func.tempType(oldTemp);
-                                if (tt != NullType && m_types.isStructPointer(tt))
-                                    continue; // still skip struct pointers
                                 int newTemp = func.newTemp(tt);
                                 func.phiTemps.insert(newTemp);
                                 hdr.stmts.push_back(IRStmt::mkAssign(newTemp,
