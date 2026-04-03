@@ -330,20 +330,30 @@ public:
             }
             // For each loop header, scan the loop body to find which GP regs are written
             // Only these regs need phi temps (avoids breaking unmodified param regs)
-            for (int hdr : domLoopHeaders) {
-                // Find all blocks in the loop body (between header and back-edge source)
-                // Simple: blocks [hdr .. max_back_edge_source] that are dominated by hdr
-                std::set<int> loopBlocks;
-                for (int b = hdr; b < nBlocks; ++b) {
-                    // Check if b is dominated by hdr
-                    int r = b; bool dom = false; int lim = nBlocks;
-                    while (r >= 0 && lim-- > 0) {
-                        if (r == hdr) { dom = true; break; }
-                        if (r == idom[r]) break;
-                        r = idom[r];
+            // Build back-edge map: header → set of back-edge sources
+            std::map<int, std::set<int>> backEdgeSources;
+            for (int b = 0; b < nBlocks; ++b)
+                for (int succ : succsFromPreds[b]) {
+                    if (succ < 0 || succ >= nBlocks) continue;
+                    int runner = b; bool dom = false; int lim = nBlocks;
+                    while (runner >= 0 && lim-- > 0) {
+                        if (runner == succ) { dom = true; break; }
+                        if (runner == idom[runner]) break;
+                        runner = idom[runner];
                     }
-                    if (dom) loopBlocks.insert(b);
+                    if (dom) backEdgeSources[succ].insert(b);
                 }
+            for (int hdr : domLoopHeaders) {
+                // Find loop body blocks: only blocks between header and
+                // back-edge sources (not post-loop blocks that happen to be dominated)
+                int maxBackSrc = hdr;
+                auto beit = backEdgeSources.find(hdr);
+                if (beit != backEdgeSources.end())
+                    for (int s : beit->second)
+                        if (s > maxBackSrc) maxBackSrc = s;
+                std::set<int> loopBlocks;
+                for (int b = hdr; b <= maxBackSrc; ++b)
+                    loopBlocks.insert(b);
                 // Scan instructions in loop blocks for written GP registers
                 auto &written = loopWrittenRegs[hdr];
                 for (size_t ii = 0; ii < funcEndIdx; ++ii) {
