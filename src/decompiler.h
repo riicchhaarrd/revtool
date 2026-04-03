@@ -2546,8 +2546,32 @@ private:
             if (stmt.kind == IRStmtKind::Assign && stmt.expr &&
                 stmt.expr->op == IROp::AddrOf && !stmt.expr->kids.empty() &&
                 stmt.expr->kids[0]->op == IROp::Field) {
-                // The temp might be copied to a var later via copy prop
                 m_interiorPtrVars.insert("__temp_" + std::to_string(stmt.destTemp));
+            }
+            // Also catch Add(structPtr, const) patterns — these are LEA instructions
+            // that create pointers into the middle of a struct (e.g., &ent->r.origin).
+            // The emitter renders them as &base->field, but the IR has Add(base, const).
+            {
+                auto *expr = (stmt.kind == IRStmtKind::Assign || stmt.kind == IRStmtKind::VarSet)
+                             ? stmt.expr.get() : nullptr;
+                if (expr && expr->op == IROp::Add && expr->kids.size() == 2 &&
+                    expr->kids[1]->isConst() && expr->kids[1]->value > 0 &&
+                    expr->kids[1]->value < 0x10000 &&
+                    (expr->kids[0]->op == IROp::Var || expr->kids[0]->op == IROp::Temp)) {
+                    TypeRef baseType = NullType;
+                    if (expr->kids[0]->op == IROp::Temp) {
+                        int bt = expr->kids[0]->tempId();
+                        baseType = m_func.tempType(bt);
+                    } else if (expr->kids[0]->typeRef != NullType) {
+                        baseType = expr->kids[0]->typeRef;
+                    }
+                    if (baseType != NullType && m_types.isStructPointer(baseType)) {
+                        if (stmt.kind == IRStmtKind::VarSet)
+                            m_interiorPtrVars.insert(stmt.destVar);
+                        else if (stmt.kind == IRStmtKind::Assign && stmt.destTemp >= 0)
+                            m_interiorPtrVars.insert("__temp_" + std::to_string(stmt.destTemp));
+                    }
+                }
             }
         }
 
@@ -2962,7 +2986,27 @@ private:
                 else if (stmt.storeSize == 9) storeCast = "double";
                 // Field expression → base->field = val
                 if (a->op == IROp::Field) {
-                    out += pad(indent) + QString::fromStdString(emitExpr(a) + " = " + val) + ";\n";
+                    // Check if the Field base is an interior pointer (temp from Add(structPtr, const))
+                    // If so, skip struct field resolution and use raw pointer arithmetic
+                    bool fieldIsInterior = false;
+                    if (!a->kids.empty() && a->kids[0]->op == IROp::Temp) {
+                        auto dit = m_tempDef.find(a->kids[0]->tempId());
+                        if (dit != m_tempDef.end() && dit->second &&
+                            dit->second->op == IROp::Add && dit->second->kids.size() == 2 &&
+                            dit->second->kids[1]->isConst() && dit->second->kids[1]->value > 0)
+                            fieldIsInterior = true;
+                    }
+                    if (fieldIsInterior) {
+                        // Emit as raw pointer arithmetic: *(type *)((char *)base + off)
+                        std::string baseStr = emitExpr(a->kids[0].get());
+                        int fieldOff = (int)a->value;
+                        char buf[128];
+                        snprintf(buf, sizeof(buf), "*(%s *)((char *)%s + 0x%X) = %s",
+                                 storeCast.c_str(), baseStr.c_str(), (unsigned)fieldOff, val.c_str());
+                        out += pad(indent) + QString::fromStdString(buf) + ";\n";
+                    } else {
+                        out += pad(indent) + QString::fromStdString(emitExpr(a) + " = " + val) + ";\n";
+                    }
                 }
                 // Add(base, const) → base->field_XX = val or base[N] = val for scalar ptrs
                 else if (a->op == IROp::Add && a->kids.size() == 2 &&
@@ -3023,8 +3067,21 @@ private:
                         bool stIsInterior = false;
                         if (a->kids[0]->op == IROp::Var && !a->kids[0]->name.empty())
                             stIsInterior = m_interiorPtrVars.count(a->kids[0]->name) > 0;
-                        else if (a->kids[0]->op == IROp::Temp)
-                            stIsInterior = m_interiorPtrVars.count("__temp_" + std::to_string(a->kids[0]->tempId())) > 0;
+                        else if (a->kids[0]->op == IROp::Temp) {
+                            int tid = a->kids[0]->tempId();
+                            stIsInterior = m_interiorPtrVars.count("__temp_" + std::to_string(tid)) > 0;
+                            // Dynamic check: if this temp's definition is Add(X, const),
+                            // it's likely a LEA creating an interior pointer
+                            if (!stIsInterior) {
+                                auto dit = m_tempDef.find(tid);
+                                if (dit != m_tempDef.end() && dit->second &&
+                                    dit->second->op == IROp::Add && dit->second->kids.size() == 2 &&
+                                    dit->second->kids[1]->isConst() &&
+                                    dit->second->kids[1]->value > 0) {
+                                    stIsInterior = true;
+                                }
+                            }
+                        }
                         std::string access;
                         if (!stIsInterior && stBaseType != NullType && m_types.isStructPointer(stBaseType)) {
                             TypeRef structRef = m_types.getPointedStruct(stBaseType);
