@@ -2986,25 +2986,44 @@ private:
                 else if (stmt.storeSize == 9) storeCast = "double";
                 // Field expression → base->field = val
                 if (a->op == IROp::Field) {
-                    // Check if the Field base is an interior pointer (temp from Add(structPtr, const))
-                    // If so, skip struct field resolution and use raw pointer arithmetic
-                    bool fieldIsInterior = false;
+                    // Check if the Field base is an interior pointer (temp from Add(structPtr, const)).
+                    // If so, fold back to the original struct base with combined offset.
+                    // e.g., v8 = &ent->r.origin → v8.field = X becomes ent->r.origin_field = X
+                    bool folded = false;
                     if (!a->kids.empty() && a->kids[0]->op == IROp::Temp) {
                         auto dit = m_tempDef.find(a->kids[0]->tempId());
                         if (dit != m_tempDef.end() && dit->second &&
                             dit->second->op == IROp::Add && dit->second->kids.size() == 2 &&
-                            dit->second->kids[1]->isConst() && dit->second->kids[1]->value > 0)
-                            fieldIsInterior = true;
+                            dit->second->kids[1]->isConst() && dit->second->kids[1]->value > 0) {
+                            // Fold: base = original struct ptr, offset = inner + field
+                            auto *origBase = dit->second->kids[0].get();
+                            int innerOff = (int)dit->second->kids[1]->value;
+                            int fieldOff = (int)a->value;
+                            int combinedOff = innerOff + fieldOff;
+                            TypeRef origType = exprType(origBase);
+                            if (origType != NullType && m_types.isStructPointer(origType)) {
+                                TypeRef structRef = m_types.getPointedStruct(origType);
+                                std::string access = structRef != NullType ?
+                                    m_types.formatFieldAccess(structRef, combinedOff) : "";
+                                if (!access.empty()) {
+                                    std::string origStr = emitExpr(origBase);
+                                    out += pad(indent) + QString::fromStdString(
+                                        origStr + "->" + access + " = " + val) + ";\n";
+                                    folded = true;
+                                }
+                            }
+                            if (!folded) {
+                                // Can't resolve field — use raw pointer arithmetic on original base
+                                std::string origStr = emitExpr(origBase);
+                                char buf[128];
+                                snprintf(buf, sizeof(buf), "*(%s *)((char *)%s + 0x%X) = %s",
+                                         storeCast.c_str(), origStr.c_str(), (unsigned)combinedOff, val.c_str());
+                                out += pad(indent) + QString::fromStdString(buf) + ";\n";
+                                folded = true;
+                            }
+                        }
                     }
-                    if (fieldIsInterior) {
-                        // Emit as raw pointer arithmetic: *(type *)((char *)base + off)
-                        std::string baseStr = emitExpr(a->kids[0].get());
-                        int fieldOff = (int)a->value;
-                        char buf[128];
-                        snprintf(buf, sizeof(buf), "*(%s *)((char *)%s + 0x%X) = %s",
-                                 storeCast.c_str(), baseStr.c_str(), (unsigned)fieldOff, val.c_str());
-                        out += pad(indent) + QString::fromStdString(buf) + ";\n";
-                    } else {
+                    if (!folded) {
                         out += pad(indent) + QString::fromStdString(emitExpr(a) + " = " + val) + ";\n";
                     }
                 }
@@ -3061,6 +3080,33 @@ private:
                         }
                     }
                     if (!usedArrayNotation) {
+                        // Try to fold interior pointers back to original struct base.
+                        // When base temp = Add(structPtr, innerOff), fold to structPtr->(innerOff+off)
+                        bool foldedInterior = false;
+                        if (a->kids[0]->op == IROp::Temp) {
+                            auto dit = m_tempDef.find(a->kids[0]->tempId());
+                            if (dit != m_tempDef.end() && dit->second &&
+                                dit->second->op == IROp::Add && dit->second->kids.size() == 2 &&
+                                dit->second->kids[1]->isConst() && dit->second->kids[1]->value > 0) {
+                                auto *origBase = dit->second->kids[0].get();
+                                int innerOff = (int)dit->second->kids[1]->value;
+                                int combinedOff = innerOff + off;
+                                TypeRef origType = exprType(origBase);
+                                if (origType != NullType && m_types.isStructPointer(origType)) {
+                                    TypeRef structRef = m_types.getPointedStruct(origType);
+                                    std::string access = structRef != NullType ?
+                                        m_types.formatFieldAccess(structRef, combinedOff) : "";
+                                    if (!access.empty()) {
+                                        std::string origStr = emitExpr(origBase);
+                                        out += pad(indent) + QString::fromStdString(
+                                            origStr + "->" + access + " = " + val) + ";\n";
+                                        foldedInterior = true;
+                                    }
+                                }
+                            }
+                        }
+                        if (foldedInterior) { /* done */ }
+                        else {
                         // Try type-aware struct field access
                         // Skip for interior pointers (vars from &struct->field)
                         TypeRef stBaseType = exprType(a->kids[0].get());
@@ -3070,8 +3116,6 @@ private:
                         else if (a->kids[0]->op == IROp::Temp) {
                             int tid = a->kids[0]->tempId();
                             stIsInterior = m_interiorPtrVars.count("__temp_" + std::to_string(tid)) > 0;
-                            // Dynamic check: if this temp's definition is Add(X, const),
-                            // it's likely a LEA creating an interior pointer
                             if (!stIsInterior) {
                                 auto dit = m_tempDef.find(tid);
                                 if (dit != m_tempDef.end() && dit->second &&
@@ -3108,6 +3152,7 @@ private:
                                      storeCast.c_str(), base.c_str(), (unsigned)off, val.c_str());
                             out += pad(indent) + QString::fromStdString(buf) + ";\n";
                         }
+                    } // else (not foldedInterior)
                     }
                 }
                 // Add(base, Mul(idx, scale)) or Add(Mul(idx, scale), base) → base[idx] = val
