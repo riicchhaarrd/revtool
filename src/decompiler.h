@@ -3671,14 +3671,24 @@ private:
                                 fieldAccess = m_types.formatFieldAccess(structRef, off);
                         }
                         if (!fieldAccess.empty()) {
-                            // Got a real field name — use array subscript on it
-                            // If fieldAccess is "name[0]", strip the [0] to get just "name"
-                            // so the dynamic index applies directly: name[idx]
-                            size_t bracket = fieldAccess.find('[');
-                            if (bracket != std::string::npos &&
-                                fieldAccess.substr(bracket) == "[0]")
-                                fieldAccess = fieldAccess.substr(0, bracket);
-                            result = baseStr + "->" + fieldAccess + "[" + idxStr + "]";
+                            // Check if this is base[idx].field pattern:
+                            // elemSize matches struct size → array of structs
+                            TypeRef structRef2 = NullType;
+                            if (baseType != NullType && m_types.isStructPointer(baseType))
+                                structRef2 = m_types.getPointedStruct(baseType);
+                            auto *structInfo = structRef2 != NullType ? m_types.resolveType(structRef2) : nullptr;
+                            if (structInfo && structInfo->sizeBytes > 0 &&
+                                elemSize == structInfo->sizeBytes) {
+                                // Array of structs: base[idx].field
+                                result = baseStr + "[" + idxStr + "]." + fieldAccess;
+                            } else {
+                                // Scalar field with dynamic subscript
+                                size_t bracket = fieldAccess.find('[');
+                                if (bracket != std::string::npos &&
+                                    fieldAccess.substr(bracket) == "[0]")
+                                    fieldAccess = fieldAccess.substr(0, bracket);
+                                result = baseStr + "->" + fieldAccess + "[" + idxStr + "]";
+                            }
                         } else {
                             char fname[64];
                             if (elemSize == 4)

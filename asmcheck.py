@@ -861,15 +861,16 @@ def compile_to_asm(c_code, orig_check=None, extra_flags=None):
                 new_proto = f'int {fname}({params});\n'
                 idx = full.find(STUBS) + len(STUBS) if STUBS in full else 0
                 full = full[:idx] + new_proto + full[idx:]
-        # Handle "invalid operands to binary &/|/+" — struct used in bitwise/arith ops
+        # Handle "invalid operands to binary &/|/+" — pointer/struct used in bitwise ops
         for m in re.finditer(r':(\d+):.*invalid operands to binary ([&|+*\-])', stderr):
             lineno = int(m.group(1))
             code_lines = full.split('\n')
             if lineno <= len(code_lines):
                 line_text = code_lines[lineno-1]
-                # Cast struct variables in binary ops to (int)
+                # Wrap the whole expression line: cast pointer expressions in & ops
+                # Pattern: (expr) & N or (expr) | N where expr has (char *) cast
                 code_lines[lineno-1] = re.sub(
-                    r'\b(\w+)\s*([&|^])\s*(\d+)', r'(*(int*)&\1) \2 \3', line_text)
+                    r'\((.+?)\)\s*&\s*(-?\d+)', r'((int)(\1)) & \2', line_text, count=1)
                 full = '\n'.join(code_lines)
         if not undeclared:
             # Even with no undeclared names, try recompiling if we patched the code
