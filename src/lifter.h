@@ -254,6 +254,81 @@ public:
             }
         }
 
+        // ── Pass 2c: dominator-based loop header detection ──────────
+        // Compute immediate dominators from prePreds to identify true loop
+        // headers (blocks where a back-edge enters). This is needed before
+        // lifting to create phi temps at loop headers.
+        std::set<int> domLoopHeaders;
+        if (nBlocks >= 3) {
+            // Compute idom using Cooper-Harvey-Kennedy algorithm
+            std::vector<int> idom(nBlocks, -1);
+            idom[0] = 0;
+            // Build RPO from prePreds (successors implied by who has us as pred)
+            std::vector<std::set<int>> succsFromPreds(nBlocks);
+            for (int b = 0; b < nBlocks; ++b)
+                for (int p : prePreds[b])
+                    if (p >= 0 && p < nBlocks) succsFromPreds[p].insert(b);
+            std::vector<int> rpo;
+            std::vector<int> rpoNum(nBlocks, -1);
+            {
+                std::vector<bool> vis(nBlocks, false);
+                std::vector<int> po;
+                std::vector<std::pair<int,int>> stk = {{0, 0}};
+                vis[0] = true;
+                while (!stk.empty()) {
+                    auto &[nd, ci] = stk.back();
+                    std::vector<int> sc(succsFromPreds[nd].begin(), succsFromPreds[nd].end());
+                    if (ci < (int)sc.size()) {
+                        int s = sc[ci++];
+                        if (s >= 0 && s < nBlocks && !vis[s]) { vis[s] = true; stk.push_back({s, 0}); }
+                    } else { po.push_back(nd); stk.pop_back(); }
+                }
+                rpo.resize(po.size());
+                for (int i = 0; i < (int)po.size(); ++i) {
+                    rpo[po.size()-1-i] = po[i];
+                    rpoNum[po[i]] = (int)po.size()-1-i;
+                }
+            }
+            auto intersect = [&](int b1, int b2) -> int {
+                int limit = nBlocks;
+                while (b1 != b2 && limit-- > 0) {
+                    while (rpoNum[b1] > rpoNum[b2] && limit-- > 0) b1 = idom[b1];
+                    while (rpoNum[b2] > rpoNum[b1] && limit-- > 0) b2 = idom[b2];
+                }
+                return b1;
+            };
+            bool changed = true;
+            for (int iter = 0; iter < nBlocks && changed; ++iter) {
+                changed = false;
+                for (int idx = 1; idx < (int)rpo.size(); ++idx) {
+                    int b = rpo[idx];
+                    int newIdom = -1;
+                    for (int p : prePreds[b]) {
+                        if (p < 0 || p >= nBlocks || idom[p] == -1) continue;
+                        newIdom = (newIdom == -1) ? p : intersect(newIdom, p);
+                    }
+                    if (newIdom == -1) newIdom = 0;
+                    if (idom[b] != newIdom) { idom[b] = newIdom; changed = true; }
+                }
+            }
+            // Find back edges: B→H where H dominates B → H is a loop header
+            for (int b = 0; b < nBlocks; ++b) {
+                for (int succ : succsFromPreds[b]) {
+                    if (succ < 0 || succ >= nBlocks) continue;
+                    int runner = b;
+                    bool dominates = false;
+                    int limit = nBlocks;
+                    while (runner >= 0 && limit-- > 0) {
+                        if (runner == succ) { dominates = true; break; }
+                        if (runner == idom[runner]) break;
+                        runner = idom[runner];
+                    }
+                    if (dominates)
+                        domLoopHeaders.insert(succ);
+                }
+            }
+        }
+
         // ── Pass 3: detect prologue & PIC thunk ─────────────────────
         m_hasFrame = false; m_frameSize = 0;
         m_hasPIC = false; m_picBase = 0;
@@ -497,20 +572,15 @@ public:
                         m_flags = {-1, IROp::Eq, nullptr, nullptr};
                     }
                 }
-                // At blocks with back-edge predecessors (loop headers),
-                // clear stale global source info — registers may be modified
-                // in the loop body (e.g., linked list traversal)
-                if (curBlock > 0 && curBlock < nBlocks &&
+                // At dominator-confirmed loop headers that aren't from the
+                // heuristic, just clear stale global source info (no phis —
+                // phis for backward-jump loops can break parameter types)
+                if (curBlock > 0 && domLoopHeaders.count(curBlock) &&
                     !loopHeaderAddrs.count(in.address)) {
-                    for (int pred : prePreds[curBlock]) {
-                        if (pred > curBlock) {
-                            m_regGlobalSource.clear();
-                            m_regFuncPtrName.clear();
-                            break;
-                        }
-                    }
+                    m_regGlobalSource.clear();
+                    m_regFuncPtrName.clear();
                 }
-                // At loop header blocks, create phi temps
+                // At heuristic loop headers (jmp-forward targets), create phi temps
                 if (curBlock > 0 && loopHeaderAddrs.count(in.address)) {
                     auto &hdr = func.blocks[curBlock];
                     static const x86_reg gpRegs[] = {
@@ -521,14 +591,20 @@ public:
                         auto it = m_regTemps.find(reg);
                         if (it != m_regTemps.end()) {
                             int oldTemp = it->second;
-                            int newTemp = func.newTemp(func.tempType(oldTemp));
+                            // Skip phi creation for struct pointer temps — changing
+                            // their identity breaks field access and type coalescing.
+                            // Just clear the global source info instead.
+                            TypeRef tt = func.tempType(oldTemp);
+                            if (tt != NullType && m_types.isStructPointer(tt)) {
+                                m_regGlobalSource.erase(reg);
+                                m_regFuncPtrName.erase(reg);
+                                continue;
+                            }
+                            int newTemp = func.newTemp(tt);
                             func.phiTemps.insert(newTemp);
                             hdr.stmts.push_back(IRStmt::mkAssign(newTemp,
-                                IRExpr::mkTemp(oldTemp, func.tempType(oldTemp)),
-                                func.tempType(oldTemp)));
+                                IRExpr::mkTemp(oldTemp, tt), tt));
                             m_regTemps[reg] = newTemp;
-                            // Clear stale global source info — the register may be
-                            // updated in the loop body (e.g., linked list traversal)
                             m_regGlobalSource.erase(reg);
                             m_regFuncPtrName.erase(reg);
                         }

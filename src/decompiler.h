@@ -3023,6 +3023,8 @@ private:
                         bool stIsInterior = false;
                         if (a->kids[0]->op == IROp::Var && !a->kids[0]->name.empty())
                             stIsInterior = m_interiorPtrVars.count(a->kids[0]->name) > 0;
+                        else if (a->kids[0]->op == IROp::Temp)
+                            stIsInterior = m_interiorPtrVars.count("__temp_" + std::to_string(a->kids[0]->tempId())) > 0;
                         std::string access;
                         if (!stIsInterior && stBaseType != NullType && m_types.isStructPointer(stBaseType)) {
                             TypeRef structRef = m_types.getPointedStruct(stBaseType);
