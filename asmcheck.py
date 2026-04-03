@@ -453,10 +453,37 @@ def compile_to_asm(c_code, orig_check=None, extra_flags=None):
             # Note: $_NNNN anonymous types are valid GCC extensions, don't skip those
             if '::' in defn or '_vptr' in defn:
                 continue
-            extracted[name] = defn
-            # Also register any struct tags defined in this block
+            # Fix self-referencing array fields: "TypeName field[N]" where TypeName
+            # is the struct being defined → replace with "char field[N*4]" padding
+            fixed_defn = defn
+            # Find the struct name being defined
+            sm = re.match(r'(?:struct|union)\s+(\w+)\s*\{', defn.strip())
+            if sm:
+                sname = sm.group(1)
+                # Also get typedef aliases for this struct
+                aliases = {sname, name}
+                for line in defn.split('\n'):
+                    tm = re.match(r'typedef\s+struct\s+\w+\s+(\w+)\s*;', line.strip())
+                    if tm: aliases.add(tm.group(1))
+                # Replace self-referencing array fields
+                def fix_self_ref(m):
+                    typename = m.group(1)
+                    fname = m.group(2)
+                    count = int(m.group(3)) if m.group(3) else 1
+                    if typename in aliases:
+                        return f'    char {fname}[{count * 4}];'
+                    return m.group(0)
+                fixed_defn = re.sub(
+                    r'^\s+(\w+)\s+(\w+)\[(\d+)\]\s*;',
+                    fix_self_ref, fixed_defn, flags=re.MULTILINE)
+            extracted[name] = fixed_defn
+            # Also register any struct tags defined in this block and queue for deps
             for m in re.finditer(r'struct\s+(\w+)\s*\{', defn):
-                extracted.setdefault(m.group(1), defn)
+                tag = m.group(1)
+                if tag not in extracted:
+                    extracted[tag] = defn
+                    if tag not in visited:
+                        queue.append(tag)
             # Extract dependencies: struct/union/enum fields AND typedef references
             for m in re.finditer(r'(?:struct|union|enum)\s+([\w$]+)\s+[\w$]+', defn):
                 if m.group(1) not in visited:
@@ -465,8 +492,8 @@ def compile_to_asm(c_code, orig_check=None, extra_flags=None):
                 dep = m.group(1)
                 if dep not in visited and dep not in stubs_types:
                     queue.append(dep)
-            # Also follow CamelCase type names used as pointer types in struct fields
-            for m in re.finditer(r'\b([A-Z]\w+)\s+\*', defn):
+            # Also follow CamelCase type names used as pointer or array types in fields
+            for m in re.finditer(r'\b([A-Z]\w+)\s+(?:\*|\w+\s*\[)', defn):
                 dep = m.group(1)
                 if dep not in visited and dep not in stubs_types:
                     queue.append(dep)
@@ -538,10 +565,8 @@ def compile_to_asm(c_code, orig_check=None, extra_flags=None):
         if name in emitted_set or name not in extracted: return
         emitted_set.add(name)
         defn = extracted[name]
-        # Mark ALL names defined in this block as emitted (struct tags + typedefs)
+        # Mark struct tags defined in this block as emitted
         for m in re.finditer(r'struct\s+(\w+)\s*\{', defn):
-            emitted_set.add(m.group(1))
-        for m in re.finditer(r'typedef\s+struct\s+\w+\s+(\w+)\s*;', defn):
             emitted_set.add(m.group(1))
         # Emit dependencies first (struct, union, enum)
         for m in re.finditer(r'(?:struct|union|enum)\s+([\w$]+)\s+[\w$]+', defn):
@@ -549,8 +574,8 @@ def compile_to_asm(c_code, orig_check=None, extra_flags=None):
         for m in re.finditer(r'\b(\w+_t)\s+\*?\s*\w+', defn):
             if m.group(1) not in emitted_set:
                 emit_type(m.group(1))
-        # Also follow CamelCase type references (e.g., XModelCollSurf * field)
-        for m in re.finditer(r'\b([A-Z]\w+)\s+\*', defn):
+        # Also follow CamelCase type references (pointer and array fields)
+        for m in re.finditer(r'\b([A-Z]\w+)\s+(?:\*|\w+\s*\[)', defn):
             dep = m.group(1)
             if dep not in emitted_set and dep in extracted:
                 emit_type(dep)
@@ -586,6 +611,13 @@ def compile_to_asm(c_code, orig_check=None, extra_flags=None):
                     emit_type(sname)
                     break
         if sname:
+            # If the extracted block has the full struct+typedef, emit it directly
+            ext_block = extracted.get(name, '') or extracted.get(sname, '')
+            if ext_block and f'typedef struct' in ext_block and f' {name};' in ext_block:
+                # Check if struct body isn't already in types_block
+                if ext_block.strip() not in types_block:
+                    types_block = ext_block + '\n' + types_block
+                continue
             auto_typedefs.append(f'typedef struct {sname} {name};')
     if auto_typedefs:
         types_block += '\n' + '\n'.join(set(auto_typedefs))
