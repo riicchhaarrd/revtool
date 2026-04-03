@@ -151,6 +151,15 @@ typedef int TextureID;
 typedef int isNegative;
 typedef struct { int _[4]; } GUID;
 typedef unsigned long u_long;
+typedef void *CFStringRef;
+typedef void *CFMutableStringRef;
+typedef void *CFURLRef;
+typedef void *CFBundleRef;
+typedef void *CFArrayRef;
+typedef void *CFDictionaryRef;
+typedef void *CFTypeRef;
+typedef void *AudioConverterRef;
+typedef struct { char _[80]; } FSRef;
 /* Network types */
 typedef int SOCKET;
 typedef struct { int _[4]; } fd_set;
@@ -983,6 +992,8 @@ def norm(s):
     if m:
         op = 'subl' if m.group(1) == 'addl' else 'addl'
         s = f'{op} ${m.group(2)}{m.group(3)}'
+    # Normalize leal with zero displacement: leal 0(,%reg,N) → leal (,%reg,N)
+    s = re.sub(r'^(leal) 0\(,', r'\1 (,', s)
     # Normalize string ops: repe/repz and repne/repnz
     s = re.sub(r'^repe\b', 'repz', s)
     s = re.sub(r'^repne\b', 'repnz', s)
