@@ -434,18 +434,45 @@ private:
                     // For for loops, the init goes before and the rest goes inside.
                     int stmtEnd = (int)bb.stmts.size() - 1; // exclude branch
                     // Header statements are loop body content when the header has
-                    // multiple calls (e.g., SV_GetConfigstring + I_stricmp in GScr_GetHeadIconIndex).
-                    // A single call right before the branch is the condition (e.g., while(strcmp(...)!=0)).
+                    // function calls that should execute each iteration. Hoist when:
+                    // - 2+ calls (e.g., SV_GetConfigstring + I_stricmp), OR
+                    // - 1 call that is NOT the last statement before the branch
+                    //   (the last stmt is the condition; earlier calls are setup)
+                    // Don't hoist when the only call IS the condition (while(strcmp(...)!=0)).
                     bool headerStmtsAreLoopBody = false;
                     {
                         int callCount = 0;
+                        int lastCallIdx = -1;
                         for (int si = 0; si < stmtEnd; ++si) {
                             auto &s = bb.stmts[si];
                             if (s.kind == IRStmtKind::Call ||
-                                (s.expr && s.expr->op == IROp::Call))
+                                (s.expr && s.expr->op == IROp::Call)) {
                                 callCount++;
+                                lastCallIdx = si;
+                            }
                         }
-                        headerStmtsAreLoopBody = (callCount >= 2);
+                        // Hoist if 2+ calls. For 1 call: hoist if the branch condition
+                        // doesn't directly use the call result (uses it through a Load/deref).
+                        // Don't hoist when condition is Ne(Call, 0) or Ne(Temp(call_result), 0).
+                        if (callCount >= 2) {
+                            headerStmtsAreLoopBody = true;
+                        } else if (callCount == 1 && br.expr && lastCallIdx >= 0) {
+                            // Check if branch condition directly uses the call result
+                            // (like Ne(Temp(call_result), 0)). If so, the call IS the
+                            // condition and shouldn't be hoisted.
+                            bool condUsesCall = false;
+                            auto &cs = bb.stmts[lastCallIdx];
+                            int callDest = (cs.kind == IRStmtKind::Assign) ? cs.destTemp : -1;
+                            // Check: is the call result temp used at top level in the condition?
+                            if (br.expr->op == IROp::Call) condUsesCall = true;
+                            for (auto &k : br.expr->kids) {
+                                if (k && k->op == IROp::Call) condUsesCall = true;
+                                if (k && k->op == IROp::Temp && callDest >= 0 &&
+                                    k->tempId() == callDest) condUsesCall = true;
+                            }
+                            if (!condUsesCall)
+                                headerStmtsAreLoopBody = true;
+                        }
                     }
 
                     if (!headerStmtsAreLoopBody && stmtEnd > 0)
