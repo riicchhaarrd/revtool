@@ -423,9 +423,27 @@ private:
                         negCond = false;
                     }
 
-                    // Emit statements before the branch
+                    // Header block statements before the branch — these are part of the
+                    // loop iteration (e.g., function calls evaluated each iteration).
+                    // For while loops, they go INSIDE the loop body, not before it.
+                    // For for loops, the init goes before and the rest goes inside.
                     int stmtEnd = (int)bb.stmts.size() - 1; // exclude branch
-                    if (stmtEnd > 0)
+                    // Header statements are loop body content when the header has
+                    // multiple calls (e.g., SV_GetConfigstring + I_stricmp in GScr_GetHeadIconIndex).
+                    // A single call right before the branch is the condition (e.g., while(strcmp(...)!=0)).
+                    bool headerStmtsAreLoopBody = false;
+                    {
+                        int callCount = 0;
+                        for (int si = 0; si < stmtEnd; ++si) {
+                            auto &s = bb.stmts[si];
+                            if (s.kind == IRStmtKind::Call ||
+                                (s.expr && s.expr->op == IROp::Call))
+                                callCount++;
+                        }
+                        headerStmtsAreLoopBody = (callCount >= 2);
+                    }
+
+                    if (!headerStmtsAreLoopBody && stmtEnd > 0)
                         block->children.push_back(StructNode::mkSeq(cur, 0, stmtEnd));
 
                     // Structure the loop body first
@@ -538,7 +556,15 @@ private:
                     } else {
                         auto whileNode = StructNode::mkWhile(br.expr.get());
                         whileNode->negated = negCond;
-                        whileNode->children.push_back(std::move(body));
+                        // If header has loop body statements, wrap them with the body
+                        if (headerStmtsAreLoopBody && stmtEnd > 0) {
+                            auto wrapper = StructNode::mkBlock();
+                            wrapper->children.push_back(StructNode::mkSeq(cur, 0, stmtEnd));
+                            wrapper->children.push_back(std::move(body));
+                            whileNode->children.push_back(std::move(wrapper));
+                        } else {
+                            whileNode->children.push_back(std::move(body));
+                        }
                         block->children.push_back(std::move(whileNode));
                     }
                     cur = loopExit;

@@ -259,6 +259,7 @@ public:
         // headers (blocks where a back-edge enters). This is needed before
         // lifting to create phi temps at loop headers.
         std::set<int> domLoopHeaders;
+        std::map<int, std::set<x86_reg>> loopWrittenRegs;
         if (nBlocks >= 3) {
             // Compute idom using Cooper-Harvey-Kennedy algorithm
             std::vector<int> idom(nBlocks, -1);
@@ -325,6 +326,48 @@ public:
                     }
                     if (dominates)
                         domLoopHeaders.insert(succ);
+                }
+            }
+            // For each loop header, scan the loop body to find which GP regs are written
+            // Only these regs need phi temps (avoids breaking unmodified param regs)
+            for (int hdr : domLoopHeaders) {
+                // Find all blocks in the loop body (between header and back-edge source)
+                // Simple: blocks [hdr .. max_back_edge_source] that are dominated by hdr
+                std::set<int> loopBlocks;
+                for (int b = hdr; b < nBlocks; ++b) {
+                    // Check if b is dominated by hdr
+                    int r = b; bool dom = false; int lim = nBlocks;
+                    while (r >= 0 && lim-- > 0) {
+                        if (r == hdr) { dom = true; break; }
+                        if (r == idom[r]) break;
+                        r = idom[r];
+                    }
+                    if (dom) loopBlocks.insert(b);
+                }
+                // Scan instructions in loop blocks for written GP registers
+                auto &written = loopWrittenRegs[hdr];
+                for (size_t ii = 0; ii < funcEndIdx; ++ii) {
+                    auto bit2 = addrToBlock.find(insn[ii].address);
+                    int blk = (bit2 != addrToBlock.end()) ? bit2->second : -1;
+                    if (blk < 0) {
+                        // Find containing block
+                        for (auto it = addrToBlock.rbegin(); it != addrToBlock.rend(); ++it)
+                            if (it->first <= insn[ii].address) { blk = it->second; break; }
+                    }
+                    if (blk < 0 || !loopBlocks.count(blk)) continue;
+                    if (blk == hdr) continue; // header itself doesn't count
+                    auto *det = insn[ii].detail;
+                    if (!det) continue;
+                    for (uint8_t oi = 0; oi < det->x86.op_count; ++oi) {
+                        auto &op = det->x86.operands[oi];
+                        if (op.type == X86_OP_REG &&
+                            (op.access & CS_AC_WRITE)) {
+                            x86_reg cr = canonReg(op.reg);
+                            if (cr == X86_REG_EAX || cr == X86_REG_EBX || cr == X86_REG_ECX ||
+                                cr == X86_REG_EDX || cr == X86_REG_ESI || cr == X86_REG_EDI)
+                                written.insert(cr);
+                        }
+                    }
                 }
             }
         }
@@ -572,11 +615,29 @@ public:
                         m_flags = {-1, IROp::Eq, nullptr, nullptr};
                     }
                 }
-                // At dominator-confirmed loop headers that aren't from the
-                // heuristic, just clear stale global source info (no phis —
-                // phis for backward-jump loops can break parameter types)
+                // At dominator-confirmed loop headers (not already handled by
+                // heuristic), create phi temps ONLY for registers written in
+                // the loop body. This avoids breaking unmodified param registers.
                 if (curBlock > 0 && domLoopHeaders.count(curBlock) &&
                     !loopHeaderAddrs.count(in.address)) {
+                    auto &hdr = func.blocks[curBlock];
+                    auto wit = loopWrittenRegs.find(curBlock);
+                    if (wit != loopWrittenRegs.end()) {
+                        for (x86_reg reg : wit->second) {
+                            auto it = m_regTemps.find(reg);
+                            if (it != m_regTemps.end()) {
+                                int oldTemp = it->second;
+                                TypeRef tt = func.tempType(oldTemp);
+                                if (tt != NullType && m_types.isStructPointer(tt))
+                                    continue; // still skip struct pointers
+                                int newTemp = func.newTemp(tt);
+                                func.phiTemps.insert(newTemp);
+                                hdr.stmts.push_back(IRStmt::mkAssign(newTemp,
+                                    IRExpr::mkTemp(oldTemp, tt), tt));
+                                m_regTemps[reg] = newTemp;
+                            }
+                        }
+                    }
                     m_regGlobalSource.clear();
                     m_regFuncPtrName.clear();
                 }
