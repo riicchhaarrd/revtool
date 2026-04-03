@@ -563,10 +563,14 @@ public:
         if (indices.empty()) return nullptr;
         // If a CU is specified, prefer the entry from that CU
         if (cuIdx >= 0) {
-            // First pass: exact CU match with valid type
-            for (size_t idx : indices)
-                if (m_globals[idx].sourceFileIdx == cuIdx && m_globals[idx].typeRef != NullType)
+            // First pass: exact CU match with struct/pointer type (prefer over basic int)
+            for (size_t idx : indices) {
+                if (m_globals[idx].sourceFileIdx != cuIdx || m_globals[idx].typeRef == NullType)
+                    continue;
+                auto *t = resolveType(m_globals[idx].typeRef);
+                if (t && t->kind != StabsTypeKind::Int && t->kind != StabsTypeKind::UInt)
                     return &m_globals[idx];
+            }
             // Second pass: any entry with a struct/union type that has fields
             for (size_t idx : indices) {
                 if (m_globals[idx].typeRef == NullType) continue;
@@ -575,6 +579,10 @@ public:
                        && !t->fields.empty())
                     return &m_globals[idx];
             }
+            // Third pass: exact CU match with any type
+            for (size_t idx : indices)
+                if (m_globals[idx].sourceFileIdx == cuIdx && m_globals[idx].typeRef != NullType)
+                    return &m_globals[idx];
         }
         // Fallback: prefer entry with non-null type, then any entry
         for (size_t idx : indices)
