@@ -675,12 +675,19 @@ def compile_to_asm(c_code, orig_check=None, extra_flags=None):
         # "invalid type argument of '->' / 'unary *'" - the variable needs pointer type
         # "invalid operands to binary" - type mismatch, try casting
         # These are harder to fix automatically
-        # Handle "two or more data types": extract unknown type from the error line
+        # Handle "two or more data types": often C++ template return types
         for m in re.finditer(r':(\d+):.*two or more data types', stderr):
             lineno = int(m.group(1))
             code_lines = full.split('\n')
             if lineno <= len(code_lines):
                 line_text = code_lines[lineno-1].strip()
+                # C++ template return type: "struct __X<...> funcname(...)"
+                # Replace with "int funcname(...)"
+                if '<' in line_text:
+                    cleaned = re.sub(r'^(?:struct\s+)?\w+<[^>]*>\s*', 'int ', line_text)
+                    code_lines[lineno-1] = cleaned
+                    full = '\n'.join(code_lines)
+                    continue
                 # First word(s) before the function name are the unknown return type
                 # Try uppercase first, then any word that looks like a type
                 words = re.findall(r'\b(\w+)\b', line_text)
@@ -978,6 +985,7 @@ def norm(s):
     # retl -> ret, calll -> call, leave -> popl %ebp, cvtsi2ssl -> cvtsi2ss
     s = re.sub(r'^retl\b', 'ret', s)
     s = re.sub(r'^calll\b', 'call', s)
+    s = re.sub(r'^jmpl\b', 'jmp', s)
     s = re.sub(r'^leave$', 'popl %ebp', s)
     s = re.sub(r'^cvtsi2ssl\b', 'cvtsi2ss', s)
     # sall/sarl → shll/shrl (same x86 encoding for shift)
@@ -1001,6 +1009,8 @@ def norm(s):
     s = re.sub(r'^(repz cmpsb).*', r'\1', s)
     # testb %Xl, %Xl -> testl %eXx, %eXx (equivalent for zero-check)
     s = re.sub(r'^testb %([a-d])l, %\1l', r'testl %e\1x, %e\1x', s)
+    # testw %Xx, %Xx -> testl %eXx, %eXx (equivalent for zero-check)
+    s = re.sub(r'^testw %([a-d])x, %\1x', r'testl %e\1x, %e\1x', s)
     # testl %REG, %REG (self-test) → testl %<R>, %<R> (register doesn't matter)
     m = re.match(r'^testl (%(e[abcd]x|e[sd]i|ebx)), \1$', s)
     if m:
