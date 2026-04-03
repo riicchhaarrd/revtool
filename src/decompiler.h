@@ -898,9 +898,15 @@ public:
                 if (!hasDecl) continue;
                 // Count uses after the assignment
                 int useCount = 0;
-                for (int j = i + 1; j < lines.size(); ++j)
+                bool usedWithArrow = false;
+                for (int j = i + 1; j < lines.size(); ++j) {
                     if (lines[j].contains(varName)) useCount++;
+                    if (lines[j].contains(varName + "->")) usedWithArrow = true;
+                }
                 if (useCount == 0) continue;
+                // Don't inline if the variable is used with -> (it's a loop variable
+                // that traverses a struct, not a trivial alias)
+                if (usedWithArrow) continue;
                 // Replace all uses of varName with srcName (whole word)
                 for (int j = i + 1; j < lines.size(); ++j) {
                     // Simple whole-word replacement
@@ -940,6 +946,8 @@ public:
                     QString varName = line.left(eqPos).trimmed();
                     // varName should be a simple identifier
                     bool ok = !varName.isEmpty();
+                    // Skip if this variable is used with -> (struct pointer, not array)
+                    if (ok && cleaned.contains(varName + "->")) ok = false;
                     for (auto c : varName) if (!c.isLetterOrNumber() && c != '_') { ok = false; break; }
                     if (ok) interiorPtrs[varName] = 4;
                 }
@@ -3934,9 +3942,6 @@ private:
             }
 
             case IROp::Field: {
-                if (e->kids[0] && e->kids[0]->op == IROp::Temp)
-                    fprintf(stderr, "FIELD base temp=%d isPhi=%d\n",
-                            e->kids[0]->tempId(), (int)m_func.phiTemps.count(e->kids[0]->tempId()));
                 std::string base = emitExpr(e->kids[0].get());
                 // If base is literal 0 (NULL or Temp that inlined to "0"), emit as offset constant
                 // Also handle parenthesized zero: "(0)" from sub-expressions
