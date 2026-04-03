@@ -3680,6 +3680,32 @@ private:
                      addr->kids[0]->op == IROp::Load)) {
                     std::string base = emitExpr(addr->kids[0].get());
                     int64_t off = (int64_t)addr->kids[1]->value;
+                    // Try folding interior pointers back to original struct base
+                    if (addr->kids[0]->op == IROp::Temp) {
+                        auto dit = m_tempDef.find(addr->kids[0]->tempId());
+                        if (dit != m_tempDef.end() && dit->second &&
+                            dit->second->op == IROp::Add && dit->second->kids.size() == 2 &&
+                            dit->second->kids[1]->isConst() && dit->second->kids[1]->value > 0) {
+                            auto *origBase = dit->second->kids[0].get();
+                            int innerOff = (int)dit->second->kids[1]->value;
+                            int combinedOff = innerOff + (int)off;
+                            TypeRef origType = exprType(origBase);
+                            if (origType != NullType && m_types.isStructPointer(origType)) {
+                                TypeRef structRef = m_types.getPointedStruct(origType);
+                                std::string access = structRef != NullType ?
+                                    m_types.formatFieldAccess(structRef, combinedOff) : "";
+                                if (!access.empty()) {
+                                    std::string origStr = emitExpr(origBase);
+                                    char buf[64];
+                                    snprintf(buf, sizeof(buf), "*(%s *)((char *)%s + 0x%llX)",
+                                             loadCastType(e->loadSize), origStr.c_str(),
+                                             (unsigned long long)combinedOff);
+                                    result = origStr + "->" + access;
+                                    break;
+                                }
+                            }
+                        }
+                    }
                     // Try type-aware struct field access
                     TypeRef baseType = exprType(addr->kids[0].get());
                     // For untyped expressions, try resolving type from STABS globals.
