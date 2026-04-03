@@ -398,6 +398,7 @@ def compile_to_asm(c_code, orig_check=None, extra_flags=None):
     # Also find typedef names used as pointer base types: "type_t *var"
     # Skip simple types already in STUBS (vec_t, qboolean, etc.)
     stubs_types = set(re.findall(r'typedef\s+\S+.*?\s+(\w+)\s*[;\[]', STUBS))
+    # Find _t types used as pointer types: "type_t *var"
     for m in re.finditer(r'\b(\w+_t)\s*\*\s*\w+', c_code):
         name = m.group(1)
         if name not in stubs_types:
@@ -457,6 +458,14 @@ def compile_to_asm(c_code, orig_check=None, extra_flags=None):
         visited.add(name)
         if name in stubs_structs: continue
         defn = extract_struct_from_header(name)
+        # If not found and name ends in _t, try _s (typedef → struct mapping)
+        if not defn and name.endswith('_t'):
+            s_name = name[:-2] + '_s'
+            defn = extract_struct_from_header(s_name)
+            if defn:
+                # Add typedef only if not already in stubs
+                if name not in stubs_types:
+                    defn = defn.rstrip() + '\ntypedef struct ' + s_name + ' ' + name + ';\n'
         if defn:
             # Skip structs with invalid C (vtable pointers, C++ artifacts)
             # Note: $_NNNN anonymous types are valid GCC extensions, don't skip those
@@ -713,6 +722,13 @@ def compile_to_asm(c_code, orig_check=None, extra_flags=None):
                         if tname.startswith('struct '):
                             sname = tname.split()[1]
                             undeclared.add(sname)
+                        elif tname.endswith('_t'):
+                            # Try _t → _s struct extraction
+                            s_name = tname[:-2] + '_s'
+                            s_defn = extract_struct_from_header(s_name)
+                            if s_defn and s_defn.strip() not in full:
+                                idx = full.find(STUBS) + len(STUBS) if STUBS in full else 0
+                                full = full[:idx] + s_defn + '\n' + full[idx:]
                     break
         # Handle "variable or field declared void" - the decompiler emitted void type
         for m in re.finditer(r"variable or field " + q + r"(\w+)" + cq + r" declared void", stderr):
