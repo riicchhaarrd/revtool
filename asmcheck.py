@@ -816,6 +816,18 @@ def compile_to_asm(c_code, orig_check=None, extra_flags=None):
             full = re.sub(r'^extern\s+\w+\s+\*?' + cname + r'\s*;.*\n', '', full, flags=re.MULTILINE)
             full = re.sub(r'^void\s+' + cname + r'\s*\(void\)\s*;.*\n', '', full, flags=re.MULTILINE)
             full = re.sub(r'^typedef\s+int\s+' + cname + r'\s*;.*\n', '', full, flags=re.MULTILINE)
+        # Handle "incompatible types in assignment" — add (int) cast for simple RHS
+        for m in re.finditer(r':(\d+):.*incompatible types in assignment', stderr):
+            lineno = int(m.group(1))
+            code_lines = full.split('\n')
+            if lineno <= len(code_lines):
+                line_text = code_lines[lineno-1].rstrip()
+                # Only cast simple RHS: identifiers and function calls, not struct values
+                rm = re.search(r'=\s*(\w[\w.>*()-]*)\s*;$', line_text)
+                if rm and 'struct ' not in rm.group(1):
+                    rhs = rm.group(1)
+                    code_lines[lineno-1] = line_text[:rm.start()] + '= (int)(' + rhs + ');'
+                    full = '\n'.join(code_lines)
         # Handle "incompatible types in return" — change return type to match
         if 'incompatible types in return' in stderr:
             # Find the function signature and change return type
