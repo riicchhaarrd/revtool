@@ -579,9 +579,15 @@ private:
                     TypeRef useType = parsed.typeRef;
                     // Validate: skip mismatched struct types from CU-scoped refs
                     auto *rt = m_typeTable.resolveType(parsed.typeRef);
-                    if (rt && (rt->kind == StabsTypeKind::Struct || rt->kind == StabsTypeKind::Union) &&
+                    // For ForwardRef: the ref tag matches the global name but the
+                    // resolved struct might be wrong (CU scoping). Reject ForwardRefs
+                    // that don't have a matching struct definition — they'll resolve
+                    // to a wrong type later.
+                    if (rt && rt->kind == StabsTypeKind::ForwardRef)
+                        useType = NullType;  // reject unresolved forward refs
+                    else if (rt && (rt->kind == StabsTypeKind::Struct || rt->kind == StabsTypeKind::Union) &&
                         !rt->name.empty() && rt->name.find("$_") == std::string::npos &&
-                        parsed.name.size() >= 5) {  // skip for short names (ri, rg, re, tess, etc.)
+                        parsed.name.size() >= 5) {
                         std::string sn = rt->name, gn = parsed.name;
                         for (auto &c : sn) c = tolower(c);
                         for (auto &c : gn) c = tolower(c);
@@ -600,10 +606,17 @@ private:
                 TypeRef useType = parsed.typeRef;
                 // Validate struct types (same as N_GSYM)
                 auto *rt2 = m_typeTable.resolveType(parsed.typeRef);
-                if (rt2 && (rt2->kind == StabsTypeKind::Struct || rt2->kind == StabsTypeKind::Union) &&
-                    !rt2->name.empty() && rt2->name.find("$_") == std::string::npos &&
+                std::string rtName2;
+                if (rt2) {
+                    rtName2 = rt2->name;
+                    if (rtName2.empty() && rt2->kind == StabsTypeKind::ForwardRef)
+                        rtName2 = rt2->forwardTag;
+                }
+                if (rt2 && (rt2->kind == StabsTypeKind::Struct || rt2->kind == StabsTypeKind::Union ||
+                            rt2->kind == StabsTypeKind::ForwardRef) &&
+                    !rtName2.empty() && rtName2.find("$_") == std::string::npos &&
                     parsed.name.size() >= 5) {
-                    std::string sn = rt2->name, gn = parsed.name;
+                    std::string sn = rtName2, gn = parsed.name;
                     for (auto &c : sn) c = tolower(c);
                     for (auto &c : gn) c = tolower(c);
                     if (sn.size() > 2 && sn.substr(sn.size()-2) == "_t") sn = sn.substr(0, sn.size()-2);
@@ -805,6 +818,10 @@ private:
                             // compile errors ("not a structure or union").
                             TypeRef useType = parsed.typeRef;
                             auto *rt = m_typeTable.resolveType(parsed.typeRef);
+                            // Reject unresolved forward references — they resolve
+                            // to wrong structs from other CUs
+                            if (rt && rt->kind == StabsTypeKind::ForwardRef)
+                                useType = NullType;
                             if (rt && (rt->kind == StabsTypeKind::Struct ||
                                        rt->kind == StabsTypeKind::Union)) {
                                 // Check if struct name relates to global name
