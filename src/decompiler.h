@@ -3237,9 +3237,18 @@ private:
                         out += pad(indent) + QString::fromStdString(
                             base + "->" + fieldAccess + "[" + idx + "] = " + val) + ";\n";
                     } else {
-                        char fname[64]; snprintf(fname, sizeof(fname), "arr_%X[%s]", (unsigned)off, idx.c_str());
-                        out += pad(indent) + QString::fromStdString(
-                            base + "->" + fname + " = " + val) + ";\n";
+                        TypeRef stType = exprType(a->kids[0]->kids[0].get());
+                        if (stType != NullType && m_types.isStructPointer(stType)) {
+                            char fname[64]; snprintf(fname, sizeof(fname), "arr_%X[%s]", (unsigned)off, idx.c_str());
+                            out += pad(indent) + QString::fromStdString(
+                                base + "->" + fname + " = " + val) + ";\n";
+                        } else {
+                            int sc = (int)a->kids[0]->kids[1]->kids[1]->value;
+                            out += pad(indent) + QString::fromStdString(
+                                "*(" + storeCast + " *)((char *)(" + base + ") + " + idx +
+                                " * " + std::to_string(sc) + " + " + std::to_string(off) +
+                                ") = " + val) + ";\n";
+                        }
                     }
                 }
                 // General Add/Sub expression → *(type *)((char *)(expr)) = val
@@ -3690,12 +3699,20 @@ private:
                                 result = baseStr + "->" + fieldAccess + "[" + idxStr + "]";
                             }
                         } else {
-                            char fname[64];
-                            if (elemSize == 4)
-                                snprintf(fname, sizeof(fname), "arr_%X[%s]", (unsigned)off, idxStr.c_str());
-                            else
-                                snprintf(fname, sizeof(fname), "arr_%X_%d[%s]", (unsigned)off, elemSize, idxStr.c_str());
-                            result = baseStr + "->" + fname;
+                            // Only use ->arr_XX when base is a struct pointer
+                            if (baseType != NullType && m_types.isStructPointer(baseType)) {
+                                char fname[64];
+                                if (elemSize == 4)
+                                    snprintf(fname, sizeof(fname), "arr_%X[%s]", (unsigned)off, idxStr.c_str());
+                                else
+                                    snprintf(fname, sizeof(fname), "arr_%X_%d[%s]", (unsigned)off, elemSize, idxStr.c_str());
+                                result = baseStr + "->" + fname;
+                            } else {
+                                // Non-struct base: use raw pointer arithmetic
+                                result = std::string("*(") + loadCastType(e->loadSize) +
+                                    " *)((char *)(" + baseStr + ") + " + idxStr + " * " +
+                                    std::to_string(elemSize) + " + " + std::to_string(off) + ")";
+                            }
                         }
                         break;
                     }
