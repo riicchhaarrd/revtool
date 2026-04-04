@@ -1593,7 +1593,32 @@ private:
             }
             // Try nearest symbol for base+offset access
             { std::string nearest = m_mf.nearestSymbolName(addr);
-              if (!nearest.empty()) return IRExpr::mkVar(nearest); }
+              if (!nearest.empty()) {
+                // Cosmetic mode: resolve (global + offset) to global.field for struct globals
+                extern bool g_cosmeticMode;
+                if (g_cosmeticMode) {
+                    size_t plus = nearest.find(" + 0x");
+                    if (plus != std::string::npos && nearest.front() == '(' && nearest.back() == ')') {
+                        std::string gname = nearest.substr(1, plus - 1);
+                        unsigned goff = 0;
+                        sscanf(nearest.c_str() + plus + 3, "%x", &goff);
+                        auto *gn = m_types.globalByName(gname, m_curSourceFileIdx);
+                        if (gn && gn->typeRef != NullType) {
+                            auto *gt = m_types.resolveType(gn->typeRef);
+                            if (gt && (gt->kind == StabsTypeKind::Struct || gt->kind == StabsTypeKind::Union)) {
+                                std::string access = m_types.formatFieldAccess(gn->typeRef, (int)goff);
+                                if (!access.empty()) {
+                                    auto base = IRExpr::mkVar(gname, gn->typeRef);
+                                    auto *field = m_types.findFieldAtOffset(gn->typeRef, (int)goff);
+                                    TypeRef ft = field ? field->typeRef : NullType;
+                                    return IRExpr::mkField(std::move(base), access, (int)goff, ft);
+                                }
+                            }
+                        }
+                    }
+                }
+                return IRExpr::mkVar(nearest);
+              } }
             // For addresses in data sections, use a synthetic global name
             const Section *dataSec = m_mf.sectionForAddress(addr);
             if (dataSec && (dataSec->segname == "__DATA" || dataSec->segname == "__IMPORT")) {

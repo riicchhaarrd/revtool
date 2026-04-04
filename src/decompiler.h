@@ -1593,6 +1593,49 @@ public:
         }
         QString result;
         for (auto &l : pass2) result += l + '\n';
+        // Cosmetic mode: simplify redundant (char *) casts and pointer dereferences
+        if (s_cosmeticMode) {
+            // Remove redundant (char *) in: *(TYPE *)((char *)(EXPR)) → *(TYPE *)(EXPR)
+            // Only when inner expression has no pointer arithmetic (no + at depth 0)
+            QString marker = "((char *)";
+            int pos = 0;
+            while ((pos = result.indexOf(marker, pos)) != -1) {
+                // Check this is preceded by "*(TYPE *)" — look backward for "*("
+                int pre = pos - 1;
+                while (pre >= 0 && result[pre] == ' ') pre--;
+                if (pre < 0 || result[pre] != ')') { pos++; continue; }
+                // Find the matching content after ((char *)
+                int inner = pos + marker.size();
+                // Scan forward to find the balanced closing )) for ((char *)EXPR)
+                int depth = 1; // we're inside the outer ( of ((char *)
+                int end = inner;
+                bool hasPlus = false;
+                while (end < result.size() && depth > 0) {
+                    if (result[end] == '(') depth++;
+                    else if (result[end] == ')') depth--;
+                    else if (result[end] == '+' && depth == 1) hasPlus = true;
+                    if (depth > 0) end++;
+                }
+                // end is at the closing ) that matches the outer (
+                if (hasPlus || depth != 0) { pos++; continue; }
+                // Remove "(char *)" (8 chars) from pos+1
+                result.remove(pos + 1, 8);
+                // If result now has double-paren "((EXPR))", remove one pair
+                if (pos + 1 < result.size() && result[pos] == '(' && result[pos+1] == '(') {
+                    result.remove(pos, 1); // remove extra opening paren
+                    // Find and remove the matching extra closing paren
+                    int d = 0;
+                    for (int k = pos; k < result.size(); ++k) {
+                        if (result[k] == '(') d++;
+                        else if (result[k] == ')') {
+                            d--;
+                            if (d == 0) { result.remove(k, 1); break; }
+                        }
+                    }
+                }
+                // Don't advance pos — re-check in case of nested patterns
+            }
+        }
         return result;
     }
 
