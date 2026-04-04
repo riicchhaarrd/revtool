@@ -409,17 +409,64 @@ public:
 
         // Emit extern declarations for globals
         std::set<std::string> globalDeclared;
+        // Build best-type map: prefer non-int, non-null types for each global name
+        std::map<std::string, TypeRef> bestGlobalType;
+        for (auto &g : types.globals()) {
+            if (g.name.empty()) continue;
+            auto it = bestGlobalType.find(g.name);
+            if (it == bestGlobalType.end()) {
+                bestGlobalType[g.name] = g.typeRef;
+            } else if (g.typeRef != NullType) {
+                auto *oldT = it->second != NullType ? types.getType(it->second) : nullptr;
+                auto *newT = types.getType(g.typeRef);
+                bool oldBasic = !oldT || oldT->kind == StabsTypeKind::Int || oldT->kind == StabsTypeKind::UInt;
+                bool newBasic = !newT || newT->kind == StabsTypeKind::Int || newT->kind == StabsTypeKind::UInt;
+                if (oldBasic && !newBasic) it->second = g.typeRef;
+            }
+        }
         for (auto &g : types.globals()) {
             if (g.address == 0 || g.name.empty()) continue;
             if (globalDeclared.count(g.name)) continue;
+            // Use the best type for this global name
             if (g.name.find('<') != std::string::npos) continue;
             globalDeclared.insert(g.name);
             std::string decl;
-            if (g.typeRef != NullType)
-                decl = types.formatDecl(g.typeRef, g.name);
+            TypeRef useType = g.typeRef;
+            auto bit = bestGlobalType.find(g.name);
+            if (bit != bestGlobalType.end() && bit->second != NullType)
+                useType = bit->second;
+            if (useType != NullType)
+                decl = types.formatDecl(useType, g.name);
             else
                 decl = "int " + g.name;
             out += "extern " + QString::fromStdString(decl) + ";\n";
+        }
+
+        // For ForwardRef-typed globals, check if the forward tag resolves to
+        // an anonymous struct with fields. If so, add a typedef connecting them.
+        // This makes clientStatic_t → $_3791 visible so asmcheck can compile.
+        for (auto &g : types.globals()) {
+            if (g.typeRef == NullType) continue;
+            auto *rawT = types.getType(g.typeRef);
+            if (!rawT || rawT->kind != StabsTypeKind::ForwardRef) continue;
+            if (rawT->forwardTag.empty() || rawT->forwardTag.find("$_") == 0) continue;
+            // Check if the tag already has a struct body
+            bool hasBody = false;
+            for (auto &[tref, ti] : types.allTypes()) {
+                if ((ti.kind == StabsTypeKind::Struct || ti.kind == StabsTypeKind::Union) &&
+                    ti.name == rawT->forwardTag && !ti.fields.empty()) {
+                    hasBody = true; break;
+                }
+            }
+            if (hasBody) continue;
+            // No body — try to find the resolved struct (may be anonymous)
+            auto *resolved = types.resolveType(g.typeRef);
+            if (resolved && (resolved->kind == StabsTypeKind::Struct || resolved->kind == StabsTypeKind::Union) &&
+                !resolved->fields.empty() && !resolved->name.empty() && resolved->name != rawT->forwardTag) {
+                // Emit typedef: struct $_NNNN → tag_name
+                out += "typedef struct " + QString::fromStdString(resolved->name) + " " +
+                       QString::fromStdString(rawT->forwardTag) + ";\n";
+            }
         }
 
         // Emit function prototypes

@@ -776,6 +776,16 @@ private:
     // ── Parse type definition after '=' ──────────────────────────────
     void parseTypeDef(const std::string &s, size_t &pos, TypeRef ref) {
         if (pos >= s.size()) return;
+        // Save ForwardRef tag name before potential overwrite.
+        // If a named ForwardRef (clientStatic_t) gets overwritten by an anonymous
+        // struct ($_NNNN), rename the struct to the forward tag.
+        std::string savedForwardTag;
+        {
+            auto it = m_types.find(ref);
+            if (it != m_types.end() && it->second.kind == StabsTypeKind::ForwardRef &&
+                !it->second.forwardTag.empty() && it->second.forwardTag.find("$_") != 0)
+                savedForwardTag = it->second.forwardTag;
+        }
 
         // Handle @sN; attribute prefix
         if (s[pos] == '@') {
@@ -852,6 +862,10 @@ private:
             ti.kind = StabsTypeKind::Struct;
             ti.sizeBytes = (int)parseIntVal(s, pos);
             parseStructFields(s, pos, ti);
+            // If this overwrote a ForwardRef, inherit the tag name
+            if (!savedForwardTag.empty() &&
+                (ti.name.empty() || ti.name.find("$_") == 0))
+                ti.name = savedForwardTag;
             return;
         }
 
