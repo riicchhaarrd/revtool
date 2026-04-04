@@ -899,6 +899,17 @@ def compile_to_asm(c_code, orig_check=None, extra_flags=None):
                         r'((int)\1) ' + op + ' (', line_text, count=1)
                 code_lines[lineno-1] = patched
                 full = '\n'.join(code_lines)
+        # Handle "aggregate value used where an integer was expected"
+        # — struct field assigned to int variable; cast RHS to (int)
+        for m in re.finditer(r':(\d+):.*aggregate value used where an integer was expected', stderr):
+            lineno = int(m.group(1))
+            code_lines = full.split('\n')
+            if lineno <= len(code_lines):
+                line_text = code_lines[lineno-1]
+                # Cast the RHS struct expression: "var = expr;" → "var = *(int*)&(expr);"
+                code_lines[lineno-1] = re.sub(
+                    r'(\w+\s*=\s*)(.+);$', r'\1*(int*)&(\2);', line_text.rstrip(), count=1)
+                full = '\n'.join(code_lines)
         if not undeclared:
             # Even with no undeclared names, try recompiling if we patched the code
             ok, stdout, stderr = _try_compile(full, extra_flags)
