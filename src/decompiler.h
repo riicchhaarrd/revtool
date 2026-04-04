@@ -3889,7 +3889,8 @@ private:
                     // Handles two patterns:
                     //   Load(Add(Var("global_ptr"), offset)) → global_ptr->field
                     //   Load(Add(Load(Var("global_ptr")), offset)) → (*global_ptr)->field (NLP)
-                    if (baseType == NullType) {
+                    // Also try when baseType doesn't resolve (e.g. invalid (0,0) refs from NLP globals)
+                    if (baseType == NullType || (s_cosmeticMode && !m_types.resolveType(baseType))) {
                         // Walk through temp defs and loads to find the source global name
                         IRExpr *src = addr->kids[0].get();
                         // Follow temp chain (up to 3 levels)
@@ -3934,10 +3935,21 @@ private:
                         isInterior = m_interiorPtrVars.count(addr->kids[0]->name) > 0;
                     else if (addr->kids[0]->op == IROp::Temp)
                         isInterior = m_interiorPtrVars.count("__temp_" + std::to_string(addr->kids[0]->tempId())) > 0;
+                    // Also check if baseType is a struct directly (from Load through pointer, e.g. NLP globals)
+                    bool isDirectStruct = false;
+                    TypeRef structRef = NullType;
                     if (baseType != NullType && m_types.isStructPointer(baseType) && !isInterior) {
-                        TypeRef structRef = m_types.getPointedStruct(baseType);
-                        std::string access = structRef != NullType ?
-                            m_types.formatFieldAccess(structRef, (int)off) : "";
+                        structRef = m_types.getPointedStruct(baseType);
+                    } else if (baseType != NullType && !isInterior) {
+                        auto *bt = m_types.resolveType(baseType);
+                        if (bt && (bt->kind == StabsTypeKind::Struct || bt->kind == StabsTypeKind::Union)) {
+                            structRef = baseType;
+                            isDirectStruct = true;
+                        }
+                    }
+                    if (structRef != NullType) {
+                        std::string access =
+                            m_types.formatFieldAccess(structRef, (int)off);
                         // Debug: trace incorrect field resolution
                         if (!access.empty()) {
                             // Check if the resolved field makes sense for this access:
@@ -3970,7 +3982,26 @@ private:
                             }
                         }
                         if (!access.empty()) {
-                            result = base + "->" + access;
+                            if (isDirectStruct && addr->kids[0]->op == IROp::Load &&
+                                !addr->kids[0]->kids.empty()) {
+                                // Base is Load(expr) giving a struct — use expr->field directly
+                                // This turns Load(Add(Load(Var("ptr")), off)) into ptr->field
+                                std::string ptrBase = emitExpr(addr->kids[0]->kids[0].get());
+                                result = ptrBase + "->" + access;
+                            } else if (s_cosmeticMode && !isDirectStruct && addr->kids[0]->op == IROp::Temp) {
+                                // Cosmetic: Check if temp is defined as Load(Var) — NLP double deref
+                                // Use the original pointer name: ptr->field instead of *(int*)(ptr)->field
+                                auto dit = m_tempDef.find(addr->kids[0]->tempId());
+                                if (dit != m_tempDef.end() && dit->second &&
+                                    dit->second->op == IROp::Load && !dit->second->kids.empty() &&
+                                    dit->second->kids[0]->op == IROp::Var) {
+                                    result = dit->second->kids[0]->name + "->" + access;
+                                } else {
+                                    result = base + "->" + access;
+                                }
+                            } else {
+                                result = base + (isDirectStruct ? "." : "->") + access;
+                            }
                         }
                     }
                     if (result.empty()) {
