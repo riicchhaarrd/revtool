@@ -3356,7 +3356,11 @@ private:
                     auto *atInfo = (at != NullType) ? m_types.resolveType(at) : nullptr;
                     if (atInfo && atInfo->kind == StabsTypeKind::Pointer) {
                         auto *tgt = m_types.resolveType(atInfo->targetType);
-                        if (tgt && tgt->sizeBytes > 0 && tgt->sizeBytes <= 8 &&
+                        if (s_cosmeticMode && stmt.storeSize == 4) {
+                            // Cosmetic: store to pointer var = simple assignment
+                            out += pad(indent) + QString::fromStdString(
+                                addrS + " = " + val) + ";\n";
+                        } else if (tgt && tgt->sizeBytes > 0 && tgt->sizeBytes <= 8 &&
                             tgt->kind != StabsTypeKind::Struct &&
                             tgt->kind != StabsTypeKind::Union) {
                             out += pad(indent) + QString::fromStdString(
@@ -3414,14 +3418,24 @@ private:
                         dest += "[0]";
                     // If dest is a struct/union and value is a scalar, cast the store
                     if (dt && (dt->kind == StabsTypeKind::Struct || dt->kind == StabsTypeKind::Union)) {
-                        out += pad(indent) + QString::fromStdString(
-                            "*(int *)(&" + cName(dest) + ") = (int)" + val) + ";\n";
+                        if (s_cosmeticMode) {
+                            // Cosmetic: simple assignment for readability
+                            out += pad(indent) + QString::fromStdString(
+                                cName(dest) + " = " + val) + ";\n";
+                        } else {
+                            out += pad(indent) + QString::fromStdString(
+                                "*(int *)(&" + cName(dest) + ") = (int)" + val) + ";\n";
+                        }
                         break;
                     }
                 }
                 // For sub-word stores (16-bit/8-bit), use pointer cast to force
                 // the correct store width: *(short *)(&dest) = val
-                if (stmt.storeSize == 2) {
+                if (s_cosmeticMode && (stmt.storeSize == 2 || stmt.storeSize == 1)) {
+                    // Cosmetic: simple assignment for readability
+                    out += pad(indent) + QString::fromStdString(
+                        cName(dest) + " = " + val) + ";\n";
+                } else if (stmt.storeSize == 2) {
                     out += pad(indent) + QString::fromStdString(
                         "*(short *)(&" + cName(dest) + ") = " + val) + ";\n";
                 } else if (stmt.storeSize == 1) {
