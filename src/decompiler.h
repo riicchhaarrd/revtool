@@ -1031,7 +1031,8 @@ public:
         }
         // Optimize global struct access: when (char *)GLOBAL is used multiple times,
         // introduce a local pointer to force register-based access (matching original asm)
-        {
+        // Skip in cosmetic mode — _p variables are a byte-matching trick, not readable
+        if (!s_cosmeticMode) {
             // Count occurrences of (char *)NAME + 0x patterns
             std::map<QString, int> globalCounts;
             QString marker = "(char *)";
@@ -2885,7 +2886,7 @@ private:
                 // add __builtin_expect to preserve the original branch direction.
                 // Only for simple conditions (pointer != 0, func() != 0, etc.)
                 // to avoid changing complex control flow unnecessarily.
-                if (!condTrue && !condFalse && !hasElse) {
+                if (!condTrue && !condFalse && !hasElse && !s_cosmeticMode) {
                     bool isSimpleZeroCheck = false;
                     for (auto &sfx : {" != 0", " == 0", " > 0", " <= 0"}) {
                         size_t len = strlen(sfx);
