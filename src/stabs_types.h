@@ -662,6 +662,20 @@ private:
     std::vector<std::string>                 m_includes;
     int                                      m_unit = 0;
 
+    // Check if a type ref should be protected from overwrite.
+    // ForwardRefs with real tag names (like clientStatic_t) carry valuable
+    // name info that shouldn't be lost when the type number is reused.
+    bool shouldProtectType(TypeRef ref) const {
+        auto it = m_types.find(ref);
+        if (it == m_types.end()) return false;
+        auto &existing = it->second;
+        if (existing.kind == StabsTypeKind::ForwardRef &&
+            !existing.forwardTag.empty() &&
+            existing.forwardTag.find("$_") != 0)
+            return true;
+        return false;
+    }
+
     // ── Find the descriptor colon ────────────────────────────────────
     // STABS uses 'name:descriptor...' but names can contain '::' for C++.
     // We want the FIRST colon that is followed by a descriptor char or type ref.

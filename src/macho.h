@@ -580,12 +580,6 @@ private:
                     // Validate: skip mismatched struct types from CU-scoped refs
                     auto *rt = m_typeTable.resolveType(parsed.typeRef);
                     // For ForwardRef: the ref tag matches the global name but the
-                    // Reject unresolved ForwardRefs — they resolve to wrong structs
-                    // from other CUs due to type number collision.
-                    // This makes globals like cls → int instead of clientStatic_t,
-                    // but prevents scrVarPub → ConDrawInputGlob (completely wrong).
-                    if (rt && rt->kind == StabsTypeKind::ForwardRef)
-                        useType = NullType;
                     if (rt && (rt->kind == StabsTypeKind::Struct || rt->kind == StabsTypeKind::Union) &&
                         !rt->name.empty() && rt->name.find("$_") == std::string::npos &&
                         parsed.name.size() >= 5) {
@@ -607,8 +601,7 @@ private:
                 TypeRef useType = parsed.typeRef;
                 // Validate struct types (same as N_GSYM)
                 auto *rt2 = m_typeTable.resolveType(parsed.typeRef);
-                if (rt2 && rt2->kind == StabsTypeKind::ForwardRef)
-                    useType = NullType;
+                // ForwardRef protection handled in parseTypeDef
                 if (rt2 && (rt2->kind == StabsTypeKind::Struct || rt2->kind == StabsTypeKind::Union) &&
                     !rt2->name.empty() && rt2->name.find("$_") == std::string::npos &&
                     parsed.name.size() >= 5) {
@@ -814,11 +807,19 @@ private:
                             // compile errors ("not a structure or union").
                             TypeRef useType = parsed.typeRef;
                             auto *rt = m_typeTable.resolveType(parsed.typeRef);
-                            // Reject unresolved ForwardRefs
-                            if (rt && rt->kind == StabsTypeKind::ForwardRef) {
-                                useType = NullType;
-                                bool ok = false;
-                                if (!ok) useType = NullType;
+                            // Reject ForwardRefs with unrelated tag names
+                            if (rt && rt->kind == StabsTypeKind::ForwardRef &&
+                                !rt->forwardTag.empty() && gname.size() >= 5) {
+                                std::string tag = rt->forwardTag, lgn = gname;
+                                for (auto &c : tag) c = tolower(c);
+                                for (auto &c : lgn) c = tolower(c);
+                                if (tag.size() > 2 && tag.substr(tag.size()-2) == "_t")
+                                    tag = tag.substr(0, tag.size()-2);
+                                bool related = (lgn.find(tag) != std::string::npos ||
+                                               tag.find(lgn) != std::string::npos);
+                                if (!related && tag.size() >= 4)
+                                    related = (lgn.find(tag.substr(0,4)) != std::string::npos);
+                                if (!related) useType = NullType;
                             }
                             if (rt && (rt->kind == StabsTypeKind::Struct ||
                                        rt->kind == StabsTypeKind::Union)) {
