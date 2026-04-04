@@ -886,10 +886,18 @@ def compile_to_asm(c_code, orig_check=None, extra_flags=None):
             code_lines = full.split('\n')
             if lineno <= len(code_lines):
                 line_text = code_lines[lineno-1]
-                # Wrap the whole expression line: cast pointer expressions in & ops
-                # Pattern: (expr) & N or (expr) | N where expr has (char *) cast
-                code_lines[lineno-1] = re.sub(
-                    r'\((.+?)\)\s*&\s*(-?\d+)', r'((int)(\1)) & \2', line_text, count=1)
+                # Cast pointer/struct expressions in binary ops to (int)
+                op = m.group(2)
+                # Try common patterns: (expr) OP N, var OP N, expr OP expr
+                patched = re.sub(
+                    r'\((.+?)\)\s*' + re.escape(op) + r'\s*(-?\d+)',
+                    r'((int)(\1)) ' + op + r' \2', line_text, count=1)
+                if patched == line_text:
+                    # Try: var OP (expr) — cast the var
+                    patched = re.sub(
+                        r'\b(\w+)\s*' + re.escape(op) + r'\s*\(',
+                        r'((int)\1) ' + op + ' (', line_text, count=1)
+                code_lines[lineno-1] = patched
                 full = '\n'.join(code_lines)
         if not undeclared:
             # Even with no undeclared names, try recompiling if we patched the code

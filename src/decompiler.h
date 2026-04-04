@@ -3850,6 +3850,16 @@ private:
                                                ft->kind == StabsTypeKind::Union) &&
                                         ft->sizeBytes > 4)
                                         access.clear();
+                                    // Also skip large array fields
+                                    if (ft && ft->kind == StabsTypeKind::Array) {
+                                        int arrSz = ft->sizeBytes;
+                                        if (arrSz <= 0) {
+                                            auto *et = m_types.resolveType(ft->targetType);
+                                            int ec = ft->arrayHigh - ft->arrayLow + 1;
+                                            if (et && ec > 0) arrSz = et->sizeBytes * ec;
+                                        }
+                                        if (arrSz > 4) access.clear();
+                                    }
                                 }
                             }
                         }

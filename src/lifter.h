@@ -1527,8 +1527,16 @@ private:
                             if (fti && ((fti->kind == StabsTypeKind::Struct ||
                                          fti->kind == StabsTypeKind::Union) && fti->sizeBytes > 4))
                                 skip = true;
-                            if (fti && fti->kind == StabsTypeKind::Array && fti->sizeBytes > 4)
-                                skip = true;
+                            // Arrays: sizeBytes may be 0; compute from count * elemSize
+                            if (fti && fti->kind == StabsTypeKind::Array) {
+                                int arrSize = fti->sizeBytes;
+                                if (arrSize <= 0) {
+                                    auto *et = m_types.resolveType(fti->targetType);
+                                    int ec = fti->arrayHigh - fti->arrayLow + 1;
+                                    if (et && ec > 0) arrSize = et->sizeBytes * ec;
+                                }
+                                if (arrSize > 4) skip = true;
+                            }
                         }
                         if (!skip) {
                             base->typeRef = baseType;
