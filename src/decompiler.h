@@ -25,6 +25,7 @@ class Decompiler {
 public:
     static inline bool s_useSSA = false;
     static inline bool s_flatMode = false;
+    static inline bool s_cosmeticMode = false;  // prefer readable output over byte-matching
 
     // Decompile a single function
     static QString decompile(const MachOFile &mf, uint32_t funcAddr, bool format = true) {

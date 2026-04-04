@@ -83,6 +83,8 @@ static int gccCheck(const QString &code) {
     return errors;
 }
 
+bool g_cosmeticMode = false;
+
 int main(int argc, char *argv[]) {
     QCoreApplication app(argc, argv);
 
@@ -97,6 +99,7 @@ int main(int argc, char *argv[]) {
             "  -a           Decompile all source files\n"
             "  --gcc        Pipe output through gcc to count errors\n"
             "  --ssa        Enable full SSA pass (experimental)\n"
+            "  --cosmetic   Prefer readable output over byte-matching\n"
             "  --types      Dump all STABS types as C header\n"
             "  --srcof <addr> Find source file index for function at address\n"
             "  -q           Quiet: suppress decompiled output (use with --gcc)\n"
@@ -119,6 +122,7 @@ int main(int argc, char *argv[]) {
         else if (strcmp(argv[i], "--gcc") == 0) doGcc = true;
         else if (strcmp(argv[i], "--ssa") == 0) Decompiler::s_useSSA = true;
         else if (strcmp(argv[i], "--flat") == 0) Decompiler::s_flatMode = true;
+        else if (strcmp(argv[i], "--cosmetic") == 0) { Decompiler::s_cosmeticMode = true; g_cosmeticMode = true; }
         else if (strcmp(argv[i], "--types") == 0) doTypes = true;
         else if (strcmp(argv[i], "--srcof") == 0 && i + 1 < argc)
             srcOfAddr = strtoul(argv[++i], nullptr, 16);

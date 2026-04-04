@@ -1732,6 +1732,34 @@ private:
                 bb.stmts.push_back(IRStmt::mkVarSet(symName, std::move(val), NullType, storeSize));
                 return;
             }
+            // Cosmetic mode: resolve (global + offset) to global.field for struct globals
+            extern bool g_cosmeticMode;
+            if (g_cosmeticMode) {
+                std::string nearest = m_mf.nearestSymbolName(addr);
+                if (!nearest.empty()) {
+                    size_t plus = nearest.find(" + 0x");
+                    if (plus != std::string::npos && nearest.front() == '(' && nearest.back() == ')') {
+                        std::string gname = nearest.substr(1, plus - 1);
+                        unsigned goff = 0;
+                        sscanf(nearest.c_str() + plus + 3, "%x", &goff);
+                        auto *gn = m_types.globalByName(gname, m_curSourceFileIdx);
+                        if (gn && gn->typeRef != NullType) {
+                            auto *gt = m_types.resolveType(gn->typeRef);
+                            if (gt && (gt->kind == StabsTypeKind::Struct || gt->kind == StabsTypeKind::Union)) {
+                                std::string access = m_types.formatFieldAccess(gn->typeRef, (int)goff);
+                                if (!access.empty()) {
+                                    auto base = IRExpr::mkVar(gname, gn->typeRef);
+                                    auto *field = m_types.findFieldAtOffset(gn->typeRef, (int)goff);
+                                    TypeRef ft = field ? field->typeRef : NullType;
+                                    auto fld = IRExpr::mkField(std::move(base), access, (int)goff, ft);
+                                    bb.stmts.push_back(IRStmt::mkStore(std::move(fld), std::move(val), storeSize));
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             // Synthetic global name for data section addresses
             const Section *dSec = m_mf.sectionForAddress(addr);
             if (dSec && (dSec->segname == "__DATA" || dSec->segname == "__IMPORT")) {
