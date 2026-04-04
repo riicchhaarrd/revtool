@@ -909,9 +909,15 @@ public:
                 if (!hasDecl) continue;
                 // Count uses after the assignment
                 int useCount = 0;
-                for (int j = i + 1; j < lines.size(); ++j)
+                bool usedWithArrow = false;
+                for (int j = i + 1; j < lines.size(); ++j) {
                     if (lines[j].contains(varName)) useCount++;
+                    if (lines[j].contains(varName + "->")) usedWithArrow = true;
+                }
                 if (useCount == 0) continue;
+                // Don't inline if the variable is used with -> (it's a loop variable
+                // that traverses a struct, not a trivial alias)
+                if (usedWithArrow) continue;
                 // Replace all uses of varName with srcName (whole word)
                 for (int j = i + 1; j < lines.size(); ++j) {
                     // Simple whole-word replacement
@@ -951,6 +957,8 @@ public:
                     QString varName = line.left(eqPos).trimmed();
                     // varName should be a simple identifier
                     bool ok = isSimpleIdentifier(varName);
+                    // Skip if this variable is used with -> (struct pointer, not array)
+                    if (ok && cleaned.contains(varName + "->")) ok = false;
                     if (ok) interiorPtrs[varName] = 4;
                 }
                 pos2 += 4;
@@ -1029,6 +1037,9 @@ public:
                 cleaned.replace("*(char *)(" + gname + ")", "*(char *)(" + ptrName + ")");
             }
         }
+        // Simplify redundant double (char *) casts:
+        // *(TYPE *)((char *)((char *)X + N)) → *(TYPE *)((char *)X + N)
+        cleaned.replace("((char *)((char *)", "((char *)(");
         // Fix invalid array pointer syntax in declarations: "float[4] * mtx" → "float * mtx"
         // Only on declaration lines (function signature or local variable declarations)
         {
@@ -1736,7 +1747,7 @@ private:
                         } else if (byteSize <= 4) {
                             ftype = "int " + f.name;
                         } else {
-                            char buf[64];
+                            char buf[256];
                             snprintf(buf, sizeof(buf), "char %s[%d]", f.name.c_str(), byteSize);
                             ftype = buf;
                         }
@@ -2567,8 +2578,32 @@ private:
             if (stmt.kind == IRStmtKind::Assign && stmt.expr &&
                 stmt.expr->op == IROp::AddrOf && !stmt.expr->kids.empty() &&
                 stmt.expr->kids[0]->op == IROp::Field) {
-                // The temp might be copied to a var later via copy prop
                 m_interiorPtrVars.insert("__temp_" + std::to_string(stmt.destTemp));
+            }
+            // Also catch Add(structPtr, const) patterns — these are LEA instructions
+            // that create pointers into the middle of a struct (e.g., &ent->r.origin).
+            // The emitter renders them as &base->field, but the IR has Add(base, const).
+            {
+                auto *expr = (stmt.kind == IRStmtKind::Assign || stmt.kind == IRStmtKind::VarSet)
+                             ? stmt.expr.get() : nullptr;
+                if (expr && expr->op == IROp::Add && expr->kids.size() == 2 &&
+                    expr->kids[1]->isConst() && expr->kids[1]->value > 0 &&
+                    expr->kids[1]->value < 0x10000 &&
+                    (expr->kids[0]->op == IROp::Var || expr->kids[0]->op == IROp::Temp)) {
+                    TypeRef baseType = NullType;
+                    if (expr->kids[0]->op == IROp::Temp) {
+                        int bt = expr->kids[0]->tempId();
+                        baseType = m_func.tempType(bt);
+                    } else if (expr->kids[0]->typeRef != NullType) {
+                        baseType = expr->kids[0]->typeRef;
+                    }
+                    if (baseType != NullType && m_types.isStructPointer(baseType)) {
+                        if (stmt.kind == IRStmtKind::VarSet)
+                            m_interiorPtrVars.insert(stmt.destVar);
+                        else if (stmt.kind == IRStmtKind::Assign && stmt.destTemp >= 0)
+                            m_interiorPtrVars.insert("__temp_" + std::to_string(stmt.destTemp));
+                    }
+                }
             }
         }
 
@@ -2823,10 +2858,30 @@ private:
                 // Dead while loops: while(false)
                 if (cond == "0 != 0" || cond == "0 == 1" || cond == "1 == 0" ||
                     cond == "0" || cond == "(0)") break;
-                out += pad(indent) + "while (" + QString::fromStdString(cond) + ") {\n";
-                for (auto &child : node->children)
-                    emitNode(out, child.get(), indent + 1);
-                out += pad(indent) + "}\n";
+                // When header statements are hoisted into the body, emit as:
+                //   while(1) { header_stmts; if (!cond) break; body; }
+                // This preserves correct execution order (body before condition).
+                if (node->whileHasHeaderStmts && !node->children.empty() &&
+                    node->children[0]->kind == StructKind::Block &&
+                    node->children[0]->children.size() >= 2) {
+                    out += pad(indent) + "while (1) {\n";
+                    // Emit first child of wrapper (header statements)
+                    emitNode(out, node->children[0]->children[0].get(), indent + 1);
+                    // Emit break condition
+                    std::string breakCond = node->cond ?
+                        emitExpr(node->cond, !node->negated) : "0";
+                    out += pad(indent + 1) + "if (" +
+                           QString::fromStdString(breakCond) + ") break;\n";
+                    // Emit remaining body children
+                    for (size_t ci = 1; ci < node->children[0]->children.size(); ++ci)
+                        emitNode(out, node->children[0]->children[ci].get(), indent + 1);
+                    out += pad(indent) + "}\n";
+                } else {
+                    out += pad(indent) + "while (" + QString::fromStdString(cond) + ") {\n";
+                    for (auto &child : node->children)
+                        emitNode(out, child.get(), indent + 1);
+                    out += pad(indent) + "}\n";
+                }
                 break;
             }
 
@@ -2983,7 +3038,46 @@ private:
                 else if (stmt.storeSize == 9) storeCast = "double";
                 // Field expression → base->field = val
                 if (a->op == IROp::Field) {
-                    out += pad(indent) + QString::fromStdString(emitExpr(a) + " = " + val) + ";\n";
+                    // Check if the Field base is an interior pointer (temp from Add(structPtr, const)).
+                    // If so, fold back to the original struct base with combined offset.
+                    // e.g., v8 = &ent->r.origin → v8.field = X becomes ent->r.origin_field = X
+                    bool folded = false;
+                    if (!a->kids.empty() && a->kids[0]->op == IROp::Temp) {
+                        auto dit = m_tempDef.find(a->kids[0]->tempId());
+                        if (dit != m_tempDef.end() && dit->second &&
+                            dit->second->op == IROp::Add && dit->second->kids.size() == 2 &&
+                            dit->second->kids[1]->isConst() && dit->second->kids[1]->value > 0) {
+                            // Fold: base = original struct ptr, offset = inner + field
+                            auto *origBase = dit->second->kids[0].get();
+                            int innerOff = (int)dit->second->kids[1]->value;
+                            int fieldOff = (int)a->value;
+                            int combinedOff = innerOff + fieldOff;
+                            TypeRef origType = exprType(origBase);
+                            if (origType != NullType && m_types.isStructPointer(origType)) {
+                                TypeRef structRef = m_types.getPointedStruct(origType);
+                                std::string access = structRef != NullType ?
+                                    m_types.formatFieldAccess(structRef, combinedOff) : "";
+                                if (!access.empty()) {
+                                    std::string origStr = emitExpr(origBase);
+                                    out += pad(indent) + QString::fromStdString(
+                                        origStr + "->" + access + " = " + val) + ";\n";
+                                    folded = true;
+                                }
+                            }
+                            if (!folded) {
+                                // Can't resolve field — use raw pointer arithmetic on original base
+                                std::string origStr = emitExpr(origBase);
+                                char buf[512];
+                                snprintf(buf, sizeof(buf), "*(%s *)((char *)%s + 0x%X) = %s",
+                                         storeCast.c_str(), origStr.c_str(), (unsigned)combinedOff, val.c_str());
+                                out += pad(indent) + QString::fromStdString(buf) + ";\n";
+                                folded = true;
+                            }
+                        }
+                    }
+                    if (!folded) {
+                        out += pad(indent) + QString::fromStdString(emitExpr(a) + " = " + val) + ";\n";
+                    }
                 }
                 // Add(base, const) → base->field_XX = val or base[N] = val for scalar ptrs
                 else if (a->op == IROp::Add && a->kids.size() == 2 &&
@@ -3038,12 +3132,52 @@ private:
                         }
                     }
                     if (!usedArrayNotation) {
+                        // Try to fold interior pointers back to original struct base.
+                        // When base temp = Add(structPtr, innerOff), fold to structPtr->(innerOff+off)
+                        bool foldedInterior = false;
+                        if (a->kids[0]->op == IROp::Temp) {
+                            auto dit = m_tempDef.find(a->kids[0]->tempId());
+                            if (dit != m_tempDef.end() && dit->second &&
+                                dit->second->op == IROp::Add && dit->second->kids.size() == 2 &&
+                                dit->second->kids[1]->isConst() && dit->second->kids[1]->value > 0) {
+                                auto *origBase = dit->second->kids[0].get();
+                                int innerOff = (int)dit->second->kids[1]->value;
+                                int combinedOff = innerOff + off;
+                                TypeRef origType = exprType(origBase);
+                                if (origType != NullType && m_types.isStructPointer(origType)) {
+                                    TypeRef structRef = m_types.getPointedStruct(origType);
+                                    std::string access = structRef != NullType ?
+                                        m_types.formatFieldAccess(structRef, combinedOff) : "";
+                                    if (!access.empty()) {
+                                        std::string origStr = emitExpr(origBase);
+                                        out += pad(indent) + QString::fromStdString(
+                                            origStr + "->" + access + " = " + val) + ";\n";
+                                        foldedInterior = true;
+                                    }
+                                }
+                            }
+                        }
+                        if (foldedInterior) { /* done */ }
+                        else {
                         // Try type-aware struct field access
                         // Skip for interior pointers (vars from &struct->field)
                         TypeRef stBaseType = exprType(a->kids[0].get());
                         bool stIsInterior = false;
                         if (a->kids[0]->op == IROp::Var && !a->kids[0]->name.empty())
                             stIsInterior = m_interiorPtrVars.count(a->kids[0]->name) > 0;
+                        else if (a->kids[0]->op == IROp::Temp) {
+                            int tid = a->kids[0]->tempId();
+                            stIsInterior = m_interiorPtrVars.count("__temp_" + std::to_string(tid)) > 0;
+                            if (!stIsInterior) {
+                                auto dit = m_tempDef.find(tid);
+                                if (dit != m_tempDef.end() && dit->second &&
+                                    dit->second->op == IROp::Add && dit->second->kids.size() == 2 &&
+                                    dit->second->kids[1]->isConst() &&
+                                    dit->second->kids[1]->value > 0) {
+                                    stIsInterior = true;
+                                }
+                            }
+                        }
                         std::string access;
                         if (!stIsInterior && stBaseType != NullType && m_types.isStructPointer(stBaseType)) {
                             TypeRef structRef = m_types.getPointedStruct(stBaseType);
@@ -3065,11 +3199,12 @@ private:
                             out += pad(indent) + QString::fromStdString(
                                 base + "->" + access + " = " + val) + ";\n";
                         } else {
-                            char buf[128];
+                            char buf[512];
                             snprintf(buf, sizeof(buf), "*(%s *)((char *)%s + 0x%X) = %s",
                                      storeCast.c_str(), base.c_str(), (unsigned)off, val.c_str());
                             out += pad(indent) + QString::fromStdString(buf) + ";\n";
                         }
+                    } // else (not foldedInterior)
                     }
                 }
                 // Add(base, Mul(idx, scale)) or Add(Mul(idx, scale), base) → base[idx] = val
@@ -3126,9 +3261,18 @@ private:
                         out += pad(indent) + QString::fromStdString(
                             base + "->" + fieldAccess + "[" + idx + "] = " + val) + ";\n";
                     } else {
-                        char fname[64]; snprintf(fname, sizeof(fname), "arr_%X[%s]", (unsigned)off, idx.c_str());
-                        out += pad(indent) + QString::fromStdString(
-                            base + "->" + fname + " = " + val) + ";\n";
+                        TypeRef stType = exprType(a->kids[0]->kids[0].get());
+                        if (stType != NullType && m_types.isStructPointer(stType)) {
+                            char fname[64]; snprintf(fname, sizeof(fname), "arr_%X[%s]", (unsigned)off, idx.c_str());
+                            out += pad(indent) + QString::fromStdString(
+                                base + "->" + fname + " = " + val) + ";\n";
+                        } else {
+                            int sc = (int)a->kids[0]->kids[1]->kids[1]->value;
+                            out += pad(indent) + QString::fromStdString(
+                                "*(" + storeCast + " *)((char *)(" + base + ") + " + idx +
+                                " * " + std::to_string(sc) + " + " + std::to_string(off) +
+                                ") = " + val) + ";\n";
+                        }
                     }
                 }
                 // General Add/Sub expression → *(type *)((char *)(expr)) = val
@@ -3447,6 +3591,19 @@ private:
                         if (nit != m_func.varNames.end())
                             return nit->second;
                     }
+                    // If phi temp has no variable name, try to inherit from its
+                    // source temp (the pre-loop value it was assigned from)
+                    auto dit = m_tempDef.find(id);
+                    if (dit != m_tempDef.end() && dit->second &&
+                        dit->second->op == IROp::Temp) {
+                        int srcId = dit->second->tempId();
+                        auto svit = m_func.tempToVar.find(srcId);
+                        if (svit != m_func.tempToVar.end()) {
+                            auto snit = m_func.varNames.find(svit->second);
+                            if (snit != m_func.varNames.end())
+                                return snit->second;
+                        }
+                    }
                     return tempName(id);
                 }
                 // Inline temps used only once
@@ -3547,21 +3704,39 @@ private:
                                 fieldAccess = m_types.formatFieldAccess(structRef, off);
                         }
                         if (!fieldAccess.empty()) {
-                            // Got a real field name — use array subscript on it
-                            // If fieldAccess is "name[0]", strip the [0] to get just "name"
-                            // so the dynamic index applies directly: name[idx]
-                            size_t bracket = fieldAccess.find('[');
-                            if (bracket != std::string::npos &&
-                                fieldAccess.substr(bracket) == "[0]")
-                                fieldAccess = fieldAccess.substr(0, bracket);
-                            result = baseStr + "->" + fieldAccess + "[" + idxStr + "]";
+                            // Check if this is base[idx].field pattern:
+                            // elemSize matches struct size → array of structs
+                            TypeRef structRef2 = NullType;
+                            if (baseType != NullType && m_types.isStructPointer(baseType))
+                                structRef2 = m_types.getPointedStruct(baseType);
+                            auto *structInfo = structRef2 != NullType ? m_types.resolveType(structRef2) : nullptr;
+                            if (structInfo && structInfo->sizeBytes > 0 &&
+                                elemSize == structInfo->sizeBytes) {
+                                // Array of structs: base[idx].field
+                                result = baseStr + "[" + idxStr + "]." + fieldAccess;
+                            } else {
+                                // Scalar field with dynamic subscript
+                                size_t bracket = fieldAccess.find('[');
+                                if (bracket != std::string::npos &&
+                                    fieldAccess.substr(bracket) == "[0]")
+                                    fieldAccess = fieldAccess.substr(0, bracket);
+                                result = baseStr + "->" + fieldAccess + "[" + idxStr + "]";
+                            }
                         } else {
-                            char fname[64];
-                            if (elemSize == 4)
-                                snprintf(fname, sizeof(fname), "arr_%X[%s]", (unsigned)off, idxStr.c_str());
-                            else
-                                snprintf(fname, sizeof(fname), "arr_%X_%d[%s]", (unsigned)off, elemSize, idxStr.c_str());
-                            result = baseStr + "->" + fname;
+                            // Only use ->arr_XX when base is a struct pointer
+                            if (baseType != NullType && m_types.isStructPointer(baseType)) {
+                                char fname[64];
+                                if (elemSize == 4)
+                                    snprintf(fname, sizeof(fname), "arr_%X[%s]", (unsigned)off, idxStr.c_str());
+                                else
+                                    snprintf(fname, sizeof(fname), "arr_%X_%d[%s]", (unsigned)off, elemSize, idxStr.c_str());
+                                result = baseStr + "->" + fname;
+                            } else {
+                                // Non-struct base: use raw pointer arithmetic
+                                result = std::string("*(") + loadCastType(e->loadSize) +
+                                    " *)((char *)(" + baseStr + ") + " + idxStr + " * " +
+                                    std::to_string(elemSize) + " + " + std::to_string(off) + ")";
+                            }
                         }
                         break;
                     }
@@ -3597,6 +3772,32 @@ private:
                      addr->kids[0]->op == IROp::Load)) {
                     std::string base = emitExpr(addr->kids[0].get());
                     int64_t off = (int64_t)addr->kids[1]->value;
+                    // Try folding interior pointers back to original struct base
+                    if (addr->kids[0]->op == IROp::Temp) {
+                        auto dit = m_tempDef.find(addr->kids[0]->tempId());
+                        if (dit != m_tempDef.end() && dit->second &&
+                            dit->second->op == IROp::Add && dit->second->kids.size() == 2 &&
+                            dit->second->kids[1]->isConst() && dit->second->kids[1]->value > 0) {
+                            auto *origBase = dit->second->kids[0].get();
+                            int innerOff = (int)dit->second->kids[1]->value;
+                            int combinedOff = innerOff + (int)off;
+                            TypeRef origType = exprType(origBase);
+                            if (origType != NullType && m_types.isStructPointer(origType)) {
+                                TypeRef structRef = m_types.getPointedStruct(origType);
+                                std::string access = structRef != NullType ?
+                                    m_types.formatFieldAccess(structRef, combinedOff) : "";
+                                if (!access.empty()) {
+                                    std::string origStr = emitExpr(origBase);
+                                    char buf[256];
+                                    snprintf(buf, sizeof(buf), "*(%s *)((char *)%s + 0x%llX)",
+                                             loadCastType(e->loadSize), origStr.c_str(),
+                                             (unsigned long long)combinedOff);
+                                    result = origStr + "->" + access;
+                                    break;
+                                }
+                            }
+                        }
+                    }
                     // Try type-aware struct field access
                     TypeRef baseType = exprType(addr->kids[0].get());
                     // For untyped expressions, try resolving type from STABS globals.
@@ -3678,7 +3879,7 @@ private:
                         }
                     }
                     if (result.empty()) {
-                        char buf[64];
+                        char buf[256];
                         snprintf(buf, sizeof(buf), "*(%s *)((char *)%s + 0x%llX)",
                                  loadCastType(e->loadSize), base.c_str(), (unsigned long long)off);
                         result = buf;
@@ -4341,7 +4542,7 @@ private:
                     std::string thisArg = emitExpr(e->kids[0].get());
                     // Use int return type for vtable calls (void* would also
                     // work, but int matches testl in condition checks)
-                    char buf[128];
+                    char buf[256];
                     snprintf(buf, sizeof(buf),
                         "((int(*)(void*))(((void**)(*(void**)%s))[%d]))(",
                         thisArg.c_str(), vslot);

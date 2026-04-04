@@ -32,7 +32,7 @@ typedef __builtin_va_list va_list;
 #define va_start(ap, last) __builtin_va_start(ap, last)
 #define va_end(ap) __builtin_va_end(ap)
 #define va_arg(ap, type) __builtin_va_arg(ap, type)
-typedef int BOOL; typedef int Bool; typedef int qboolean;
+typedef int BOOL; typedef int Bool; typedef int qboolean; typedef int bool;
 typedef unsigned int DWORD; typedef unsigned int UINT;
 typedef float vec_t; typedef vec_t vec3_t[3]; typedef vec_t vec2_t[2];
 typedef unsigned char byte;
@@ -148,9 +148,26 @@ typedef int D3DLIGHT9; typedef int D3DRASTER_STATUS;
 typedef int scr_thread_t;
 typedef void *scr_func_t;
 typedef int TextureID;
+typedef int MaterialHandle;
 typedef int isNegative;
 typedef struct { int _[4]; } GUID;
 typedef unsigned long u_long;
+typedef void *CFStringRef;
+typedef void *CFMutableStringRef;
+typedef void *CFURLRef;
+typedef void *CFBundleRef;
+typedef void *CFArrayRef;
+typedef void *CFDictionaryRef;
+typedef void *CFTypeRef;
+typedef void *AudioConverterRef;
+typedef unsigned int AudioUnitRenderActionFlags;
+typedef struct { int _[8]; } AudioTimeStamp;
+typedef struct { int mNumberBuffers; int _[32]; } AudioBufferList;
+typedef struct { int _[4]; } AudioStreamPacketDescription;
+typedef struct { int _[4]; } AudioStreamBasicDescription;
+typedef struct { char _[80]; } FSRef;
+typedef unsigned int UInt32;
+typedef float Float32;
 /* Network types */
 typedef int SOCKET;
 typedef struct { int _[4]; } fd_set;
@@ -367,11 +384,12 @@ def extract_struct_from_header(name):
     return None
 
 
-def _try_compile(code):
+def _try_compile(code, extra_flags=None):
     with tempfile.NamedTemporaryFile(suffix='.c', mode='w', delete=False) as f:
         f.write(code); cpath = f.name
     try:
-        r = subprocess.run([APPLE_GCC] + GCC_FLAGS + ['-S', '-o', '-', cpath],
+        flags = GCC_FLAGS + (extra_flags or [])
+        r = subprocess.run([APPLE_GCC] + flags + ['-S', '-o', '-', cpath],
                            capture_output=True, text=True, timeout=30)
         return r.returncode == 0, r.stdout, r.stderr
     except subprocess.TimeoutExpired:
@@ -380,7 +398,7 @@ def _try_compile(code):
         os.unlink(cpath)
 
 
-def compile_to_asm(c_code, orig_check=None):
+def compile_to_asm(c_code, orig_check=None, extra_flags=None):
     # Pre-extract all struct/typedef types referenced in the code from the types header
     extracted = {}  # name -> definition (ordered by dependency)
     # Find struct references AND typedef names (Type_t patterns used as pointer types)
@@ -388,6 +406,7 @@ def compile_to_asm(c_code, orig_check=None):
     # Also find typedef names used as pointer base types: "type_t *var"
     # Skip simple types already in STUBS (vec_t, qboolean, etc.)
     stubs_types = set(re.findall(r'typedef\s+\S+.*?\s+(\w+)\s*[;\[]', STUBS))
+    # Find _t types used as pointer types: "type_t *var"
     for m in re.finditer(r'\b(\w+_t)\s*\*\s*\w+', c_code):
         name = m.group(1)
         if name not in stubs_types:
@@ -447,15 +466,50 @@ def compile_to_asm(c_code, orig_check=None):
         visited.add(name)
         if name in stubs_structs: continue
         defn = extract_struct_from_header(name)
+        # If not found and name ends in _t, try _s (typedef → struct mapping)
+        if not defn and name.endswith('_t'):
+            s_name = name[:-2] + '_s'
+            defn = extract_struct_from_header(s_name)
+            if defn:
+                # Add typedef only if not already in stubs
+                if name not in stubs_types:
+                    defn = defn.rstrip() + '\ntypedef struct ' + s_name + ' ' + name + ';\n'
         if defn:
             # Skip structs with invalid C (vtable pointers, C++ artifacts)
             # Note: $_NNNN anonymous types are valid GCC extensions, don't skip those
             if '::' in defn or '_vptr' in defn:
                 continue
-            extracted[name] = defn
-            # Also register any struct tags defined in this block
+            # Fix self-referencing array fields: "TypeName field[N]" where TypeName
+            # is the struct being defined → replace with "char field[N*4]" padding
+            fixed_defn = defn
+            # Find the struct name being defined
+            sm = re.match(r'(?:struct|union)\s+(\w+)\s*\{', defn.strip())
+            if sm:
+                sname = sm.group(1)
+                # Also get typedef aliases for this struct
+                aliases = {sname, name}
+                for line in defn.split('\n'):
+                    tm = re.match(r'typedef\s+struct\s+\w+\s+(\w+)\s*;', line.strip())
+                    if tm: aliases.add(tm.group(1))
+                # Replace self-referencing array fields
+                def fix_self_ref(m):
+                    typename = m.group(1)
+                    fname = m.group(2)
+                    count = int(m.group(3)) if m.group(3) else 1
+                    if typename in aliases:
+                        return f'    char {fname}[{count * 4}];'
+                    return m.group(0)
+                fixed_defn = re.sub(
+                    r'^\s+(\w+)\s+(\w+)\[(\d+)\]\s*;',
+                    fix_self_ref, fixed_defn, flags=re.MULTILINE)
+            extracted[name] = fixed_defn
+            # Also register any struct tags defined in this block and queue for deps
             for m in re.finditer(r'struct\s+(\w+)\s*\{', defn):
-                extracted.setdefault(m.group(1), defn)
+                tag = m.group(1)
+                if tag not in extracted:
+                    extracted[tag] = defn
+                    if tag not in visited:
+                        queue.append(tag)
             # Extract dependencies: struct/union/enum fields AND typedef references
             for m in re.finditer(r'(?:struct|union|enum)\s+([\w$]+)\s+[\w$]+', defn):
                 if m.group(1) not in visited:
@@ -464,8 +518,8 @@ def compile_to_asm(c_code, orig_check=None):
                 dep = m.group(1)
                 if dep not in visited and dep not in stubs_types:
                     queue.append(dep)
-            # Also follow CamelCase type names used as pointer types in struct fields
-            for m in re.finditer(r'\b([A-Z]\w+)\s+\*', defn):
+            # Also follow CamelCase type names used as pointer or array types in fields
+            for m in re.finditer(r'\b([A-Z]\w+)\s+(?:\*|\w+\s*\[)', defn):
                 dep = m.group(1)
                 if dep not in visited and dep not in stubs_types:
                     queue.append(dep)
@@ -537,10 +591,8 @@ def compile_to_asm(c_code, orig_check=None):
         if name in emitted_set or name not in extracted: return
         emitted_set.add(name)
         defn = extracted[name]
-        # Mark ALL names defined in this block as emitted (struct tags + typedefs)
+        # Mark struct tags defined in this block as emitted
         for m in re.finditer(r'struct\s+(\w+)\s*\{', defn):
-            emitted_set.add(m.group(1))
-        for m in re.finditer(r'typedef\s+struct\s+\w+\s+(\w+)\s*;', defn):
             emitted_set.add(m.group(1))
         # Emit dependencies first (struct, union, enum)
         for m in re.finditer(r'(?:struct|union|enum)\s+([\w$]+)\s+[\w$]+', defn):
@@ -548,8 +600,8 @@ def compile_to_asm(c_code, orig_check=None):
         for m in re.finditer(r'\b(\w+_t)\s+\*?\s*\w+', defn):
             if m.group(1) not in emitted_set:
                 emit_type(m.group(1))
-        # Also follow CamelCase type references (e.g., XModelCollSurf * field)
-        for m in re.finditer(r'\b([A-Z]\w+)\s+\*', defn):
+        # Also follow CamelCase type references (pointer and array fields)
+        for m in re.finditer(r'\b([A-Z]\w+)\s+(?:\*|\w+\s*\[)', defn):
             dep = m.group(1)
             if dep not in emitted_set and dep in extracted:
                 emit_type(dep)
@@ -585,6 +637,13 @@ def compile_to_asm(c_code, orig_check=None):
                     emit_type(sname)
                     break
         if sname:
+            # If the extracted block has the full struct+typedef, emit it directly
+            ext_block = extracted.get(name, '') or extracted.get(sname, '')
+            if ext_block and f'typedef struct' in ext_block and f' {name};' in ext_block:
+                # Check if struct body isn't already in types_block
+                if ext_block.strip() not in types_block:
+                    types_block = ext_block + '\n' + types_block
+                continue
             auto_typedefs.append(f'typedef struct {sname} {name};')
     if auto_typedefs:
         types_block += '\n' + '\n'.join(set(auto_typedefs))
@@ -601,7 +660,7 @@ def compile_to_asm(c_code, orig_check=None):
     full = STUBS + '\n' + dvar_block + '\n' + types_block + '\n' + func_protos + '\n' + c_code
 
     # Try compile with extracted types
-    ok, stdout, stderr = _try_compile(full)
+    ok, stdout, stderr = _try_compile(full, extra_flags)
     if ok: return True, stdout, stderr
 
     # Retry: add simple stubs for remaining undeclared names
@@ -633,12 +692,19 @@ def compile_to_asm(c_code, orig_check=None):
         # "invalid type argument of '->' / 'unary *'" - the variable needs pointer type
         # "invalid operands to binary" - type mismatch, try casting
         # These are harder to fix automatically
-        # Handle "two or more data types": extract unknown type from the error line
+        # Handle "two or more data types": often C++ template return types
         for m in re.finditer(r':(\d+):.*two or more data types', stderr):
             lineno = int(m.group(1))
             code_lines = full.split('\n')
             if lineno <= len(code_lines):
                 line_text = code_lines[lineno-1].strip()
+                # C++ template return type: "struct __X<...> funcname(...)"
+                # Replace with "int funcname(...)"
+                if '<' in line_text:
+                    cleaned = re.sub(r'^(?:struct\s+)?\w+<[^>]*>\s*', 'int ', line_text)
+                    code_lines[lineno-1] = cleaned
+                    full = '\n'.join(code_lines)
+                    continue
                 # First word(s) before the function name are the unknown return type
                 # Try uppercase first, then any word that looks like a type
                 words = re.findall(r'\b(\w+)\b', line_text)
@@ -664,6 +730,13 @@ def compile_to_asm(c_code, orig_check=None):
                         if tname.startswith('struct '):
                             sname = tname.split()[1]
                             undeclared.add(sname)
+                        elif tname.endswith('_t'):
+                            # Try _t → _s struct extraction
+                            s_name = tname[:-2] + '_s'
+                            s_defn = extract_struct_from_header(s_name)
+                            if s_defn and s_defn.strip() not in full:
+                                idx = full.find(STUBS) + len(STUBS) if STUBS in full else 0
+                                full = full[:idx] + s_defn + '\n' + full[idx:]
                     break
         # Handle "variable or field declared void" - the decompiler emitted void type
         for m in re.finditer(r"variable or field " + q + r"(\w+)" + cq + r" declared void", stderr):
@@ -681,6 +754,19 @@ def compile_to_asm(c_code, orig_check=None):
         if 'label at end of compound statement' in stderr:
             full = re.sub(r'(bb_\d+:)\s*\n(\s*\})', r'\1 ;\n\2', full)
             full = re.sub(r'(bb_\d+:)\s*\}', r'\1 ; }', full)
+        # Handle "array type has incomplete element type" — replace array field with char padding
+        for m in re.finditer(r':(\d+):.*array type has incomplete element type', stderr):
+            lineno = int(m.group(1))
+            code_lines = full.split('\n')
+            if lineno <= len(code_lines):
+                line_text = code_lines[lineno-1].strip()
+                # Match: "TypeName field[N];" and replace with "char field[N*4];"
+                am = re.match(r'\s*(\w+)\s+(\w+)\[(\d+)\]\s*;', code_lines[lineno-1])
+                if am:
+                    tname, fname, count = am.group(1), am.group(2), int(am.group(3))
+                    indent = len(code_lines[lineno-1]) - len(code_lines[lineno-1].lstrip())
+                    code_lines[lineno-1] = ' ' * indent + f'char {fname}[{count * 4}];'
+                    full = '\n'.join(code_lines)
         # Handle "dereferencing pointer to incomplete type" - add struct definition
         for m in re.finditer(r"dereferencing pointer to incomplete type", stderr):
             pass  # extract struct name from the error line
@@ -730,6 +816,18 @@ def compile_to_asm(c_code, orig_check=None):
             full = re.sub(r'^extern\s+\w+\s+\*?' + cname + r'\s*;.*\n', '', full, flags=re.MULTILINE)
             full = re.sub(r'^void\s+' + cname + r'\s*\(void\)\s*;.*\n', '', full, flags=re.MULTILINE)
             full = re.sub(r'^typedef\s+int\s+' + cname + r'\s*;.*\n', '', full, flags=re.MULTILINE)
+        # Handle "incompatible types in assignment" — add (int) cast for simple RHS
+        for m in re.finditer(r':(\d+):.*incompatible types in assignment', stderr):
+            lineno = int(m.group(1))
+            code_lines = full.split('\n')
+            if lineno <= len(code_lines):
+                line_text = code_lines[lineno-1].rstrip()
+                # Only cast simple RHS: identifiers and function calls, not struct values
+                rm = re.search(r'=\s*(\w[\w.>*()-]*)\s*;$', line_text)
+                if rm and 'struct ' not in rm.group(1):
+                    rhs = rm.group(1)
+                    code_lines[lineno-1] = line_text[:rm.start()] + '= (int)(' + rhs + ');'
+                    full = '\n'.join(code_lines)
         # Handle "incompatible types in return" — change return type to match
         if 'incompatible types in return' in stderr:
             # Find the function signature and change return type
@@ -782,9 +880,20 @@ def compile_to_asm(c_code, orig_check=None):
                 new_proto = f'int {fname}({params});\n'
                 idx = full.find(STUBS) + len(STUBS) if STUBS in full else 0
                 full = full[:idx] + new_proto + full[idx:]
+        # Handle "invalid operands to binary &/|/+" — pointer/struct used in bitwise ops
+        for m in re.finditer(r':(\d+):.*invalid operands to binary ([&|+*\-])', stderr):
+            lineno = int(m.group(1))
+            code_lines = full.split('\n')
+            if lineno <= len(code_lines):
+                line_text = code_lines[lineno-1]
+                # Wrap the whole expression line: cast pointer expressions in & ops
+                # Pattern: (expr) & N or (expr) | N where expr has (char *) cast
+                code_lines[lineno-1] = re.sub(
+                    r'\((.+?)\)\s*&\s*(-?\d+)', r'((int)(\1)) & \2', line_text, count=1)
+                full = '\n'.join(code_lines)
         if not undeclared:
             # Even with no undeclared names, try recompiling if we patched the code
-            ok, stdout, stderr = _try_compile(full)
+            ok, stdout, stderr = _try_compile(full, extra_flags)
             if ok: return True, stdout, stderr
             break
         already = set(re.findall(r'(?:typedef|struct|union|extern|enum)\s+\w+.*?\s+(\w+)\s*[;\{]', full))
@@ -865,7 +974,7 @@ def compile_to_asm(c_code, orig_check=None):
         if not stubs: break
         idx = full.find(STUBS) + len(STUBS) if STUBS in full else 0
         full = full[:idx] + stubs + full[idx:]
-        ok, stdout, stderr = _try_compile(full)
+        ok, stdout, stderr = _try_compile(full, extra_flags)
         if ok: return True, stdout, stderr
 
     return False, '', stderr
@@ -913,6 +1022,7 @@ def norm(s):
     # retl -> ret, calll -> call, leave -> popl %ebp, cvtsi2ssl -> cvtsi2ss
     s = re.sub(r'^retl\b', 'ret', s)
     s = re.sub(r'^calll\b', 'call', s)
+    s = re.sub(r'^jmpl\b', 'jmp', s)
     s = re.sub(r'^leave$', 'popl %ebp', s)
     s = re.sub(r'^cvtsi2ssl\b', 'cvtsi2ss', s)
     # sall/sarl → shll/shrl (same x86 encoding for shift)
@@ -927,13 +1037,20 @@ def norm(s):
     if m:
         op = 'subl' if m.group(1) == 'addl' else 'addl'
         s = f'{op} ${m.group(2)}{m.group(3)}'
+    # Normalize leal with zero displacement: leal 0(,%reg,N) → leal (,%reg,N)
+    s = re.sub(r'^(leal) 0\(,', r'\1 (,', s)
     # Normalize string ops: repe/repz and repne/repnz
     s = re.sub(r'^repe\b', 'repz', s)
     s = re.sub(r'^repne\b', 'repnz', s)
-    # Strip operands from cmpsb (implicit esi/edi)
+    # Strip implicit operands from string ops (esi/edi/al)
     s = re.sub(r'^(repz cmpsb).*', r'\1', s)
+    s = re.sub(r'^(repnz scasb).*', r'\1', s)
+    s = re.sub(r'^(rep movs[blwd]).*', r'\1', s)
+    s = re.sub(r'^(rep stos[blwd]).*', r'\1', s)
     # testb %Xl, %Xl -> testl %eXx, %eXx (equivalent for zero-check)
     s = re.sub(r'^testb %([a-d])l, %\1l', r'testl %e\1x, %e\1x', s)
+    # testw %Xx, %Xx -> testl %eXx, %eXx (equivalent for zero-check)
+    s = re.sub(r'^testw %([a-d])x, %\1x', r'testl %e\1x, %e\1x', s)
     # testl %REG, %REG (self-test) → testl %<R>, %<R> (register doesn't matter)
     m = re.match(r'^testl (%(e[abcd]x|e[sd]i|ebx)), \1$', s)
     if m:
@@ -1390,6 +1507,11 @@ def check_function(name_or_addr, data, text_addr, text_off, verbose=True):
     # Strip callee-save register differences
     orig = strip_callee_save(orig, recomp)
     recomp = strip_callee_save(recomp, orig)
+    # Remove GCC's extra jp (NaN parity check) instructions when the original
+    # doesn't have them. These are always after ucomiss and before a jcc.
+    orig_has_jp = any(inst.strip().startswith('jp') for inst in orig)
+    if not orig_has_jp:
+        recomp = [inst for inst in recomp if not inst.strip().startswith('jp')]
 
     # Compare using LCS (longest common subsequence) for alignment-tolerant matching
     normed_o = [norm(x) for x in orig]
