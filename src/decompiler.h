@@ -1027,6 +1027,9 @@ public:
                 cleaned.replace("*(char *)(" + gname + ")", "*(char *)(" + ptrName + ")");
             }
         }
+        // Simplify redundant double (char *) casts:
+        // *(TYPE *)((char *)((char *)X + N)) → *(TYPE *)((char *)X + N)
+        cleaned.replace("((char *)((char *)", "((char *)(");
         // Fix invalid array pointer syntax in declarations: "float[4] * mtx" → "float * mtx"
         // Only on declaration lines (function signature or local variable declarations)
         {
