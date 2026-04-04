@@ -1490,6 +1490,10 @@ private:
                                         fti->kind == StabsTypeKind::Union) &&
                                 fti->sizeBytes > 4)
                                 skipField = true;
+                            // Also skip large array fields (char buf[N]) — reading 4 bytes
+                            // from an array should use pointer arithmetic, not field name
+                            if (fti && fti->kind == StabsTypeKind::Array && fti->sizeBytes > 4)
+                                skipField = true;
                         }
                         if (!skipField) {
                             base->typeRef = baseType;
@@ -1515,8 +1519,21 @@ private:
                     if (!access.empty()) {
                         auto *field = m_types.findFieldAtOffset(baseType, (int)m.disp);
                         TypeRef ft = field ? field->typeRef : NullType;
-                        base->typeRef = baseType;
-                        return IRExpr::mkField(std::move(base), access, (int)m.disp, ft);
+                        // Skip large struct/array fields (reading 4 bytes from a large field)
+                        bool skip = false;
+                        if (ft != NullType && access.find('.') == std::string::npos &&
+                            access.find('[') == std::string::npos) {
+                            auto *fti = m_types.resolveType(ft);
+                            if (fti && ((fti->kind == StabsTypeKind::Struct ||
+                                         fti->kind == StabsTypeKind::Union) && fti->sizeBytes > 4))
+                                skip = true;
+                            if (fti && fti->kind == StabsTypeKind::Array && fti->sizeBytes > 4)
+                                skip = true;
+                        }
+                        if (!skip) {
+                            base->typeRef = baseType;
+                            return IRExpr::mkField(std::move(base), access, (int)m.disp, ft);
+                        }
                     }
                 }
             }
