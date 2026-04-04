@@ -202,6 +202,39 @@ public:
                 if (tref == ref) continue;
                 if ((ti.kind == StabsTypeKind::Struct || ti.kind == StabsTypeKind::Union) &&
                     ti.name == t->forwardTag && !ti.fields.empty()) {
+                    // Sanity check: verify fields are plausible for this struct name.
+                    // If the struct name doesn't match ANY field name pattern, the
+                    // fields likely came from a different struct (CU type collision).
+                    // Skip such definitions to avoid ConDrawInputGlob fields on scrVarPub_t.
+                    bool fieldsPlausible = true;
+                    if (ti.fields.size() >= 3 && ti.name.size() >= 8) {
+                        // Check if first field name has ANY commonality with struct name
+                        std::string sn = ti.name;
+                        if (sn.size() > 2 && sn.substr(sn.size()-2) == "_t") sn = sn.substr(0, sn.size()-2);
+                        if (sn.size() > 2 && sn.substr(sn.size()-2) == "_s") sn = sn.substr(0, sn.size()-2);
+                        // Look for another struct with the same name but different fields
+                        // (indicates the definition was corrupted by CU collision)
+                        int matchCount = 0;
+                        for (auto &[tref2, ti2] : m_types) {
+                            if (tref2 == tref) continue;
+                            if (ti2.name == ti.name && !ti2.fields.empty() &&
+                                ti2.fields.size() != ti.fields.size())
+                                matchCount++;
+                        }
+                        if (matchCount > 0) {
+                            // Multiple definitions with different field counts — pick
+                            // the one with more fields (likely the correct one)
+                            for (auto &[tref2, ti2] : m_types) {
+                                if (tref2 == tref) continue;
+                                if (ti2.name == ti.name && !ti2.fields.empty() &&
+                                    ti2.fields.size() > ti.fields.size()) {
+                                    fallback = &ti2;
+                                    break;
+                                }
+                            }
+                            if (fallback) continue; // skip this one, we have a better one
+                        }
+                    }
                     if (tref.first / 10000 == refCU)
                         return &ti;  // same CU — best match
                     if (!fallback) fallback = &ti;
