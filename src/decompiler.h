@@ -2614,13 +2614,23 @@ private:
                 }
             }
             m_loadAddrTemps = usedInLoadAddr; // save for use in emitExpr
-            // Also find temps with non-constant assignments (loop-updated)
+            // Find temps with non-constant assignments (loop-updated)
             std::set<int> hasNonConstAssign;
+            // Find temps with multiple definitions (defined in more than one block)
+            std::map<int, int> tempDefBlock;  // temp → first defining block
+            std::set<int> multiDefTemps;      // temps defined in multiple blocks
             for (auto &bb : m_func.blocks)
-                for (auto &stmt : bb.stmts)
-                    if (stmt.kind == IRStmtKind::Assign && stmt.destTemp >= 0 &&
-                        stmt.expr && !stmt.expr->isConst())
-                        hasNonConstAssign.insert(stmt.destTemp);
+                for (auto &stmt : bb.stmts) {
+                    if (stmt.kind == IRStmtKind::Assign && stmt.destTemp >= 0) {
+                        if (stmt.expr && !stmt.expr->isConst())
+                            hasNonConstAssign.insert(stmt.destTemp);
+                        auto it = tempDefBlock.find(stmt.destTemp);
+                        if (it == tempDefBlock.end())
+                            tempDefBlock[stmt.destTemp] = bb.id;
+                        else if (it->second != bb.id)
+                            multiDefTemps.insert(stmt.destTemp);
+                    }
+                }
 
             for (auto &bb : m_func.blocks) {
                 for (auto &stmt : bb.stmts) {
@@ -2629,13 +2639,15 @@ private:
                     // t = var → replace all uses of t with var
                     // BUT skip phi temps (they have loop-updated values too)
                     if (stmt.expr->op == IROp::Var &&
-                        !m_func.phiTemps.count(stmt.destTemp)) {
+                        !m_func.phiTemps.count(stmt.destTemp) &&
+                        !multiDefTemps.count(stmt.destTemp)) {
                         m_copyMap[stmt.destTemp] = stmt.expr->name;
                         m_copyPropagated.insert(stmt.destTemp);
                     }
-                    // t = otherTemp → propagate temp name (but not phi temps)
+                    // t = otherTemp → propagate temp name (but not phi temps or multi-defs)
                     if (stmt.expr->op == IROp::Temp &&
-                        !m_func.phiTemps.count(stmt.destTemp)) {
+                        !m_func.phiTemps.count(stmt.destTemp) &&
+                        !multiDefTemps.count(stmt.destTemp)) {
                         int srcId = stmt.expr->tempId();
                         auto sit = m_copyMap.find(srcId);
                         if (sit != m_copyMap.end()) {
