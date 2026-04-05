@@ -1879,6 +1879,8 @@ private:
                 else s += (char)p[i];
             } else { char b[8]; snprintf(b, 8, "\\x%02X", p[i]); s += b; }
         }
+        // Empty string (just NUL byte) is still a valid string literal
+        if (s.empty() && p && p[0] == 0) return "\"\"";
         return s.empty() ? "" : "\"" + s + "\"";
     }
 
