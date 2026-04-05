@@ -4960,24 +4960,36 @@ private:
             // For ZeroExt/SignExt of Load expressions, use typed pointer dereference
             // instead of casting the loaded value. This produces movzbl/movzwl (byte/word load)
             // instead of movl + truncation.
-            if ((e->castKind == CastKind::ZeroExt8 || e->castKind == CastKind::Trunc8) &&
+            if ((e->castKind == CastKind::ZeroExt8 || e->castKind == CastKind::Trunc8 ||
+                 e->castKind == CastKind::ZeroExt16 || e->castKind == CastKind::Trunc16) &&
                 inner_e->op == IROp::Load && !inner_e->kids.empty()) {
+                // Cosmetic mode: try struct field resolution for the Load address
+                if (s_cosmeticMode) {
+                    auto *loadAddr = inner_e->kids[0].get();
+                    if (loadAddr && loadAddr->op == IROp::Add && loadAddr->kids.size() == 2 &&
+                        loadAddr->kids[1]->isConst() && loadAddr->kids[1]->value > 0 &&
+                        loadAddr->kids[0]->op == IROp::Var) {
+                        std::string gname = loadAddr->kids[0]->name;
+                        int off = (int)loadAddr->kids[1]->value;
+                        auto *gn = m_types.globalByName(gname);
+                        if (gn && gn->typeRef != NullType && m_types.isStructPointer(gn->typeRef)) {
+                            TypeRef structRef = m_types.getPointedStruct(gn->typeRef);
+                            if (structRef != NullType) {
+                                std::string access = m_types.formatFieldAccess(structRef, off);
+                                if (!access.empty())
+                                    return gname + "->" + access;
+                            }
+                        }
+                    }
+                }
+                bool is8 = (e->castKind == CastKind::ZeroExt8 || e->castKind == CastKind::Trunc8);
+                const char *castType = is8 ? "unsigned char" : "unsigned short";
                 m_addrDepth++;
                 std::string addr = emitExpr(inner_e->kids[0].get());
                 m_addrDepth--;
-                // Use (char*) cast for proper byte addressing when addr has pointer arithmetic
                 if (addr.find("_p + ") != std::string::npos || addr.find("_p)") != std::string::npos)
-                    return "*(unsigned char *)(" + addr + ")";
-                return "*(unsigned char *)((char *)" + addr + ")";
-            }
-            if ((e->castKind == CastKind::ZeroExt16 || e->castKind == CastKind::Trunc16) &&
-                inner_e->op == IROp::Load && !inner_e->kids.empty()) {
-                m_addrDepth++;
-                std::string addr = emitExpr(inner_e->kids[0].get());
-                m_addrDepth--;
-                if (addr.find("_p + ") != std::string::npos || addr.find("_p)") != std::string::npos)
-                    return "*(unsigned short *)(" + addr + ")";
-                return "*(unsigned short *)((char *)" + addr + ")";
+                    return std::string("*(") + castType + " *)(" + addr + ")";
+                return std::string("*(") + castType + " *)((char *)" + addr + ")";
             }
             switch (e->castKind) {
             case CastKind::ZeroExt8:   return "(unsigned char)(" + inner + ")";
