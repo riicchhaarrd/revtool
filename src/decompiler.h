@@ -1636,6 +1636,10 @@ public:
                 }
                 // Don't advance pos — re-check in case of nested patterns
             }
+            // Replace __builtin intrinsics with standard library names
+            result.replace("__builtin_memcmp", "memcmp");
+            result.replace("__builtin_memcpy", "memcpy");
+            result.replace("__builtin_memset", "memset");
         }
         return result;
     }

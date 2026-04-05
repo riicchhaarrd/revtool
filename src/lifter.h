@@ -1877,7 +1877,10 @@ private:
                 if (p[i] == '"') s += "\\\"";
                 else if (p[i] == '\\') s += "\\\\";
                 else s += (char)p[i];
-            } else { char b[8]; snprintf(b, 8, "\\x%02X", p[i]); s += b; }
+            } else if (p[i] == '\n') { s += "\\n"; }
+              else if (p[i] == '\t') { s += "\\t"; }
+              else if (p[i] == '\r') { s += "\\r"; }
+              else { char b[8]; snprintf(b, 8, "\\x%02X", p[i]); s += b; }
         }
         // Empty string (just NUL byte) is still a valid string literal
         if (s.empty() && p && p[0] == 0) return "\"\"";
