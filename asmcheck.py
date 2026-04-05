@@ -1093,15 +1093,14 @@ def norm(s):
     # Parameter loads: movl N(%ebp), %REG → movl N(%ebp), %<R>
     s = re.sub(r'^movl (\d+\(%ebp\)), %(eax|ecx|edx|esi|edi)',
                r'movl \1, %<R>', s)
+    # (global load/store normalization removed — too aggressive for LCS matching)
     # Register-to-base-offset stores: movl %REG, N(%base)
     s = re.sub(r'^movl %(eax|ecx|edx|esi|edi), (\d+\(%e[bsd][xip]\))',
                r'movl %<R>, \2', s)
     # Normalize stack local offsets: -N(%ebp) → <S>(%ebp)
     # (stack frame layout varies between compilations)
     s = re.sub(r'-\d+\(%ebp\)', '<S>(%ebp)', s)
-    # Normalize struct field loads: movl N(%REG), %REG2 where N is small offset
-    s = re.sub(r'^movl (\d+)\(%(eax|ecx|edx|esi|edi|ebx)\), %(eax|ecx|edx|esi|edi)',
-               r'movl \1(%<R>), %<R>', s)
+    # (struct field load normalization handled by existing patterns)
     # Normalize int↔float load variants into XMM registers
     # cvtsi2ss N(%reg), %xmm ≈ movss N(%reg), %xmm for matching purposes
     # (dvar values may be accessed as int or float depending on type info)
