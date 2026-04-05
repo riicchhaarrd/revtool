@@ -3858,8 +3858,7 @@ private:
 
             case IROp::Load: {
                 auto *addr = e->kids[0].get();
-                if (e->loadSize == 5 || e->loadSize == 9)
-                m_addrDepth++;
+                struct LoadDepthGuard { int &d; LoadDepthGuard(int &d):d(d){d++;} ~LoadDepthGuard(){d--;} } _ldg(m_addrDepth);
                 // (base + index*scale + const) → base->array_NN[index] pattern
                 if (addr && addr->op == IROp::Add && addr->kids.size() == 2 &&
                     addr->kids[1]->isConst() && addr->kids[1]->value > 0 &&
@@ -4168,7 +4167,7 @@ private:
                     else
                         result = std::string("*(") + lct + " *)((char *)(" + addrStr + "))";
                 }
-                m_addrDepth--;
+                // m_addrDepth decremented by LoadDepthGuard RAII
                 break;
             }
 
