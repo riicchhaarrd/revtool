@@ -5195,14 +5195,34 @@ private:
                 if (e->op == IROp::Temp) {
                     auto it = m_cosmeticTypes.find(e->tempId());
                     if (it != m_cosmeticTypes.end()) return it->second;
-                    // Follow temp → copy-propagated var name → global type
+                    // Follow temp → copy-propagated var name → type from params/locals/globals
                     auto cit = m_copyMap.find(e->tempId());
                     if (cit != m_copyMap.end()) {
                         auto vit = m_cosmeticVarTypes.find(cit->second);
                         if (vit != m_cosmeticVarTypes.end()) return vit->second;
+                        // Prefer params/locals over globals (params have semantic type)
+                        for (auto &p : m_func.params)
+                            if (p.name == cit->second && p.typeRef != NullType && m_types.isValidType(p.typeRef))
+                                return p.typeRef;
+                        for (auto &l : m_func.locals)
+                            if (l.name == cit->second && l.typeRef != NullType && m_types.isValidType(l.typeRef))
+                                return l.typeRef;
                         auto *gn = m_types.globalByName(cit->second);
                         if (gn && gn->typeRef != NullType && m_types.isValidType(gn->typeRef))
                             return gn->typeRef;
+                    }
+                    // Also check tempToVar → param/local name
+                    auto tvit = m_func.tempToVar.find(e->tempId());
+                    if (tvit != m_func.tempToVar.end()) {
+                        auto nit = m_func.varNames.find(tvit->second);
+                        if (nit != m_func.varNames.end()) {
+                            for (auto &p : m_func.params)
+                                if (p.name == nit->second && p.typeRef != NullType && m_types.isValidType(p.typeRef))
+                                    return p.typeRef;
+                            for (auto &l : m_func.locals)
+                                if (l.name == nit->second && l.typeRef != NullType && m_types.isValidType(l.typeRef))
+                                    return l.typeRef;
+                        }
                     }
                 }
                 if (e->op == IROp::Var && !e->name.empty()) {
@@ -5227,16 +5247,30 @@ private:
             // Also: Assign(temp, Var(global)) → propagate global type to temp
             for (auto &bb : m_func.blocks) {
                 for (auto &stmt : bb.stmts) {
-                    // VarSet("globalName", expr) — the expr's temp gets the global's type
+                    // VarSet("name", expr) — propagate dest's type to the source temp
                     if (stmt.kind == IRStmtKind::VarSet && stmt.expr && !stmt.destVar.empty()) {
+                        TypeRef destType = NullType;
+                        // Check globals
                         auto *gn = m_types.globalByName(stmt.destVar);
-                        if (gn && gn->typeRef != NullType && m_types.isValidType(gn->typeRef) &&
-                            m_types.isStructPointer(gn->typeRef)) {
-                            // Propagate to the source expression's temp
-                            if (stmt.expr->op == IROp::Temp)
-                                m_cosmeticTypes[stmt.expr->tempId()] = gn->typeRef;
-                            // Also propagate to the global var name for subsequent uses
-                            m_cosmeticVarTypes[stmt.destVar] = gn->typeRef;
+                        if (gn && gn->typeRef != NullType && m_types.isValidType(gn->typeRef))
+                            destType = gn->typeRef;
+                        // Check params/locals (prefer pointer types for backward propagation)
+                        if (destType == NullType || !m_types.isStructPointer(destType)) {
+                            for (auto &p : m_func.params) {
+                                if (p.name == stmt.destVar && p.typeRef != NullType && m_types.isValidType(p.typeRef)) {
+                                    auto *pt = m_types.resolveType(p.typeRef);
+                                    if (pt && pt->kind == StabsTypeKind::Pointer) destType = p.typeRef;
+                                    break;
+                                }
+                            }
+                        }
+                        if (destType != NullType && m_types.isValidType(destType)) {
+                            auto *dt = m_types.resolveType(destType);
+                            if (dt && dt->kind == StabsTypeKind::Pointer) {
+                                if (stmt.expr->op == IROp::Temp)
+                                    m_cosmeticTypes[stmt.expr->tempId()] = destType;
+                                m_cosmeticVarTypes[stmt.destVar] = destType;
+                            }
                         }
                     }
                     // Store(Var/Temp, val) to a struct pointer global → record the type
