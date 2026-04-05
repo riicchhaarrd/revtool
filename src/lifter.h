@@ -784,7 +784,7 @@ public:
                 bbB.succs.clear();
                 continue;
             }
-            // Case 2: BB_B has multiple statements — jp elimination not safe in general
+            // Case 2: BB_B has multiple statements — jp not safe to eliminate here
         }
 
 
