@@ -494,19 +494,38 @@ public:
                             return f.name + "[0][0]";
                     }
                 }
-                // If this field is a struct, the code might be accessing its first sub-field.
-                // We drill down one level if the struct has a known scalar first field.
+                // If this field is a struct/union, drill down to a sub-field.
+                // For unions, try to pick the member that best matches the access.
                 auto *ft = resolveType(f.typeRef);
                 if (ft && (ft->kind == StabsTypeKind::Struct || ft->kind == StabsTypeKind::Union) &&
                     !ft->fields.empty()) {
-                    auto *firstField = &ft->fields[0];
-                    auto *firstType = resolveType(firstField->typeRef);
-                    // Only drill if first field is a simple scalar (not another struct)
-                    if (firstType && firstType->kind != StabsTypeKind::Struct &&
-                        firstType->kind != StabsTypeKind::Union &&
-                        firstType->kind != StabsTypeKind::Array &&
-                        firstField->bitOffset == 0 && !firstField->name.empty()) {
-                        return f.name + "." + firstField->name;
+                    if (ft->kind == StabsTypeKind::Union) {
+                        // For unions, prefer the first scalar that matches common sizes:
+                        // 4 bytes → int (over Bool), float matches too
+                        const StabsTypeField *best = nullptr;
+                        for (auto &uf : ft->fields) {
+                            if (uf.name.empty() || uf.bitOffset != 0) continue;
+                            auto *ut = resolveType(uf.typeRef);
+                            if (!ut) continue;
+                            if (ut->kind == StabsTypeKind::Struct || ut->kind == StabsTypeKind::Union ||
+                                ut->kind == StabsTypeKind::Array) continue;
+                            if (!best) { best = &uf; continue; }
+                            auto *bestT = resolveType(best->typeRef);
+                            // Prefer larger scalars (int over Bool) for general access
+                            if (bestT && ut->sizeBytes > bestT->sizeBytes) best = &uf;
+                        }
+                        if (best && !best->name.empty())
+                            return f.name + "." + best->name;
+                    } else {
+                        auto *firstField = &ft->fields[0];
+                        auto *firstType = resolveType(firstField->typeRef);
+                        // Only drill if first field is a simple scalar (not another struct)
+                        if (firstType && firstType->kind != StabsTypeKind::Struct &&
+                            firstType->kind != StabsTypeKind::Union &&
+                            firstType->kind != StabsTypeKind::Array &&
+                            firstField->bitOffset == 0 && !firstField->name.empty()) {
+                            return f.name + "." + firstField->name;
+                        }
                     }
                 }
                 // If field is an array, accessing at its base offset = first element
