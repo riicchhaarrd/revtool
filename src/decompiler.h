@@ -3526,7 +3526,9 @@ private:
                     if (dt && dt->kind == StabsTypeKind::Array)
                         dest += "[0]";
                     // If dest is a struct/union and value is a scalar, cast the store
-                    if (dt && (dt->kind == StabsTypeKind::Struct || dt->kind == StabsTypeKind::Union)) {
+                    // But respect storeSize — sub-word stores need proper width cast
+                    if (dt && (dt->kind == StabsTypeKind::Struct || dt->kind == StabsTypeKind::Union) &&
+                        stmt.storeSize != 2 && stmt.storeSize != 1) {
                         if (s_cosmeticMode) {
                             // Cosmetic: simple assignment for readability
                             out += pad(indent) + QString::fromStdString(
