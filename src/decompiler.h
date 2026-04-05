@@ -1532,7 +1532,7 @@ public:
                 // before the closing "}" of the function (at brace depth 1→0)
                 for (int i = pass1.size() - 1; i >= 0; --i) {
                     QString trimmed = pass1[i].trimmed();
-                    if (trimmed == "}") continue;
+                    if (trimmed == "}" || trimmed.isEmpty()) continue;
                     if (trimmed == "return;") {
                         pass1.removeAt(i);
                     }
@@ -1592,6 +1592,23 @@ public:
             }
             pass2.append(pass1[i]);
         }
+        // Remove unused labels (label defined but no goto references it)
+        {
+            QStringList p3;
+            for (int i = 0; i < pass2.size(); ++i) {
+                QString t = pass2[i].trimmed();
+                if (t.endsWith(':') && t.startsWith("bb_")) {
+                    QString label = t.chopped(1); // remove ':'
+                    bool used = false;
+                    for (auto &line : pass2) {
+                        if (line.contains("goto " + label)) { used = true; break; }
+                    }
+                    if (!used) continue; // skip unused label
+                }
+                p3.append(pass2[i]);
+            }
+            pass2 = p3;
+        }
         QString result;
         for (auto &l : pass2) result += l + '\n';
         // Cosmetic mode: simplify redundant (char *) casts and pointer dereferences
@@ -1640,6 +1657,33 @@ public:
             result.replace("__builtin_memcmp", "memcmp");
             result.replace("__builtin_memcpy", "memcpy");
             result.replace("__builtin_memset", "memset");
+            // Strip redundant truncation casts in assignments: "field = (short)(expr)" → "field = expr"
+            // The assignment to a narrower field does implicit truncation in C
+            for (auto &cast : {"= (short)(", "= (unsigned char)(", "= (char)("}) {
+                QString qc = QString(cast);
+                int pos = 0;
+                while ((pos = result.indexOf(qc, pos)) != -1) {
+                    int castStart = pos + 2; // skip "= "
+                    int innerStart = castStart + qc.size() - 2; // position after "(short)("
+                    // Find matching close paren
+                    int depth = 1;
+                    int end = innerStart;
+                    while (end < result.size() && depth > 0) {
+                        if (result[end] == '(') depth++;
+                        else if (result[end] == ')') depth--;
+                        end++;
+                    }
+                    // end is just past the closing )
+                    // Replace "= (short)(EXPR)" with "= EXPR"
+                    if (depth == 0) {
+                        // Remove the cast wrapper and trailing )
+                        result.remove(end - 1, 1); // remove closing )
+                        result.remove(castStart, qc.size() - 2); // remove "(short)("
+                        continue;
+                    }
+                    pos++;
+                }
+            }
         }
         return result;
     }
