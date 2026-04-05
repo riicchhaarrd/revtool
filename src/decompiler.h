@@ -3151,7 +3151,6 @@ private:
                 break;
             }
             case IRStmtKind::Store: {
-                // (debug removed)
                 std::string val = stmt.expr ? emitExpr(stmt.expr.get()) : "0";
                 // When storing from an array variable, use [0] to get first element
                 if (stmt.expr && stmt.expr->op == IROp::Var && stmt.expr->typeRef != NullType) {
@@ -3168,7 +3167,6 @@ private:
                 else if (stmt.storeSize == 5) storeCast = "float";
                 else if (stmt.storeSize == 9) storeCast = "double";
                 // Field expression → base->field = val
-                // (debug removed)
                 if (a->op == IROp::Field) {
                     // Check if the Field base is an interior pointer (temp from Add(structPtr, const)).
                     // If so, fold back to the original struct base with combined offset.
@@ -3216,7 +3214,6 @@ private:
                          a->kids[1]->isConst() && a->kids[1]->value > 0 &&
                          a->kids[1]->value < 0x10000 &&
                          (a->kids[0]->op == IROp::Var || a->kids[0]->op == IROp::Temp)) {
-                    // (debug removed)
                     std::string base = emitExpr(a->kids[0].get());
                     int off = (int)a->kids[1]->value;
                     // Check for scalar pointer types → use array notation
@@ -3224,7 +3221,6 @@ private:
                     {
                         TypeRef baseType = s_cosmeticMode ? safeExprType(a->kids[0].get())
                                                           : exprType(a->kids[0].get());
-                        // (debug removed)
                         // Try resolving from var/temp names back to params/locals
                         if (baseType == NullType) {
                             std::string baseName;
@@ -3298,10 +3294,6 @@ private:
                         // Skip for interior pointers (vars from &struct->field)
                         TypeRef stBaseType = s_cosmeticMode ? safeExprType(a->kids[0].get())
                                                             : exprType(a->kids[0].get());
-                        if (s_cosmeticMode && base.find("cmd_functions") != std::string::npos)
-                            fprintf(stderr, "STORE-FLD: base=%s stBaseType=(%d,%d) isPtr=%d kid0op=%d\n",
-                                    base.c_str(), stBaseType.first, stBaseType.second,
-                                    m_types.isStructPointer(stBaseType), (int)a->kids[0]->op);
                         bool stIsInterior = false;
                         if (a->kids[0]->op == IROp::Var && !a->kids[0]->name.empty())
                             stIsInterior = m_interiorPtrVars.count(a->kids[0]->name) > 0;
@@ -3319,7 +3311,6 @@ private:
                             }
                         }
                         std::string access;
-                        // (debug removed)
                         if (!stIsInterior && stBaseType != NullType && m_types.isStructPointer(stBaseType)) {
                             TypeRef structRef = m_types.getPointedStruct(stBaseType);
                             if (structRef != NullType)
