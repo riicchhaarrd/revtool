@@ -3108,6 +3108,7 @@ private:
                 else if (stmt.storeSize == 5) storeCast = "float";
                 else if (stmt.storeSize == 9) storeCast = "double";
                 // Field expression → base->field = val
+                // (debug removed)
                 if (a->op == IROp::Field) {
                     // Check if the Field base is an interior pointer (temp from Add(structPtr, const)).
                     // If so, fold back to the original struct base with combined offset.
@@ -3233,6 +3234,27 @@ private:
                         // Try type-aware struct field access
                         // Skip for interior pointers (vars from &struct->field)
                         TypeRef stBaseType = exprType(a->kids[0].get());
+                        // Cosmetic: if exprType returned an invalid ref, try global lookup
+                        if (s_cosmeticMode && !m_types.isStructPointer(stBaseType)) {
+                            std::string gname;
+                            if (a->kids[0]->op == IROp::Var && !a->kids[0]->name.empty())
+                                gname = a->kids[0]->name;
+                            else if (a->kids[0]->op == IROp::Temp) {
+                                // Follow temp def to find source Var
+                                auto dit = m_tempDef.find(a->kids[0]->tempId());
+                                if (dit != m_tempDef.end() && dit->second &&
+                                    dit->second->op == IROp::Var)
+                                    gname = dit->second->name;
+                            }
+                            if (!gname.empty()) {
+                                auto *gn = m_types.globalByName(gname);
+                                if (gn && gn->typeRef != NullType) {
+                                    auto *gt = m_types.resolveType(gn->typeRef);
+                                    if (gt && gt->kind == StabsTypeKind::Pointer)
+                                        stBaseType = gn->typeRef;
+                                }
+                            }
+                        }
                         bool stIsInterior = false;
                         if (a->kids[0]->op == IROp::Var && !a->kids[0]->name.empty())
                             stIsInterior = m_interiorPtrVars.count(a->kids[0]->name) > 0;
@@ -3250,6 +3272,7 @@ private:
                             }
                         }
                         std::string access;
+                        // (debug removed)
                         if (!stIsInterior && stBaseType != NullType && m_types.isStructPointer(stBaseType)) {
                             TypeRef structRef = m_types.getPointedStruct(stBaseType);
                             if (structRef != NullType)
@@ -3348,8 +3371,38 @@ private:
                 }
                 // General Add/Sub expression → *(type *)((char *)(expr)) = val
                 else if ((a->op == IROp::Add || a->op == IROp::Sub) && a->kids.size() == 2) {
-                    out += pad(indent) + QString::fromStdString(
-                        "*(" + storeCast + " *)((char *)(" + emitExpr(a) + ")) = " + val) + ";\n";
+                    // Cosmetic: try struct field resolution for Add(globalVar, const)
+                    bool resolved = false;
+                    if (s_cosmeticMode && a->op == IROp::Add &&
+                        a->kids[1]->isConst() && a->kids[1]->value > 0) {
+                        // Find the base variable name (Var or Temp→Var)
+                        std::string gname;
+                        IRExpr *base0 = a->kids[0].get();
+                        if (base0->op == IROp::Var) gname = base0->name;
+                        else if (base0->op == IROp::Temp) {
+                            auto dit = m_tempDef.find(base0->tempId());
+                            if (dit != m_tempDef.end() && dit->second && dit->second->op == IROp::Var)
+                                gname = dit->second->name;
+                        }
+                        if (!gname.empty()) {
+                            auto *gn = m_types.globalByName(gname);
+                            if (gn && gn->typeRef != NullType && m_types.isStructPointer(gn->typeRef)) {
+                                TypeRef structRef = m_types.getPointedStruct(gn->typeRef);
+                                if (structRef != NullType) {
+                                    int off = (int)a->kids[1]->value;
+                                    std::string access = m_types.formatFieldAccess(structRef, off);
+                                    if (!access.empty()) {
+                                        out += pad(indent) + QString::fromStdString(
+                                            gname + "->" + access + " = " + val) + ";\n";
+                                        resolved = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if (!resolved)
+                        out += pad(indent) + QString::fromStdString(
+                            "*(" + storeCast + " *)((char *)(" + emitExpr(a) + ")) = " + val) + ";\n";
                 }
                 else if (a->op == IROp::Var || a->op == IROp::Temp) {
                     std::string addrS = emitExpr(a);
