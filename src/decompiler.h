@@ -1925,6 +1925,7 @@ private:
             // Force-declare temps whose def and use are in different blocks
             // (cross-block inlining is unsafe because the defining expr's context may differ)
             forceDeclCrossBlockTemps();
+            buildCosmeticTypeMap();
         }
 
         QString generate(StructNode *root) {
@@ -2515,6 +2516,8 @@ private:
         std::set<int>         m_inliningTemps;    // cycle guard for temp inlining in emitExpr
         int                   m_addrDepth = 0;     // >0 when emitting Load/Store address sub-exprs
         std::set<int>         m_loadAddrTemps;    // temps used in Load address expressions
+        std::map<int, TypeRef> m_cosmeticTypes;    // cosmetic: inferred types for temps/vars
+        std::map<std::string, TypeRef> m_cosmeticVarTypes; // cosmetic: inferred types for named vars
 
         // Force temps with cross-block def/use to be declared (not inlined)
         void forceDeclCrossBlockTemps() {
@@ -3147,6 +3150,7 @@ private:
                 break;
             }
             case IRStmtKind::Store: {
+                // (debug removed)
                 std::string val = stmt.expr ? emitExpr(stmt.expr.get()) : "0";
                 // When storing from an array variable, use [0] to get first element
                 if (stmt.expr && stmt.expr->op == IROp::Var && stmt.expr->typeRef != NullType) {
@@ -3211,12 +3215,15 @@ private:
                          a->kids[1]->isConst() && a->kids[1]->value > 0 &&
                          a->kids[1]->value < 0x10000 &&
                          (a->kids[0]->op == IROp::Var || a->kids[0]->op == IROp::Temp)) {
+                    // (debug removed)
                     std::string base = emitExpr(a->kids[0].get());
                     int off = (int)a->kids[1]->value;
                     // Check for scalar pointer types → use array notation
                     bool usedArrayNotation = false;
                     {
-                        TypeRef baseType = exprType(a->kids[0].get());
+                        TypeRef baseType = s_cosmeticMode ? safeExprType(a->kids[0].get())
+                                                          : exprType(a->kids[0].get());
+                        // (debug removed)
                         // Try resolving from var/temp names back to params/locals
                         if (baseType == NullType) {
                             std::string baseName;
@@ -3288,28 +3295,12 @@ private:
                         else {
                         // Try type-aware struct field access
                         // Skip for interior pointers (vars from &struct->field)
-                        TypeRef stBaseType = exprType(a->kids[0].get());
-                        // Cosmetic: if exprType returned an invalid ref, try global lookup
-                        if (s_cosmeticMode && !m_types.isStructPointer(stBaseType)) {
-                            std::string gname;
-                            if (a->kids[0]->op == IROp::Var && !a->kids[0]->name.empty())
-                                gname = a->kids[0]->name;
-                            else if (a->kids[0]->op == IROp::Temp) {
-                                // Follow temp def to find source Var
-                                auto dit = m_tempDef.find(a->kids[0]->tempId());
-                                if (dit != m_tempDef.end() && dit->second &&
-                                    dit->second->op == IROp::Var)
-                                    gname = dit->second->name;
-                            }
-                            if (!gname.empty()) {
-                                auto *gn = m_types.globalByName(gname);
-                                if (gn && gn->typeRef != NullType) {
-                                    auto *gt = m_types.resolveType(gn->typeRef);
-                                    if (gt && gt->kind == StabsTypeKind::Pointer)
-                                        stBaseType = gn->typeRef;
-                                }
-                            }
-                        }
+                        TypeRef stBaseType = s_cosmeticMode ? safeExprType(a->kids[0].get())
+                                                            : exprType(a->kids[0].get());
+                        if (s_cosmeticMode && base.find("cmd_functions") != std::string::npos)
+                            fprintf(stderr, "STORE-FLD: base=%s stBaseType=(%d,%d) isPtr=%d kid0op=%d\n",
+                                    base.c_str(), stBaseType.first, stBaseType.second,
+                                    m_types.isStructPointer(stBaseType), (int)a->kids[0]->op);
                         bool stIsInterior = false;
                         if (a->kids[0]->op == IROp::Var && !a->kids[0]->name.empty())
                             stIsInterior = m_interiorPtrVars.count(a->kids[0]->name) > 0;
@@ -3461,7 +3452,7 @@ private:
                 }
                 else if (a->op == IROp::Var || a->op == IROp::Temp) {
                     std::string addrS = emitExpr(a);
-                    TypeRef at = exprType(a);
+                    TypeRef at = s_cosmeticMode ? safeExprType(a) : exprType(a);
                     auto *atInfo = (at != NullType) ? m_types.resolveType(at) : nullptr;
                     if (atInfo && atInfo->kind == StabsTypeKind::Pointer) {
                         auto *tgt = m_types.resolveType(atInfo->targetType);
@@ -3994,7 +3985,8 @@ private:
                         }
                     }
                     // Try type-aware struct field access
-                    TypeRef baseType = exprType(addr->kids[0].get());
+                    TypeRef baseType = s_cosmeticMode ? safeExprType(addr->kids[0].get())
+                                                      : exprType(addr->kids[0].get());
                     // For untyped expressions, try resolving type from STABS globals.
                     // Handles two patterns:
                     //   Load(Add(Var("global_ptr"), offset)) → global_ptr->field
@@ -4130,7 +4122,7 @@ private:
                 // For pointer types, this just reads the pointer value — no field access.
                 // Field access only happens at Load(Add(Var, Const(offset))) above.
                 else if (addr && (addr->op == IROp::Var || addr->op == IROp::Temp)) {
-                    TypeRef addrType = exprType(addr);
+                    TypeRef addrType = s_cosmeticMode ? safeExprType(addr) : exprType(addr);
                     if (addrType != NullType) {
                         auto *at = m_types.resolveType(addrType);
                         if (at && at->kind == StabsTypeKind::Pointer) {
@@ -5193,6 +5185,134 @@ private:
                     if (l.name == e->name && l.typeRef != NullType) return l.typeRef;
             }
             return NullType;
+        }
+
+        // Cosmetic-safe type lookup: validates typeRef, checks inferred types
+        TypeRef safeExprType(IRExpr *e) const {
+            if (!e) return NullType;
+            // In cosmetic mode, prefer inferred struct pointer types over generic types
+            if (s_cosmeticMode) {
+                if (e->op == IROp::Temp) {
+                    auto it = m_cosmeticTypes.find(e->tempId());
+                    if (it != m_cosmeticTypes.end()) return it->second;
+                    // Follow temp → copy-propagated var name → global type
+                    auto cit = m_copyMap.find(e->tempId());
+                    if (cit != m_copyMap.end()) {
+                        auto vit = m_cosmeticVarTypes.find(cit->second);
+                        if (vit != m_cosmeticVarTypes.end()) return vit->second;
+                        auto *gn = m_types.globalByName(cit->second);
+                        if (gn && gn->typeRef != NullType && m_types.isValidType(gn->typeRef))
+                            return gn->typeRef;
+                    }
+                }
+                if (e->op == IROp::Var && !e->name.empty()) {
+                    auto it = m_cosmeticVarTypes.find(e->name);
+                    if (it != m_cosmeticVarTypes.end()) return it->second;
+                    // Also check globals
+                    auto *gn = m_types.globalByName(e->name);
+                    if (gn && gn->typeRef != NullType && m_types.isValidType(gn->typeRef))
+                        return gn->typeRef;
+                }
+            }
+            // Fall back to normal exprType with validation
+            TypeRef t = exprType(e);
+            if (t != NullType && !m_types.isValidType(t)) return NullType;
+            return t;
+        }
+
+        // Build cosmetic type inference map: propagate types from assignments/globals
+        void buildCosmeticTypeMap() {
+            if (!s_cosmeticMode) return;
+            // Pass 1: VarSet(global, temp) → propagate global type to temp
+            // Also: Assign(temp, Var(global)) → propagate global type to temp
+            for (auto &bb : m_func.blocks) {
+                for (auto &stmt : bb.stmts) {
+                    // VarSet("globalName", expr) — the expr's temp gets the global's type
+                    if (stmt.kind == IRStmtKind::VarSet && stmt.expr && !stmt.destVar.empty()) {
+                        auto *gn = m_types.globalByName(stmt.destVar);
+                        if (gn && gn->typeRef != NullType && m_types.isValidType(gn->typeRef) &&
+                            m_types.isStructPointer(gn->typeRef)) {
+                            // Propagate to the source expression's temp
+                            if (stmt.expr->op == IROp::Temp)
+                                m_cosmeticTypes[stmt.expr->tempId()] = gn->typeRef;
+                            // Also propagate to the global var name for subsequent uses
+                            m_cosmeticVarTypes[stmt.destVar] = gn->typeRef;
+                        }
+                    }
+                    // Store(Var/Temp, val) to a struct pointer global → record the type
+                    if (stmt.kind == IRStmtKind::Store && stmt.addr) {
+                        if (stmt.addr->op == IROp::Var && !stmt.addr->name.empty()) {
+                            auto *gn = m_types.globalByName(stmt.addr->name);
+                            if (gn && gn->typeRef != NullType && m_types.isValidType(gn->typeRef))
+                                m_cosmeticVarTypes[stmt.addr->name] = gn->typeRef;
+                        }
+                    }
+                    // Assign(temp, expr) where expr is Var(global) or Call → propagate
+                    if (stmt.kind == IRStmtKind::Assign && stmt.expr && stmt.destTemp >= 0) {
+                        if (stmt.expr->op == IROp::Var && !stmt.expr->name.empty()) {
+                            auto *gn = m_types.globalByName(stmt.expr->name);
+                            if (gn && gn->typeRef != NullType && m_types.isValidType(gn->typeRef))
+                                m_cosmeticTypes[stmt.destTemp] = gn->typeRef;
+                        }
+                    }
+                }
+            }
+            // Pass 2: Transitive propagation: Assign(t2, Temp(t1)) inherits t1's type
+            // Also: VarSet(name, Temp(t)) and Store(Temp(t), ...) — propagate temp type to var
+            bool changed = true;
+            for (int iter = 0; iter < 5 && changed; ++iter) {
+                changed = false;
+                for (auto &bb : m_func.blocks) {
+                    for (auto &stmt : bb.stmts) {
+                        if (stmt.kind == IRStmtKind::Assign && stmt.expr && stmt.destTemp >= 0 &&
+                            !m_cosmeticTypes.count(stmt.destTemp)) {
+                            if (stmt.expr->op == IROp::Temp) {
+                                auto it = m_cosmeticTypes.find(stmt.expr->tempId());
+                                if (it != m_cosmeticTypes.end()) {
+                                    m_cosmeticTypes[stmt.destTemp] = it->second;
+                                    changed = true;
+                                }
+                            }
+                        }
+                        // Backward: VarSet(name, temp) where name has cosmetic type → propagate to temp
+                        if (stmt.kind == IRStmtKind::VarSet && stmt.expr &&
+                            stmt.expr->op == IROp::Temp && !stmt.destVar.empty()) {
+                            auto vit = m_cosmeticVarTypes.find(stmt.destVar);
+                            if (vit != m_cosmeticVarTypes.end() &&
+                                !m_cosmeticTypes.count(stmt.expr->tempId())) {
+                                m_cosmeticTypes[stmt.expr->tempId()] = vit->second;
+                                changed = true;
+                            }
+                        }
+                    }
+                }
+            }
+            // Pass 3: Fix C++ 'this' pointer type from function name
+            for (auto &p : m_func.params) {
+                if (p.name != "this") continue;
+                if (p.typeRef != NullType && m_types.isValidType(p.typeRef)) break;
+                // Extract class name from "ClassName::Method" or "CClassName_Method"
+                size_t sep = m_func.name.find("::");
+                std::string className;
+                if (sep != std::string::npos)
+                    className = m_func.name.substr(0, sep);
+                else if (m_func.name.size() > 2 && m_func.name[0] == 'C') {
+                    // Try CClassName_Method pattern
+                    size_t us = m_func.name.find('_');
+                    if (us != std::string::npos)
+                        className = m_func.name.substr(0, us);
+                }
+                if (className.empty()) break;
+                for (auto &[tref, ti] : m_types.allTypes()) {
+                    if ((ti.kind == StabsTypeKind::Struct || ti.kind == StabsTypeKind::Union) &&
+                        ti.name == className && !ti.fields.empty()) {
+                        TypeRef ptrType = m_types.findPointerTo(tref);
+                        if (ptrType != NullType) p.typeRef = ptrType;
+                        break;
+                    }
+                }
+                break;
+            }
         }
 
         // Negate a comparison op

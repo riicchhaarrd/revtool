@@ -586,6 +586,24 @@ public:
         return t && t->kind == StabsTypeKind::Enum;
     }
 
+    // Check if a TypeRef resolves to a valid type (not NullType and getType returns non-null)
+    bool isValidType(TypeRef ref) const {
+        if (ref == NullType) return false;
+        return getType(ref) != nullptr;
+    }
+
+    // Find a pointer-to-struct TypeRef given a struct TypeRef
+    TypeRef findPointerTo(TypeRef structRef) const {
+        auto resolved = resolveTypeRef(structRef);
+        for (auto &[tref, ti] : m_types) {
+            if (ti.kind != StabsTypeKind::Pointer) continue;
+            if (ti.targetType == structRef || ti.targetType == resolved ||
+                resolveTypeRef(ti.targetType) == resolved)
+                return tref;
+        }
+        return NullType;
+    }
+
     // Check if a type is a pointer to a struct
     bool isStructPointer(TypeRef ref) const {
         auto *t = resolveType(ref);
