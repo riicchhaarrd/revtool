@@ -1614,6 +1614,8 @@ private:
                                     return IRExpr::mkField(std::move(base), access, (int)goff, ft);
                                 }
                             }
+                            // Array types: keep the (globalName + offset) form
+                            // The nearest symbol name is already readable
                         }
                     }
                 }
