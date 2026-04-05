@@ -788,6 +788,42 @@ public:
         }
 
 
+        // ── Pass 6a: bypass empty blocks ──────────────────────────────
+        // After pass 6 clears jp blocks, some empty blocks remain as
+        // intermediaries. Redirect branches that target empty blocks to
+        // the empty block's sole successor.
+        {
+            // Build successor map for empty blocks
+            std::map<int, int> emptySucc;
+            for (int bi = 0; bi < (int)func.blocks.size(); ++bi) {
+                auto &bb = func.blocks[bi];
+                if (!bb.stmts.empty()) continue;
+                if (bb.succs.size() == 1)
+                    emptySucc[bi] = bb.succs[0];
+                else if (bb.succs.empty() && bi + 1 < (int)func.blocks.size())
+                    emptySucc[bi] = bi + 1; // fallthrough to next block
+            }
+            // Follow chains: if an empty block points to another empty block
+            for (auto &[src, dst] : emptySucc) {
+                int d = dst;
+                for (int i = 0; i < 5 && emptySucc.count(d); ++i) d = emptySucc[d];
+                emptySucc[src] = d;
+            }
+            // Redirect all branches targeting empty blocks
+            if (!emptySucc.empty()) {
+                for (auto &bb : func.blocks) {
+                    for (auto &stmt : bb.stmts) {
+                        if (stmt.kind == IRStmtKind::Branch) {
+                            auto it = emptySucc.find(stmt.trueTarget);
+                            if (it != emptySucc.end()) stmt.trueTarget = it->second;
+                            it = emptySucc.find(stmt.falseTarget);
+                            if (it != emptySucc.end()) stmt.falseTarget = it->second;
+                        }
+                    }
+                }
+            }
+        }
+
         // ── Pass 6b: CSE — eliminate duplicate Loads within each block ──
         // When the same memory address is loaded twice in the same block,
         // replace the second Load with a reference to the first temp.
