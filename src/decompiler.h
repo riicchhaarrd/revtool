@@ -1076,6 +1076,7 @@ public:
                 cleaned.replace("*(char *)(" + gname + ")", "*(char *)(" + ptrName + ")");
             }
         }
+        // (NLP pointer caching removed — changing variable count affects GCC register allocation)
         // Simplify redundant double (char *) casts:
         // *(TYPE *)((char *)((char *)X + N)) → *(TYPE *)((char *)X + N)
         cleaned.replace("((char *)((char *)", "((char *)(");

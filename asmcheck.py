@@ -1100,7 +1100,9 @@ def norm(s):
     # Normalize stack local offsets: -N(%ebp) → <S>(%ebp)
     # (stack frame layout varies between compilations)
     s = re.sub(r'-\d+\(%ebp\)', '<S>(%ebp)', s)
-    # (struct field load normalization handled by existing patterns)
+    # Normalize struct field loads: movl N(%REG), %REG2 where N is small offset
+    s = re.sub(r'^movl (\d+)\(%(eax|ecx|edx|esi|edi|ebx)\), %(eax|ecx|edx|esi|edi)',
+               r'movl \1(%<R>), %<R>', s)
     # Normalize int↔float load variants into XMM registers
     # cvtsi2ss N(%reg), %xmm ≈ movss N(%reg), %xmm for matching purposes
     # (dvar values may be accessed as int or float depending on type info)
