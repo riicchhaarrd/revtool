@@ -769,22 +769,22 @@ public:
             if (fallBB < 0 || fallBB >= (int)func.blocks.size()) continue;
 
             auto &bbB = func.blocks[fallBB];
-            // BB_B must have exactly one statement: a Branch
-            if (bbB.stmts.size() != 1) continue;
-            auto &brB = bbB.stmts[0];
-            if (brB.kind != IRStmtKind::Branch) continue;
-
-            // BB_B's fallthrough should be the jp target (NaN skips to same place)
-            if (brB.falseTarget != jpTarget && brB.trueTarget != jpTarget) continue;
-
-            // Merge: replace BB_A's branch with BB_B's branch
-            // Remove the NaN check, keep the real float comparison
-            brA.expr = brB.expr->clone();
-            brA.trueTarget = brB.trueTarget;
-            brA.falseTarget = brB.falseTarget;
-            // Clear BB_B (now dead)
-            bbB.stmts.clear();
-            bbB.succs.clear();
+            if (bbB.stmts.empty()) continue;
+            // Case 1: BB_B has exactly one statement (a Branch) — merge jp with the real comparison
+            if (bbB.stmts.size() == 1 && bbB.stmts[0].kind == IRStmtKind::Branch) {
+                auto &brB = bbB.stmts[0];
+                // BB_B's fallthrough should be the jp target (NaN skips to same place)
+                if (brB.falseTarget != jpTarget && brB.trueTarget != jpTarget) continue;
+                // Merge: replace BB_A's branch with BB_B's branch
+                brA.expr = brB.expr->clone();
+                brA.trueTarget = brB.trueTarget;
+                brA.falseTarget = brB.falseTarget;
+                // Clear BB_B (now dead)
+                bbB.stmts.clear();
+                bbB.succs.clear();
+                continue;
+            }
+            // Case 2: BB_B has multiple statements — jp elimination not safe in general
         }
 
 
