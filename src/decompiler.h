@@ -1504,6 +1504,13 @@ public:
                 lines[i+1].trimmed() == "}") {
                 ++i; continue;
             }
+            // Remove empty else blocks: "} else {\n}" → "}"
+            if (i + 1 < lines.size() &&
+                lines[i].trimmed() == "} else {" &&
+                lines[i+1].trimmed() == "}") {
+                pass1.append(lines[i+1]); // just the closing }
+                ++i; continue;
+            }
             // Fix: while (cond) { return/break; } → if (cond) { return/break; }
             if (i + 2 < lines.size() &&
                 lines[i].trimmed().startsWith("while (") &&
