@@ -198,15 +198,7 @@ public:
                 { size_t p = 0; while ((p = cname.find("~", p)) != std::string::npos)
                     cname.replace(p, 1, "dtor_"); }
                 std::string retStr = types.formatType(callee->returnType);
-                std::string proto;
-                if (s_portMode) {
-                    // Port mode: use K&R-style declaration (no param types)
-                    // to avoid conflicting types with cod2_types.h prototypes
-                    proto = retStr + " " + cname + "();\n";
-                    out += QString::fromStdString(proto);
-                    continue;
-                }
-                proto = retStr + " " + cname + "(";
+                std::string proto = retStr + " " + cname + "(";
                 if (!callee->params.empty()) {
                     for (size_t p = 0; p < callee->params.size(); ++p) {
                         if (p) proto += ", ";
@@ -223,7 +215,6 @@ public:
                     "NET_OutOfBandPrint", "MSG_WriteString"
                 };
                 if (variadicFuncs.count(calleeName)) {
-                    // Make sure last param is const char* (format), then add ...
                     if (proto.back() != '(' && !callee->params.empty())
                         proto += ", ...";
                     else
@@ -2098,6 +2089,9 @@ private:
                     // Strip const from local declarations (locals may be reassigned)
                     if (decl.substr(0, 6) == "const " && decl.find('*') == std::string::npos)
                         decl = decl.substr(6);
+                    // Replace void (non-pointer) with int — can't have void locals
+                    if (decl.substr(0, 5) == "void " && decl.find('*') == std::string::npos)
+                        decl = "int " + l.name;
                 } else {
                     decl = "int " + l.name;
                 }
@@ -2274,6 +2268,8 @@ private:
                     }
                     // Strip const from temp declarations (temps are always assignable)
                     if (ttype.substr(0, 6) == "const ") ttype = ttype.substr(6);
+                    // Replace void (non-pointer) with int — can't have void locals
+                    if (ttype == "void") ttype = "int";
                     out += "    " + QString::fromStdString(ttype + " " + tname) + ";\n";
                     declared.insert(tname);
                 }
