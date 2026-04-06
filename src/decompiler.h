@@ -225,7 +225,7 @@ public:
                 out += QString::fromStdString(proto);
             }
             if (!emittedProtos.empty()) out += "\n";
-        }
+        } // end cross-CU prototype generation
 
         // Emit forward declarations only for static functions
         // (needed when a static func is referenced before its definition)
