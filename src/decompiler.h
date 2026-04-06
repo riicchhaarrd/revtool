@@ -228,7 +228,8 @@ public:
 
         // Emit forward declarations only for static functions
         // (needed when a static func is referenced before its definition)
-        {
+        // Skip in port mode — types header may have conflicting non-static decl
+        if (!s_portMode) {
             for (size_t fi : sorted) {
                 auto &fn = mf.stabsFunctions()[fi];
                 if (fn.address == 0 || fn.isGlobal) continue; // only static functions
@@ -2042,7 +2043,8 @@ private:
             else if (m_func.returnType != NullType)
                 retType = m_types.formatType(m_func.returnType);
 
-            std::string qual = m_func.isStatic ? "static " : "";
+            // In port mode, skip "static" to avoid conflicts with types header
+            std::string qual = (m_func.isStatic && !s_portMode) ? "static " : "";
             std::string funcName = cName(m_func.name);
             out += QString::fromStdString(qual + retType) + " " +
                    QString::fromStdString(funcName) + "(";
