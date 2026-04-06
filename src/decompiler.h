@@ -2035,7 +2035,9 @@ private:
 
             // Function signature
             std::string retType = "int";
-            if (m_func.detectedVoid)
+            // In port mode, trust STABS return type to avoid conflicting types
+            // with the types header prototype. Void heuristic can disagree.
+            if (m_func.detectedVoid && !s_portMode)
                 retType = "void";
             else if (m_func.returnType != NullType)
                 retType = m_types.formatType(m_func.returnType);
