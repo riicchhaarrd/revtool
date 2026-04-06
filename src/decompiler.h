@@ -1630,9 +1630,12 @@ public:
             int bracePos = -1;
             for (int i = 0; i < pass2.size(); ++i) {
                 QString t = pass2[i].trimmed();
-                if (t == "{" && bracePos < 0) { bracePos = i; continue; }
-                // Collect declarations
-                if (bracePos >= 0 && t.endsWith(';') && !t.contains('=') && !t.contains('(')) {
+                if (t.contains('{') && bracePos < 0) { bracePos = i; continue; }
+                // Collect declarations (TYPE NAME; lines, not statements)
+                if (bracePos >= 0 && t.endsWith(';') && !t.contains('=') && !t.contains('(') &&
+                    !t.startsWith("goto ") && !t.startsWith("return ") && !t.startsWith("break") &&
+                    !t.startsWith("continue") && !t.startsWith("if ") && !t.startsWith("while ") &&
+                    !t.startsWith("for ") && !t.startsWith("switch ") && !t.startsWith("case ")) {
                     int semi = t.lastIndexOf(';');
                     int ne = semi;
                     while (ne > 0 && t[ne-1] == ' ') ne--;
