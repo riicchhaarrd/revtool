@@ -3340,8 +3340,17 @@ private:
                             }
                         }
                         if (!access.empty()) {
+                            // For NLP temps (Temp defined as Load(Var)), use global name directly
+                            std::string fieldBase = base;
+                            if (s_cosmeticMode && a->kids[0]->op == IROp::Temp) {
+                                auto dit = m_tempDef.find(a->kids[0]->tempId());
+                                if (dit != m_tempDef.end() && dit->second &&
+                                    dit->second->op == IROp::Load && !dit->second->kids.empty() &&
+                                    dit->second->kids[0]->op == IROp::Var)
+                                    fieldBase = dit->second->kids[0]->name;
+                            }
                             out += pad(indent) + QString::fromStdString(
-                                base + "->" + access + " = " + val) + ";\n";
+                                fieldBase + "->" + access + " = " + val) + ";\n";
                         } else {
                             char buf[512];
                             snprintf(buf, sizeof(buf), "*(%s *)((char *)%s + 0x%X) = %s",
@@ -3421,25 +3430,39 @@ private:
                 }
                 // General Add/Sub expression → *(type *)((char *)(expr)) = val
                 else if ((a->op == IROp::Add || a->op == IROp::Sub) && a->kids.size() == 2) {
-                    // Cosmetic: try struct field resolution for Add(globalVar, const)
+                    // Cosmetic: try struct field resolution for Add(base, const)
                     bool resolved = false;
-                    if (s_cosmeticMode && a->op == IROp::Add &&
-                        a->kids[1]->isConst() && a->kids[1]->value > 0) {
-                        // Find the base variable name (Var or Temp→Var)
+                    if (s_cosmeticMode && a->op == IROp::Add && a->kids.size() == 2) {
+                        // Determine which child is the const offset and which is the base
+                        IRExpr *base0 = nullptr;
+                        int off = 0;
+                        if (a->kids[1]->isConst() && a->kids[1]->value > 0) {
+                            base0 = a->kids[0].get(); off = (int)a->kids[1]->value;
+                        } else if (a->kids[0]->isConst() && a->kids[0]->value > 0) {
+                            base0 = a->kids[1].get(); off = (int)a->kids[0]->value;
+                        }
+                        // Find the base variable name: Var, Temp→Var, Load(Var) for NLP,
+                        // or Temp→Load(Var) for NLP through temp
                         std::string gname;
-                        IRExpr *base0 = a->kids[0].get();
                         if (base0->op == IROp::Var) gname = base0->name;
                         else if (base0->op == IROp::Temp) {
                             auto dit = m_tempDef.find(base0->tempId());
-                            if (dit != m_tempDef.end() && dit->second && dit->second->op == IROp::Var)
-                                gname = dit->second->name;
+                            if (dit != m_tempDef.end() && dit->second) {
+                                if (dit->second->op == IROp::Var)
+                                    gname = dit->second->name;
+                                else if (dit->second->op == IROp::Load && !dit->second->kids.empty() &&
+                                         dit->second->kids[0]->op == IROp::Var)
+                                    gname = dit->second->kids[0]->name;
+                            }
                         }
+                        else if (base0->op == IROp::Load && !base0->kids.empty() &&
+                                 base0->kids[0]->op == IROp::Var)
+                            gname = base0->kids[0]->name;
                         if (!gname.empty()) {
                             auto *gn = m_types.globalByName(gname);
                             if (gn && gn->typeRef != NullType && m_types.isStructPointer(gn->typeRef)) {
                                 TypeRef structRef = m_types.getPointedStruct(gn->typeRef);
                                 if (structRef != NullType) {
-                                    int off = (int)a->kids[1]->value;
                                     std::string access = m_types.formatFieldAccess(structRef, off);
                                     if (!access.empty()) {
                                         out += pad(indent) + QString::fromStdString(
@@ -5213,6 +5236,18 @@ private:
                         auto *gn = m_types.globalByName(cit->second);
                         if (gn && gn->typeRef != NullType && m_types.isValidType(gn->typeRef))
                             return gn->typeRef;
+                    }
+                    // Follow temp def: Temp = Load(Var("global")) → dereference pointer type
+                    auto tdit = m_tempDef.find(e->tempId());
+                    if (tdit != m_tempDef.end() && tdit->second &&
+                        tdit->second->op == IROp::Load && !tdit->second->kids.empty()) {
+                        IRExpr *inner = tdit->second->kids[0].get();
+                        if (inner && inner->op == IROp::Var && !inner->name.empty()) {
+                            auto *gn = m_types.globalByName(inner->name);
+                            if (gn && gn->typeRef != NullType && m_types.isValidType(gn->typeRef) &&
+                                m_types.isStructPointer(gn->typeRef))
+                                return gn->typeRef; // Return the pointer type (caller uses isStructPointer)
+                        }
                     }
                     // Also check tempToVar → param/local name
                     auto tvit = m_func.tempToVar.find(e->tempId());
