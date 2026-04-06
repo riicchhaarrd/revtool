@@ -288,7 +288,8 @@ public:
 
         // Also scan for named variables used but not declared anywhere
         // (globals resolved from nlist but not in STABS globals table)
-        {
+        // In port mode, skip — globals come from cod2_types.h
+        if (!s_portMode) {
             std::string body = funcBodies.toStdString();
             // Collect all known names (params, locals, globals, functions, types)
             std::set<std::string> knownNames = emittedGlobals;
