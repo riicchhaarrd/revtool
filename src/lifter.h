@@ -602,12 +602,16 @@ public:
             }
         }
 
+        // Save register→temp mapping at each block end for join-point analysis
+        std::map<int, std::map<x86_reg, int>> blockEndRegs;
         int curBlock = 0;
         for (size_t i = 0; i < funcEndIdx; ++i) {
             auto &in = insn[i];
             // Check if this starts a new block
             auto bit = addrToBlock.find(in.address);
             if (bit != addrToBlock.end()) {
+                // Save previous block's register state
+                blockEndRegs[curBlock] = m_regTemps;
                 int prevBlock = curBlock;
                 curBlock = bit->second;
                 // For large functions (30+ blocks): clear stale register state
@@ -714,6 +718,7 @@ public:
             }
             liftInsn(in, func.blocks[curBlock], func, addrToBlock);
         }
+        blockEndRegs[curBlock] = m_regTemps; // save final block's state
 
         // ── Pass 5b: ensure float functions have proper return ───────
         // The ret instruction may fall outside STABS-reported function size.
@@ -913,6 +918,115 @@ public:
                 if (bb.id + 1 < (int)func.blocks.size()) {
                     bb.succs.push_back(bb.id + 1);
                     func.blocks[bb.id + 1].preds.push_back(bb.id);
+                }
+            }
+        }
+
+        // ── Pass 7b: fix XMM register conflicts at join points ─────
+        // When a block has 2+ predecessors that write DIFFERENT temps to the
+        // same XMM register, and the join block reads that register, the linear
+        // processing order causes only one predecessor's temp to be visible.
+        // Fix: for each such conflict, convert the Assign to a VarSet to a shared
+        // local in ALL predecessors, and rewrite the join block's use.
+        {
+            for (auto &bb : func.blocks) {
+                if (bb.preds.size() < 2) continue;
+                // For each XMM register (XMM0-XMM7), check if predecessors
+                // have different temps at block end
+                for (int xr = X86_REG_XMM0; xr <= X86_REG_XMM7; ++xr) {
+                    x86_reg reg = (x86_reg)xr;
+                    std::map<int, int> predTempForReg; // predId → temp for this reg
+                    bool hasConflict = false;
+                    int firstTemp = -1;
+                    for (int pid : bb.preds) {
+                        auto bit = blockEndRegs.find(pid);
+                        if (bit == blockEndRegs.end()) continue;
+                        auto rit = bit->second.find(reg);
+                        if (rit == bit->second.end()) continue;
+                        predTempForReg[pid] = rit->second;
+                        if (firstTemp < 0) firstTemp = rit->second;
+                        else if (rit->second != firstTemp) hasConflict = true;
+                    }
+                    if (!hasConflict || predTempForReg.size() < 2) continue;
+                    // Only fix conflicts where the predecessor that defines the
+                    // temp used in the join block assigns a float CONSTANT.
+                    // This targets the pattern where different predecessors
+                    // load different float constants for a return value.
+                    // Skip general register reuse (computation results).
+                    {
+                        int constPreds = 0;
+                        for (auto &[pid, tid] : predTempForReg) {
+                            if (pid < 0 || pid >= (int)func.blocks.size()) continue;
+                            for (auto &s : func.blocks[pid].stmts) {
+                                if (s.kind == IRStmtKind::Assign && s.destTemp == tid && s.expr) {
+                                    if (s.expr->op == IROp::Var) {
+                                        auto &nm = s.expr->name;
+                                        if (!nm.empty() && (nm.back() == 'f' || nm.find('.') != std::string::npos))
+                                            constPreds++;
+                                    }
+                                    if (s.expr->isConst()) constPreds++;
+                                }
+                            }
+                        }
+                        if (constPreds < 2) continue;  // Need at least 2 constant-assigning preds
+                    }
+                    // Check if the join block uses any of these conflicting temps
+                    int usedTemp = -1;
+                    for (auto &[pid, tid] : predTempForReg) {
+                        for (auto &stmt : bb.stmts) {
+                            // Non-recursive scan for temp ID
+                            auto checkExpr = [&](const IRExpr *e) -> bool {
+                                if (!e) return false;
+                                std::vector<const IRExpr*> stk = {e};
+                                while (!stk.empty()) {
+                                    auto *n = stk.back(); stk.pop_back();
+                                    if (n->op == IROp::Temp && n->tempId() == tid) return true;
+                                    for (auto &k : n->kids) if (k) stk.push_back(k.get());
+                                }
+                                return false;
+                            };
+                            if (checkExpr(stmt.expr.get()) || checkExpr(stmt.addr.get()))
+                                { usedTemp = tid; break; }
+                        }
+                        if (usedTemp >= 0) break;
+                    }
+                    if (usedTemp < 0) continue;
+                    // Conflict detected! Create a shared variable name
+                    std::string varName = "var_xmm" + std::to_string(xr - X86_REG_XMM0);
+                    // In each predecessor, convert the last Assign for this temp to VarSet
+                    for (auto &[pid, tid] : predTempForReg) {
+                        if (pid < 0 || pid >= (int)func.blocks.size()) continue;
+                        auto &predBB = func.blocks[pid];
+                        // Find the Assign(tid, value) in this predecessor
+                        for (int si = (int)predBB.stmts.size() - 1; si >= 0; --si) {
+                            auto &s = predBB.stmts[si];
+                            if (s.kind == IRStmtKind::Assign && s.destTemp == tid) {
+                                // Insert a VarSet AFTER this Assign
+                                auto vs = IRStmt::mkVarSet(varName, IRExpr::mkTemp(tid, func.tempType(tid)));
+                                predBB.stmts.insert(predBB.stmts.begin() + si + 1, std::move(vs));
+                                break;
+                            }
+                        }
+                    }
+                    // In the join block, replace uses of usedTemp with Var(varName)
+                    for (auto &stmt : bb.stmts) {
+                        auto replaceTemp = [&](std::unique_ptr<IRExpr> &e) {
+                            if (!e) return;
+                            std::vector<IRExpr*> stk = {e.get()};
+                            while (!stk.empty()) {
+                                auto *n = stk.back(); stk.pop_back();
+                                for (auto &k : n->kids) {
+                                    if (k && k->op == IROp::Temp && k->tempId() == usedTemp)
+                                        k = IRExpr::mkVar(varName);
+                                    else if (k) stk.push_back(k.get());
+                                }
+                            }
+                            if (e->op == IROp::Temp && e->tempId() == usedTemp)
+                                e = IRExpr::mkVar(varName);
+                        };
+                        replaceTemp(stmt.expr);
+                        replaceTemp(stmt.addr);
+                    }
                 }
             }
         }
