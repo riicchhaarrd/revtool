@@ -26,6 +26,7 @@ public:
     static inline bool s_useSSA = false;
     static inline bool s_flatMode = false;
     static inline bool s_cosmeticMode = false;  // prefer readable output over byte-matching
+    static inline bool s_portMode = false;      // port mode: skip per-file type preamble
 
     // Decompile a single function
     static QString decompile(const MachOFile &mf, uint32_t funcAddr, bool format = true) {
@@ -73,11 +74,16 @@ public:
 
         QString out;
         out += "/* " + path + " */\n\n";
+        if (s_portMode) {
+            out += "#include \"cod2_types.h\"\n\n";
+        } else {
         out += platformTypedefs();
         out += "\n";
+        }
 
-        // Emit includes relevant to this source file
+        // Emit includes relevant to this source file (skip in port mode)
         std::set<std::string> emitted;
+        if (!s_portMode)
         for (auto &inc : types.includes()) {
             // Only emit .h files, skip the source file itself
             if (inc.find(".h") == std::string::npos) continue;
@@ -96,40 +102,39 @@ public:
         if (!emitted.empty()) out += "\n";
 
         // Emit type definitions used by functions in this file
-        std::set<TypeRef> usedTypes;
-        for (size_t fi : sf.functionIndices) {
-            auto &fn = mf.stabsFunctions()[fi];
-            if (fn.returnType != NullType) usedTypes.insert(fn.returnType);
-            for (auto &p : fn.params) if (p.typeRef != NullType) usedTypes.insert(p.typeRef);
-            for (auto &l : fn.locals) if (l.typeRef != NullType) usedTypes.insert(l.typeRef);
+        if (!s_portMode) {
+            std::set<TypeRef> usedTypes;
+            for (size_t fi : sf.functionIndices) {
+                auto &fn = mf.stabsFunctions()[fi];
+                if (fn.returnType != NullType) usedTypes.insert(fn.returnType);
+                for (auto &p : fn.params) if (p.typeRef != NullType) usedTypes.insert(p.typeRef);
+                for (auto &l : fn.locals) if (l.typeRef != NullType) usedTypes.insert(l.typeRef);
+            }
+            emitTypeDefs(out, types, usedTypes);
         }
-        emitTypeDefs(out, types, usedTypes);
 
-        // Emit global/static variables that belong to this source file
+        // Emit global/static variables and extern declarations (skip in port mode)
         std::set<std::string> emittedGlobals;
-        bool anyGlobals = false;
-        for (auto &g : types.globals()) {
-            if (g.address == 0) continue;
-            if (g.sourceFileIdx != srcIdx) continue;
-            if (emittedGlobals.count(g.name)) continue;
-            emittedGlobals.insert(g.name);
-            out += QString::fromStdString(
-                (g.isStatic ? "static " : "") + types.formatDecl(g.typeRef, g.name)) + ";\n";
-            anyGlobals = true;
-        }
-
-        // Also emit extern declarations for globals from other source files
-        // that might be referenced by functions in this file
-        // (Build a lookup map by name for quick cross-file global resolution)
         std::map<std::string, const StabsGlobalVar*> globalByName;
-        for (auto &g : types.globals()) {
-            if (g.address == 0 || g.name.empty()) continue;
-            if (g.sourceFileIdx == srcIdx) continue; // already emitted
-            if (!globalByName.count(g.name))
-                globalByName[g.name] = &g;
+        bool anyGlobals = false;
+        if (!s_portMode) {
+            for (auto &g : types.globals()) {
+                if (g.address == 0) continue;
+                if (g.sourceFileIdx != srcIdx) continue;
+                if (emittedGlobals.count(g.name)) continue;
+                emittedGlobals.insert(g.name);
+                out += QString::fromStdString(
+                    (g.isStatic ? "static " : "") + types.formatDecl(g.typeRef, g.name)) + ";\n";
+                anyGlobals = true;
+            }
+            for (auto &g : types.globals()) {
+                if (g.address == 0 || g.name.empty()) continue;
+                if (g.sourceFileIdx == srcIdx) continue;
+                if (!globalByName.count(g.name))
+                    globalByName[g.name] = &g;
+            }
+            if (anyGlobals) out += "\n";
         }
-
-        if (anyGlobals) out += "\n";
 
         // Decompile each function
         std::vector<size_t> sorted = sf.functionIndices;
