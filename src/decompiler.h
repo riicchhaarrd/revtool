@@ -1622,6 +1622,64 @@ public:
             }
             pass2 = p3;
         }
+        // Pass 3: Add declarations for undeclared variables
+        // Scan for vN/tN/var_N identifiers used but not declared.
+        {
+            std::set<QString> declared;
+            std::set<QString> used;
+            int bracePos = -1;
+            for (int i = 0; i < pass2.size(); ++i) {
+                QString t = pass2[i].trimmed();
+                if (t == "{" && bracePos < 0) { bracePos = i; continue; }
+                // Collect declarations
+                if (bracePos >= 0 && t.endsWith(';') && !t.contains('=') && !t.contains('(')) {
+                    int semi = t.lastIndexOf(';');
+                    int ne = semi;
+                    while (ne > 0 && t[ne-1] == ' ') ne--;
+                    int ns = ne - 1;
+                    while (ns > 0 && (t[ns-1].isLetterOrNumber() || t[ns-1] == '_')) ns--;
+                    QString name = t.mid(ns, ne - ns).trimmed();
+                    if (name.startsWith('*')) name = name.mid(1);
+                    if (!name.isEmpty()) declared.insert(name);
+                }
+                // Collect used vN/tN/var_N identifiers
+                int p = 0;
+                while (p < t.size()) {
+                    if ((t[p] == 'v' || t[p] == 't') && (p == 0 || !t[p-1].isLetterOrNumber())) {
+                        int s = p;
+                        while (p < t.size() && (t[p].isLetterOrNumber() || t[p] == '_')) p++;
+                        QString word = t.mid(s, p - s);
+                        if (word.size() >= 2 && (word[0] == 'v' || word[0] == 't') &&
+                            word[1].isDigit())
+                            used.insert(word);
+                        else if (word.startsWith("var_"))
+                            used.insert(word);
+                    } else p++;
+                }
+            }
+            // Params from function signature
+            if (!pass2.isEmpty()) {
+                QString sig = pass2[0];
+                int p = 0;
+                while (p < sig.size()) {
+                    if (sig[p].isLetter() || sig[p] == '_') {
+                        int s = p;
+                        while (p < sig.size() && (sig[p].isLetterOrNumber() || sig[p] == '_')) p++;
+                        declared.insert(sig.mid(s, p - s));
+                    } else p++;
+                }
+            }
+            QStringList newDecls;
+            for (auto &name : used) {
+                if (declared.count(name)) continue;
+                newDecls.append("    int " + name + ";");
+            }
+            if (!newDecls.isEmpty() && bracePos >= 0) {
+                std::sort(newDecls.begin(), newDecls.end());
+                for (int i = newDecls.size() - 1; i >= 0; --i)
+                    pass2.insert(bracePos + 1, newDecls[i]);
+            }
+        }
         QString result;
         for (auto &l : pass2) result += l + '\n';
         // Cosmetic mode: simplify redundant (char *) casts and pointer dereferences
