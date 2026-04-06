@@ -1691,6 +1691,22 @@ public:
                     } else p++;
                 }
             }
+            // Also scan ALL lines for existing declarations (not just header)
+            for (int i = 0; i < pass2.size(); ++i) {
+                QString t = pass2[i].trimmed();
+                // Match "TYPE NAME;" patterns anywhere in the function
+                if (t.endsWith(';') && !t.contains('=') && !t.contains('(') &&
+                    !t.contains('{') && !t.contains('}') && t.size() < 80) {
+                    int semi = t.lastIndexOf(';');
+                    int ne2 = semi;
+                    while (ne2 > 0 && t[ne2-1] == ' ') ne2--;
+                    int ns2 = ne2 - 1;
+                    while (ns2 > 0 && (t[ns2-1].isLetterOrNumber() || t[ns2-1] == '_')) ns2--;
+                    QString nm = t.mid(ns2, ne2 - ns2).trimmed();
+                    if (nm.startsWith('*')) nm = nm.mid(1);
+                    if (!nm.isEmpty()) declared.insert(nm);
+                }
+            }
             QStringList newDecls;
             for (auto &name : used) {
                 if (declared.count(name)) continue;
