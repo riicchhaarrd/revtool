@@ -198,7 +198,15 @@ public:
                 { size_t p = 0; while ((p = cname.find("~", p)) != std::string::npos)
                     cname.replace(p, 1, "dtor_"); }
                 std::string retStr = types.formatType(callee->returnType);
-                std::string proto = retStr + " " + cname + "(";
+                std::string proto;
+                if (s_portMode) {
+                    // Port mode: use K&R-style declaration (no param types)
+                    // to avoid conflicting types with cod2_types.h prototypes
+                    proto = retStr + " " + cname + "();\n";
+                    out += QString::fromStdString(proto);
+                    continue;
+                }
+                proto = retStr + " " + cname + "(";
                 if (!callee->params.empty()) {
                     for (size_t p = 0; p < callee->params.size(); ++p) {
                         if (p) proto += ", ";
