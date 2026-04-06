@@ -203,6 +203,20 @@ public:
                             types.formatType(par.typeRef) : "int";
                     }
                 }
+                // Detect variadic functions: format string param followed by args
+                static const std::set<std::string> variadicFuncs = {
+                    "Com_Printf", "Com_DPrintf", "Com_Error", "Com_sprintf",
+                    "va", "Cbuf_AddText", "dprintf", "Sys_Error",
+                    "Scr_Error", "Scr_ParamError", "CG_Printf", "SV_SendServerCommand",
+                    "NET_OutOfBandPrint", "MSG_WriteString"
+                };
+                if (variadicFuncs.count(calleeName)) {
+                    // Make sure last param is const char* (format), then add ...
+                    if (proto.back() != '(' && !callee->params.empty())
+                        proto += ", ...";
+                    else
+                        proto += "...";
+                }
                 proto += ");\n";
                 out += QString::fromStdString(proto);
             }
