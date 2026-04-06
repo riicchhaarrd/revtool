@@ -3356,7 +3356,7 @@ private:
     // ── SSE / SSE2 instruction lifter ──────────────────────────────
     bool liftSSE(const std::string &mn, cs_x86_op *o, int n, BasicBlock &bb, cs_insn &in) {
         // ── Scalar moves: movss, movsd ──────────────────────────────
-        if ((mn == "movss" || mn == "movsd") && n == 2) { if (in.address == 0x2DF82) fprintf(stderr, "MOVSS@%X: o0=%d o1=%d src=%p bb=%d\n", (unsigned)in.address, o[0].type, o[1].type, (void*)readSSEOp(o[1], mn=="movsd").get(), bb.id);
+        if ((mn == "movss" || mn == "movsd") && n == 2) {
             bool dbl = (mn == "movsd");
             // movss/movsd [esp+N], xmm → collect as call argument
             if (o[0].type == X86_OP_MEM && o[0].mem.base == X86_REG_ESP &&
