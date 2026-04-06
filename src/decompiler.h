@@ -2131,15 +2131,24 @@ private:
                             if (n->op == IROp::Load && !n->kids.empty() && n->kids[0]) {
                                 auto *addr = n->kids[0].get();
                                 markPointer(addr);
-                                // Also check Add(base, offset) patterns
-                                if (addr->op == IROp::Add && !addr->kids.empty())
+                                // Also check Add(base, offset) and Add(base, Mul(idx, scale))
+                                if (addr->op == IROp::Add && !addr->kids.empty()) {
                                     markPointer(addr->kids[0].get());
+                                    // Array subscript: Add(base, Mul(idx, scale))
+                                    for (int side = 0; side < 2 && addr->kids.size() == 2; ++side) {
+                                        auto *maybeIdx = addr->kids[side].get();
+                                        auto *maybeBase = addr->kids[1-side].get();
+                                        if (maybeIdx && maybeIdx->op == IROp::Mul)
+                                            markPointer(maybeBase);
+                                    }
+                                }
                             }
                             for (auto &k : n->kids) if (k) stack.push_back(k.get());
                         }
                     };
                     checkLoadPtrs(stmt.expr.get());
                     checkLoadPtrs(stmt.addr.get());
+                    for (auto &a : stmt.args) checkLoadPtrs(a.get());
                 }
 
             // Collect struct pointer types from Field expressions
@@ -3498,6 +3507,11 @@ private:
                         }
                     }
                     if (storeBase && storeIdx && storeScale == 4) {
+                        // Mark base as pointer (used in array subscript)
+                        if (storeBase->op == IROp::Var && !storeBase->name.empty())
+                            m_pointerVars.insert(storeBase->name);
+                        else if (storeBase->op == IROp::Temp)
+                            m_pointerTemps.insert(storeBase->tempId());
                         std::string bs = emitExpr(storeBase);
                         std::string is = emitExpr(storeIdx);
                         out += pad(indent) + QString::fromStdString(bs + "[" + is + "] = " + val) + ";\n";
@@ -4091,6 +4105,11 @@ private:
                         std::string bs = emitExpr(arrBase);
                         std::string is = emitExpr(arrIdx);
                         if (!bs.empty() && !is.empty()) {
+                            // Mark the base as a pointer (used in array subscript)
+                            if (arrBase->op == IROp::Var && !arrBase->name.empty())
+                                m_pointerVars.insert(arrBase->name);
+                            else if (arrBase->op == IROp::Temp)
+                                m_pointerTemps.insert(arrBase->tempId());
                             result = bs + "[" + is + "]";
                             break;
                         }
