@@ -2090,6 +2090,9 @@ private:
                 } else {
                     decl = "int " + l.name;
                 }
+                // Override int → char* for locals used as pointers
+                if (m_pointerVars.count(l.name) && decl == "int " + l.name)
+                    decl = "char *" + l.name;
                 out += "    " + QString::fromStdString(decl) + ";\n";
             }
 
@@ -2098,18 +2101,21 @@ private:
             collectGotoTargets(root, m_gotoTargets);
             collectEmittedBlocks(root, emittedBlocks);
 
-            // Find temps used as pointers (dereferenced in Load/Store)
+            // Find temps AND vars used as pointers (dereferenced in Load/Store)
+            auto markPointer = [&](const IRExpr *e) {
+                if (!e) return;
+                if (e->op == IROp::Temp) m_pointerTemps.insert(e->tempId());
+                if (e->op == IROp::Var && !e->name.empty()) m_pointerVars.insert(e->name);
+            };
             for (auto &bb : m_func.blocks)
                 for (auto &stmt : bb.stmts) {
                     // Store: addr is the pointer being dereferenced
                     if (stmt.kind == IRStmtKind::Store && stmt.addr) {
-                        if (stmt.addr->op == IROp::Temp)
-                            m_pointerTemps.insert(stmt.addr->tempId());
-                        // Also check children of addr for temps used as base pointers
+                        markPointer(stmt.addr.get());
                         for (auto &k : stmt.addr->kids)
-                            if (k && k->op == IROp::Temp) m_pointerTemps.insert(k->tempId());
+                            if (k) markPointer(k.get());
                     }
-                    // Load expressions with Temp address
+                    // Load expressions with Temp/Var address
                     auto checkLoadPtrs = [&](const IRExpr *e) {
                         if (!e) return;
                         std::vector<const IRExpr *> stack = {e};
@@ -2117,8 +2123,10 @@ private:
                             auto *n = stack.back(); stack.pop_back();
                             if (n->op == IROp::Load && !n->kids.empty() && n->kids[0]) {
                                 auto *addr = n->kids[0].get();
-                                if (addr->op == IROp::Temp)
-                                    m_pointerTemps.insert(addr->tempId());
+                                markPointer(addr);
+                                // Also check Add(base, offset) patterns
+                                if (addr->op == IROp::Add && !addr->kids.empty())
+                                    markPointer(addr->kids[0].get());
                             }
                             for (auto &k : n->kids) if (k) stack.push_back(k.get());
                         }
@@ -2303,6 +2311,8 @@ private:
                                 varTrunc16[name] == varAnyAssign[name] && varTrunc16[name] > 0);
                 if (isShort)
                     out += "    short " + QString::fromStdString(name) + ";\n";
+                else if (m_pointerVars.count(name))
+                    out += "    char *" + QString::fromStdString(name) + ";\n";
                 else
                     out += "    int " + QString::fromStdString(name) + ";\n";
             }
@@ -2613,6 +2623,7 @@ private:
         std::set<int>         m_emittedLabels;  // labels already emitted (avoid duplicates)
         std::set<std::pair<int,int>> m_suppressedStmts; // (blockId, stmtIdx) to skip in emission
         std::set<int>         m_pointerTemps;   // temps used as pointers (dereference targets)
+        std::set<std::string> m_pointerVars;   // var NAMES used as pointers
         std::map<int, TypeRef> m_tempStructPtr;   // temp → struct pointer type (from Field access)
         std::set<int>         m_forceDeclareTemps; // temps that leak as raw tN and need declaration
         std::set<int>         m_inliningTemps;    // cycle guard for temp inlining in emitExpr
