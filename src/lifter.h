@@ -2653,6 +2653,18 @@ private:
                             lastStmt.expr->op == IROp::Call)
                             isVoid = true;
                     }
+                    // Safety: if MULTIPLE other blocks already have Return with a value,
+                    // the function is NOT void (multi-path return)
+                    if (isVoid) {
+                        int returnWithValue = 0;
+                        for (auto &ob : func.blocks) {
+                            for (auto &s : ob.stmts) {
+                                if (s.kind == IRStmtKind::Return && s.expr)
+                                    returnWithValue++;
+                            }
+                        }
+                        if (returnWithValue >= 2) isVoid = false;
+                    }
                     if (isVoid) {
                         m_func->detectedVoid = true;
                         bb.stmts.push_back(IRStmt::mkReturn());

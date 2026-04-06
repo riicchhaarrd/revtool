@@ -115,6 +115,7 @@ public:
 
         // Emit global/static variables and extern declarations (skip in port mode)
         std::set<std::string> emittedGlobals;
+        // Emit globals and build cross-file global map
         std::map<std::string, const StabsGlobalVar*> globalByName;
         bool anyGlobals = false;
         if (!s_portMode) {
@@ -127,13 +128,16 @@ public:
                     (g.isStatic ? "static " : "") + types.formatDecl(g.typeRef, g.name)) + ";\n";
                 anyGlobals = true;
             }
+            if (anyGlobals) out += "\n";
+        }
+        // Build cross-file global map (for extern scanning in non-port mode)
+        if (!s_portMode) {
             for (auto &g : types.globals()) {
                 if (g.address == 0 || g.name.empty()) continue;
                 if (g.sourceFileIdx == srcIdx) continue;
                 if (!globalByName.count(g.name))
                     globalByName[g.name] = &g;
             }
-            if (anyGlobals) out += "\n";
         }
 
         // Decompile each function
@@ -1659,7 +1663,8 @@ public:
                     if (name.startsWith('*')) name = name.mid(1);
                     if (!name.isEmpty()) declared.insert(name);
                 }
-                // Collect used vN/tN/var_N identifiers
+                // Collect used LOCAL identifiers: vN, tN, var_N, arg_N
+                // (NOT g_XXXXX which are globals, NOT _name___0xN_ which are struct offsets)
                 int p = 0;
                 while (p < t.size()) {
                     if ((t[p] == 'v' || t[p] == 't') && (p == 0 || !t[p-1].isLetterOrNumber())) {
@@ -1669,7 +1674,7 @@ public:
                         if (word.size() >= 2 && (word[0] == 'v' || word[0] == 't') &&
                             word[1].isDigit())
                             used.insert(word);
-                        else if (word.startsWith("var_"))
+                        else if (word.startsWith("var_") || word.startsWith("arg_"))
                             used.insert(word);
                     } else p++;
                 }
