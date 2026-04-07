@@ -4363,13 +4363,19 @@ private:
                     std::string addrStr = emitExpr(addr);
                     TypeRef addrT = exprType(addr);
                     bool isPtr = false;
+                    bool isAggregate = false;
                     if (addrT != NullType) {
                         auto *rt = m_types.resolveType(addrT);
                         isPtr = rt && rt->kind == StabsTypeKind::Pointer;
+                        isAggregate = rt && (rt->kind == StabsTypeKind::Struct ||
+                                             rt->kind == StabsTypeKind::Union ||
+                                             rt->kind == StabsTypeKind::Array);
                     }
                     const char *lct = loadCastType(e->loadSize);
                     if (isPtr)
                         result = std::string("*(") + lct + " *)(" + addrStr + ")";
+                    else if (isAggregate)
+                        result = std::string("*(") + lct + " *)(&" + addrStr + ")";
                     else
                         result = std::string("*(") + lct + " *)((char *)(" + addrStr + "))";
                 }
@@ -4849,24 +4855,25 @@ private:
                 } else if (e->op == IROp::Add) {
                     // When adding to an address-of or struct/array expression,
                     // cast to (char*) to prevent pointer arithmetic scaling.
-                    auto needsCast = [&](const std::string &s, IRExpr *kid) -> bool {
-                        if (s.find("&") != std::string::npos) return true;
+                    // Returns 0=no cast, 1=has & already, 2=struct/union/array (needs &)
+                    auto needsCast = [&](const std::string &s, IRExpr *kid) -> int {
+                        if (s.find("&") != std::string::npos) return 1;
                         // Check if the operand is a struct/array typed variable
                         if (kid && kid->op == IROp::Var && kid->typeRef != NullType) {
                             auto *t = m_types.resolveType(kid->typeRef);
                             if (t && (t->kind == StabsTypeKind::Struct ||
                                       t->kind == StabsTypeKind::Union ||
                                       t->kind == StabsTypeKind::Array))
-                                return true;
+                                return 2;
                         }
-                        return false;
+                        return 0;
                     };
-                    bool lhsNeedsCast = needsCast(lhs, e->kids[0].get());
-                    bool rhsNeedsCast = needsCast(rhs, e->kids[1].get());
-                    if (lhsNeedsCast)
-                        result = "(" + rhs + " + (char*)" + lhs + ")";
-                    else if (rhsNeedsCast)
-                        result = "(" + lhs + " + (char*)" + rhs + ")";
+                    int lhsCast = needsCast(lhs, e->kids[0].get());
+                    int rhsCast = needsCast(rhs, e->kids[1].get());
+                    if (lhsCast)
+                        result = "(" + rhs + " + (char*)" + (lhsCast == 2 ? "&" : "") + lhs + ")";
+                    else if (rhsCast)
+                        result = "(" + lhs + " + (char*)" + (rhsCast == 2 ? "&" : "") + rhs + ")";
                     else
                         result = "(" + lhs + op + rhs + ")";
                 } else if ((e->op == IROp::And || e->op == IROp::Or || e->op == IROp::Xor ||
@@ -5006,12 +5013,18 @@ private:
                 }
                 if (vslot >= 0 && !e->kids.empty()) {
                     std::string thisArg = emitExpr(e->kids[0].get());
-                    // Use int return type for vtable calls (void* would also
-                    // work, but int matches testl in condition checks)
+                    // Build function pointer type matching argument count
+                    int nargs = (int)e->kids.size();
+                    std::string fptype = "int(*)(";
+                    for (int p = 0; p < nargs; ++p) {
+                        if (p) fptype += ", ";
+                        fptype += (p == 0) ? "void *" : "int";
+                    }
+                    fptype += ")";
                     char buf[256];
                     snprintf(buf, sizeof(buf),
-                        "((int(*)(void*))(((void**)(*(void**)%s))[%d]))(",
-                        thisArg.c_str(), vslot);
+                        "((%s)(((void**)(*(void**)%s))[%d]))(",
+                        fptype.c_str(), thisArg.c_str(), vslot);
                     result = buf;
                     for (size_t i = 0; i < e->kids.size(); ++i) {
                         if (i) result += ", ";
