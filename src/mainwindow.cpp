@@ -80,15 +80,15 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
         [this](uint32_t fileoff, uint32_t size, uint32_t vmaddr, const QString &name) {
             m_hexWidget->goToOffset(fileoff);
             m_hexWidget->setHighlight(fileoff, size);
-            if (name.contains("text", Qt::CaseInsensitive) || name.contains("stub", Qt::CaseInsensitive)) {
-                for (auto &seg : m_macho->segments())
-                    for (auto &sec : seg.sections)
-                        if (sec.addr == vmaddr && sec.offset == fileoff) {
+            for (auto &seg : m_macho->segments())
+                for (auto &sec : seg.sections)
+                    if (sec.addr == vmaddr && sec.offset == fileoff) {
+                        if (m_macho->isCodeSection(sec)) {
                             m_disasmWidget->disassembleSection(sec);
                             m_centralTabs->setCurrentWidget(m_disasmWidget);
                             return;
                         }
-            }
+                    }
         });
 
     connect(m_infoWidget, &InfoWidget::symbolSelected, this, [this](uint32_t addr) {
@@ -161,7 +161,7 @@ void MainWindow::createMenus() {
     auto *openAct = fileMenu->addAction("&Open...");
     openAct->setShortcut(QKeySequence::Open);
     connect(openAct, &QAction::triggered, this, [this]() {
-        QString path = QFileDialog::getOpenFileName(this, "Open Mach-O Binary", "", "All Files (*)");
+        QString path = QFileDialog::getOpenFileName(this, "Open Binary", "", "All Files (*)");
         if (!path.isEmpty()) loadFile(path);
     });
     fileMenu->addSeparator();
@@ -235,7 +235,8 @@ void MainWindow::createStatusBar() {
 void MainWindow::loadFile(const QString &path) {
     m_macho = std::make_unique<MachOFile>();
     if (!m_macho->load(path.toStdString())) {
-        QMessageBox::critical(this, "Error", "Failed to load Mach-O file.\nMake sure it's a valid Mach-O i386 binary.");
+        QMessageBox::critical(this, "Error",
+            "Failed to load binary.\nSupported formats: Mach-O i386 and PE32 i386.");
         m_macho.reset(); return;
     }
     setWindowTitle(QString("dis  |  %1").arg(QFileInfo(path).fileName()));
@@ -243,7 +244,10 @@ void MainWindow::loadFile(const QString &path) {
     m_disasmWidget->setMachO(m_macho.get());
     m_infoWidget->setMachO(m_macho.get());
     populateSectionCombo();
-    m_statusInfo->setText(QString("%1  |  %2 KB  |  Mach-O i386").arg(QFileInfo(path).fileName()).arg(m_macho->size() / 1024));
+    m_statusInfo->setText(QString("%1  |  %2 KB  |  %3")
+        .arg(QFileInfo(path).fileName())
+        .arg(m_macho->size() / 1024)
+        .arg(m_macho->formatName()));
 }
 
 void MainWindow::populateSectionCombo() {
@@ -252,9 +256,7 @@ void MainWindow::populateSectionCombo() {
     m_codeSections.clear();
     for (auto &seg : m_macho->segments())
         for (auto &sec : seg.sections) {
-            bool isCode = (sec.flags & 0x80000000) || (sec.flags & 0x00000400) ||
-                          ((sec.flags & 0xFF) == 0 && sec.sectname.find("text") != std::string::npos);
-            if (isCode && sec.size > 0) {
+            if (m_macho->isCodeSection(sec) && sec.size > 0) {
                 m_codeSections.push_back(&sec);
                 m_sectionCombo->addItem(QString("%1,%2  (0x%3  %4 bytes)")
                     .arg(QString::fromStdString(sec.segname)).arg(QString::fromStdString(sec.sectname))
@@ -263,9 +265,13 @@ void MainWindow::populateSectionCombo() {
         }
     m_sectionCombo->blockSignals(false);
     for (int i = 0; i < (int)m_codeSections.size(); ++i)
-        if (m_codeSections[i]->sectname == "__text" && m_codeSections[i]->segname == "__TEXT") {
+        if (m_macho->isTextSection(*m_codeSections[i])) {
             m_sectionCombo->setCurrentIndex(i); disassembleCurrentSection(); break;
         }
+    if (m_sectionCombo->currentIndex() < 0 && !m_codeSections.empty()) {
+        m_sectionCombo->setCurrentIndex(0);
+        disassembleCurrentSection();
+    }
 }
 
 void MainWindow::disassembleCurrentSection() {

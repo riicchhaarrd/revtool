@@ -3551,7 +3551,7 @@ private:
                     // Function symbols don't need & (function names decay to pointers).
                     if (!result.empty() && m_addrDepth == 0) {
                         auto *sec = m_mf.sectionForAddress((uint32_t)e->value);
-                        bool isData = sec && sec->segname != "__TEXT";
+                        bool isData = sec && !m_mf.isCodeSection(*sec);
                         if (isData)
                             result = "&" + result;
                     }

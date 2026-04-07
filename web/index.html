@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>dis — Mach-O Decompiler</title>
+<title>dis — Binary Decompiler</title>
 <style>
 /* ── Reset / Base ─────────────────────────────────────────────────── */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -460,7 +460,7 @@ body:not(.light) .toast.ok  { color: #4ec9b0; }
     </svg>
     dis
   </a>
-  <span id="header-tagline">Mach-O Decompiler</span>
+  <span id="header-tagline">Binary Decompiler</span>
   <div id="header-gap"></div>
   <div id="hdr-status">
     <div class="spinner on" id="spinner"></div>
@@ -567,6 +567,52 @@ body:not(.light) .toast.ok  { color: #4ec9b0; }
         </div>
       </div>
     </div>
+
+    <!-- Strings -->
+    <div class="sb-section grow" id="sec-str">
+      <div class="sb-head" onclick="toggleSec('sec-str')">
+        Strings
+        <span class="badge" id="str-badge" style="display:none">0</span>
+        <span class="chev">
+          <svg width="9" height="9" viewBox="0 0 9 9" fill="none"><path d="M1.5 3 4.5 6.5 7.5 3" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </span>
+      </div>
+      <div class="sb-body">
+        <div class="sb-search">
+          <svg width="11" height="11" viewBox="0 0 11 11" fill="none">
+            <circle cx="4.5" cy="4.5" r="3" stroke="currentColor" stroke-width="1.2"/>
+            <line x1="7" y1="7" x2="10" y2="10" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+          </svg>
+          <input id="str-filter" type="text" placeholder="Search strings…" oninput="filterStrings()">
+        </div>
+        <div class="item-list" id="str-list">
+          <div class="list-empty">Load a binary</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- String xrefs -->
+    <div class="sb-section grow" id="sec-xref">
+      <div class="sb-head" onclick="toggleSec('sec-xref')">
+        Xrefs
+        <span class="badge" id="xref-badge" style="display:none">0</span>
+        <span class="chev">
+          <svg width="9" height="9" viewBox="0 0 9 9" fill="none"><path d="M1.5 3 4.5 6.5 7.5 3" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </span>
+      </div>
+      <div class="sb-body">
+        <div class="sb-search">
+          <svg width="11" height="11" viewBox="0 0 11 11" fill="none">
+            <circle cx="4.5" cy="4.5" r="3" stroke="currentColor" stroke-width="1.2"/>
+            <line x1="7" y1="7" x2="10" y2="10" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+          </svg>
+          <input id="xref-filter" type="text" placeholder="Filter xrefs…" oninput="filterXrefs()">
+        </div>
+        <div class="item-list" id="xref-list">
+          <div class="list-empty">Select a string</div>
+        </div>
+      </div>
+    </div>
   </aside>
 
   <!-- Resize gutter -->
@@ -585,8 +631,8 @@ body:not(.light) .toast.ok  { color: #4ec9b0; }
           <line x1="15" y1="21" x2="25" y2="21" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
           <line x1="15" y1="25" x2="22" y2="25" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
         </svg>
-        <span id="welcome-line1">Drop a Mach-O binary here</span>
-        <span id="welcome-line2">or click to browse · x86 / x86-64 with STABS debug info</span>
+        <span id="welcome-line1">Drop a binary here</span>
+        <span id="welcome-line2">or click to browse · Mach-O and PE32 i386 supported</span>
       </div>
     </div>
 
@@ -622,7 +668,7 @@ body:not(.light) .toast.ok  { color: #4ec9b0; }
       <path d="M28 10v28M16 26l12-16 12 16" stroke="#fff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
       <line x1="14" y1="44" x2="42" y2="44" stroke="#fff" stroke-width="2.5" stroke-linecap="round"/>
     </svg>
-    Drop Mach-O binary
+    Drop Binary
   </div>
 </div>
 
@@ -650,7 +696,47 @@ let activeId = null;
 let curCode  = '';
 let allFns   = [];
 let allSrcs  = [];
+let allStrings = [];
+let curXrefs = [];
+let activeStringAddr = null;
+let activeXrefAddr = null;
+let currentFormat = '';
 let decompVersion = 0;
+
+function parseJson(text, fallback) {
+  try { return JSON.parse(text); } catch (_) { return fallback; }
+}
+
+function fuzzyScore(text, query) {
+  const hay = String(text || '').toLowerCase();
+  const needle = String(query || '').trim().toLowerCase();
+  if (!needle) return 1;
+  const pos = hay.indexOf(needle);
+  if (pos >= 0) return 100000 - pos * 16 - (hay.length - needle.length);
+  let qi = 0, score = 0, streak = 0;
+  for (let i = 0; i < hay.length && qi < needle.length; i++) {
+    if (hay[i] !== needle[qi]) { streak = 0; continue; }
+    score += 10;
+    if (i === 0 || !/[a-z0-9]/.test(hay[i - 1])) score += 8;
+    if (streak > 0) score += 6;
+    qi++; streak++;
+  }
+  return qi === needle.length ? score - hay.length : -1;
+}
+
+function fuzzyFilter(items, query, keyFn) {
+  const q = String(query || '').trim();
+  if (!q) return items.slice();
+  return items
+    .map(item => ({ item, score: keyFn(item).reduce((best, key) => Math.max(best, fuzzyScore(key, q)), -1) }))
+    .filter(entry => entry.score >= 0)
+    .sort((a, b) => b.score - a.score)
+    .map(entry => entry.item);
+}
+
+function shortHex(v) {
+  return '0x' + Number(v >>> 0).toString(16).toUpperCase().padStart(8, '0');
+}
 
 function applyDecompilerOptions() {
   if (!mod) return;
@@ -683,7 +769,7 @@ createDisModule().then(m => {
   applyDecompilerOptions();
   document.getElementById('spinner').classList.remove('on');
   document.getElementById('hdr-txt').textContent = 'Ready';
-  sbMsg('Drop a Mach-O binary to get started');
+  sbMsg('Drop a binary to get started');
 }).catch(e => {
   document.getElementById('hdr-txt').textContent = 'WASM error';
   document.getElementById('spinner').classList.remove('on');
@@ -733,41 +819,66 @@ function loadFile(file) {
     document.getElementById('hdr-txt').textContent = file.name;
     sbMsg(file.name + ' · ' + res.replace('ok: ', ''));
     toast(res.replace('ok: ', ''), 'ok');
-    populateSidebar(file.name, res);
+    populateSidebar(file.name, bytes.length);
   };
   reader.readAsArrayBuffer(file);
 }
 
 // ── Sidebar ──────────────────────────────────────────────────────────
-function populateSidebar(filename, res) {
-  const m  = res.match(/(\d+) bytes.*?(\d+) functions.*?(\d+) source files/);
-  const mb = m ? (parseInt(m[1])/1048576).toFixed(1)+' MB' : '?';
+function populateSidebar(filename, sizeBytes) {
+  const fnData = parseJson(mod.listFunctionsJson(), { functions: [] });
+  const srcData = parseJson(mod.listSourceFilesJson(), { source_files: [] });
+  const strData = parseJson(mod.listStringsJson(), { strings: [] });
+
+  currentFormat = fnData.format || srcData.format || strData.format || 'Unknown';
+  allFns = (fnData.functions || []).map(f => ({
+    addr: f.address,
+    name: f.name,
+    size: f.size,
+    sourcePath: f.source_path || '',
+    hasDebugInfo: !!f.has_debug_info
+  }));
+  allSrcs = (srcData.source_files || []).filter(s => s.function_count > 0).map(s => ({
+    idx: s.index,
+    path: s.path,
+    fnCount: s.function_count
+  }));
+  allStrings = (strData.strings || []).map(s => ({
+    addr: s.address,
+    section: s.section,
+    value: s.value
+  }));
+  curXrefs = [];
+  activeStringAddr = null;
+  activeXrefAddr = null;
+
+  const mb = ((sizeBytes || 0) / 1048576).toFixed(1) + ' MB';
   document.getElementById('bin-placeholder').style.display = 'none';
   const bi = document.getElementById('bin-info');
   bi.style.display = '';
   bi.innerHTML =
     row('File', esc(basename(filename))) + row('Size', mb) +
-    row('Functions', m?m[2]:'?') + row('Sources', m?m[3]:'?');
+    row('Format', esc(currentFormat)) + row('Functions', allFns.length) +
+    row('Sources', allSrcs.length) + row('Strings', allStrings.length);
 
-  allFns = [];
-  for (const line of mod.listFunctions().split('\n').filter(Boolean)) {
-    const lm = line.match(/^(0x[0-9A-Fa-f]+)\s+(.*)/);
-    if (!lm) continue;
-    allFns.push({ addr: parseInt(lm[1], 16), sig: line.trim(), name: lm[2].trim() });
-  }
-  const fnBadge = document.getElementById('fn-badge');
-  fnBadge.textContent = allFns.length; fnBadge.style.display = '';
+  document.getElementById('fn-badge').textContent = allFns.length;
+  document.getElementById('fn-badge').style.display = '';
+  document.getElementById('src-badge').textContent = allSrcs.length;
+  document.getElementById('src-badge').style.display = '';
+  document.getElementById('str-badge').textContent = allStrings.length;
+  document.getElementById('str-badge').style.display = '';
+  document.getElementById('xref-badge').textContent = '0';
+  document.getElementById('xref-badge').style.display = '';
 
-  allSrcs = [];
-  for (const line of mod.listSourceFiles().split('\n').filter(Boolean)) {
-    const lm = line.match(/^\[(\d+)\]\s+(.*?)\s+\((\d+) functions\)/);
-    if (!lm || parseInt(lm[3]) === 0) continue;
-    allSrcs.push({ idx: parseInt(lm[1]), path: lm[2].trim(), fnCount: parseInt(lm[3]) });
-  }
-  const srcBadge = document.getElementById('src-badge');
-  srcBadge.textContent = allSrcs.length; srcBadge.style.display = '';
+  document.getElementById('fn-filter').value = '';
+  document.getElementById('src-filter').value = '';
+  document.getElementById('str-filter').value = '';
+  document.getElementById('xref-filter').value = '';
 
-  renderFnList(allFns); renderSrcList(allSrcs);
+  renderFnList(allFns);
+  renderSrcList(allSrcs);
+  renderStringList(allStrings);
+  renderXrefList([]);
 }
 
 function row(lbl, val) {
@@ -778,7 +889,7 @@ function renderFnList(fns) {
   const el = document.getElementById('fn-list');
   if (!fns.length) { el.innerHTML = '<div class="list-empty">No matches</div>'; return; }
   el.innerHTML = fns.map(f =>
-    `<div class="item" data-addr="${f.addr}" onclick="openFn(${f.addr},this)" title="${esc(f.sig)}">
+    `<div class="item" data-addr="${f.addr}" onclick="openFn(${f.addr},this)" title="${esc(f.name)} @ ${shortHex(f.addr)}">
       <svg class="icon" width="11" height="11" viewBox="0 0 11 11" fill="none">
         <path d="M1.5 8.5V2.5l4 3-4 3z" fill="var(--c-fn)"/>
         <line x1="7" y1="3"   x2="9.5" y2="3"   stroke="var(--c-fn)" stroke-width="1.1" stroke-linecap="round"/>
@@ -786,8 +897,11 @@ function renderFnList(fns) {
         <line x1="7" y1="8"   x2="9.5" y2="8"   stroke="var(--c-fn)" stroke-width="1.1" stroke-linecap="round"/>
       </svg>
       <span class="lbl">${esc(fnShort(f.name))}</span>
+      <span class="cnt">${esc(shortHex(f.addr))}</span>
      </div>`
   ).join('');
+  const tab = tabs.find(t => t.id === activeId);
+  if (tab && tab.kind === 'fn') markActive('fn-list', 'data-addr', tab.addr);
 }
 
 function renderSrcList(srcs) {
@@ -804,19 +918,82 @@ function renderSrcList(srcs) {
       <span class="cnt">${s.fnCount}</span>
      </div>`
   ).join('');
+  const tab = tabs.find(t => t.id === activeId);
+  if (tab && tab.kind === 'src') markActive('src-list', 'data-idx', tab.srcIdx);
+}
+
+function stringShort(value) {
+  const s = String(value || '');
+  return s.length > 56 ? s.slice(0, 53) + '…' : s;
+}
+
+function renderStringList(strings) {
+  const el = document.getElementById('str-list');
+  if (!strings.length) { el.innerHTML = '<div class="list-empty">No matches</div>'; return; }
+  el.innerHTML = strings.map(s =>
+    `<div class="item" data-addr="${s.addr}" onclick="openString(${s.addr},this)" title="${esc(s.value)}">
+      <svg class="icon" width="11" height="11" viewBox="0 0 11 11" fill="none">
+        <path d="M2 2h7v7H2z" stroke="var(--c-str)" stroke-width="1.1" fill="none" rx=".8"/>
+        <line x1="3.2" y1="4" x2="7.8" y2="4" stroke="var(--c-str)" stroke-width=".9" stroke-linecap="round"/>
+        <line x1="3.2" y1="6" x2="7.8" y2="6" stroke="var(--c-str)" stroke-width=".9" stroke-linecap="round"/>
+      </svg>
+      <span class="lbl">${esc(stringShort(s.value))}</span>
+      <span class="cnt">${esc(shortHex(s.addr))}</span>
+     </div>`
+  ).join('');
+  if (activeStringAddr !== null) markActive('str-list', 'data-addr', activeStringAddr);
+}
+
+function renderXrefList(xrefs) {
+  const el = document.getElementById('xref-list');
+  if (!xrefs.length) {
+    el.innerHTML = `<div class="list-empty">${activeStringAddr ? 'No xrefs found' : 'Select a string'}</div>`;
+    return;
+  }
+  el.innerHTML = xrefs.map(x =>
+    `<div class="item" data-addr="${x.function_address}" data-xref="${x.xref_address}" onclick="openXref(${x.function_address},${x.xref_address},this)" title="${esc((x.mnemonic || '') + ' ' + (x.operands || ''))}">
+      <svg class="icon" width="11" height="11" viewBox="0 0 11 11" fill="none">
+        <path d="M1.5 5.5h8" stroke="var(--accent)" stroke-width="1.1" stroke-linecap="round"/>
+        <path d="M6.5 2.5 9.5 5.5 6.5 8.5" stroke="var(--accent)" stroke-width="1.1" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <span class="lbl">${esc(fnShort(x.function_name || shortHex(x.function_address)))}</span>
+      <span class="cnt">${esc(x.xref_address_hex || shortHex(x.xref_address))}</span>
+     </div>`
+  ).join('');
+  if (activeXrefAddr !== null) markActive('xref-list', 'data-xref', activeXrefAddr);
 }
 
 function filterFns() {
-  const q = document.getElementById('fn-filter').value.toLowerCase();
-  renderFnList(q ? allFns.filter(f =>
-    f.name.toLowerCase().includes(q) || f.addr.toString(16).includes(q)) : allFns);
+  const q = document.getElementById('fn-filter').value;
+  renderFnList(fuzzyFilter(allFns, q, f => [f.name, shortHex(f.addr), String(f.addr)]));
 }
 function filterSrcs() {
-  const q = document.getElementById('src-filter').value.toLowerCase();
-  renderSrcList(q ? allSrcs.filter(s => s.path.toLowerCase().includes(q)) : allSrcs);
+  const q = document.getElementById('src-filter').value;
+  renderSrcList(fuzzyFilter(allSrcs, q, s => [s.path, basename(s.path)]));
+}
+function filterStrings() {
+  const q = document.getElementById('str-filter').value;
+  renderStringList(fuzzyFilter(allStrings, q, s => [s.value, s.section, shortHex(s.addr)]));
+}
+function filterXrefs() {
+  const q = document.getElementById('xref-filter').value;
+  renderXrefList(fuzzyFilter(curXrefs, q, x => [
+    x.function_name || '',
+    x.mnemonic || '',
+    x.operands || '',
+    x.xref_address_hex || shortHex(x.xref_address || 0)
+  ]));
 }
 
 // ── Tabs & decompilation ─────────────────────────────────────────────
+function ensureFunctionEntry(addr, name) {
+  if (allFns.find(f => f.addr === addr)) return;
+  allFns.push({ addr, name: name || shortHex(addr), size: 0, sourcePath: '', hasDebugInfo: false });
+  allFns.sort((a, b) => a.addr - b.addr);
+  document.getElementById('fn-badge').textContent = allFns.length;
+  filterFns();
+}
+
 function openFn(addr, el) {
   markActive('fn-list', 'data-addr', addr);
   const ex = tabs.find(t => t.kind==='fn' && t.addr===addr);
@@ -831,6 +1008,31 @@ function openFn(addr, el) {
     addTab(tab);
     sbMsg(label+' · '+countLines(tab.code)+' lines');
   }, 10);
+}
+
+function openString(addr, el) {
+  activeStringAddr = addr;
+  activeXrefAddr = null;
+  markActive('str-list', 'data-addr', addr);
+  const info = allStrings.find(s => s.addr === addr);
+  spin(true); sbMsg('Finding xrefs for ' + (info ? stringShort(info.value) : shortHex(addr)) + '…');
+  setTimeout(() => {
+    const data = parseJson(mod.findStringXrefsByAddressJson(addr), { matches: [] });
+    curXrefs = data.matches || [];
+    document.getElementById('xref-badge').textContent = curXrefs.length;
+    renderXrefList(curXrefs);
+    filterXrefs();
+    spin(false);
+    sbMsg((info ? stringShort(info.value) : shortHex(addr)) + ' · ' + curXrefs.length + ' xrefs');
+  }, 10);
+}
+
+function openXref(fnAddr, xrefAddr, el) {
+  activeXrefAddr = xrefAddr;
+  const info = curXrefs.find(x => x.function_address === fnAddr && x.xref_address === xrefAddr);
+  if (info) ensureFunctionEntry(fnAddr, info.function_name);
+  markActive('xref-list', 'data-xref', xrefAddr);
+  openFn(fnAddr);
 }
 
 function openSrc(idx, el) {
@@ -972,7 +1174,12 @@ function markActive(listId,attr,val) {
 document.addEventListener('keydown',e=>{
   const isMod=e.ctrlKey||e.metaKey;
   if(isMod&&e.key==='k'){e.preventDefault();document.getElementById('fn-filter').focus();document.getElementById('fn-filter').select();}
-  if(e.key==='Escape'){document.getElementById('fn-filter').blur();document.getElementById('src-filter').blur();}
+  if(e.key==='Escape'){
+    document.getElementById('fn-filter').blur();
+    document.getElementById('src-filter').blur();
+    document.getElementById('str-filter').blur();
+    document.getElementById('xref-filter').blur();
+  }
 });
 
 // ── C Syntax Highlighter ─────────────────────────────────────────────

@@ -1030,6 +1030,7 @@ public:
                     if (!hasSources) continue;
 
                     // Replace baseTemp → phiTemp in all loop blocks
+                    int capturedBase = baseTemp;
                     for (int bi : loopBlocks) {
                         auto &lb = func.blocks[bi];
                         for (auto &stmt : lb.stmts) {
@@ -1039,7 +1040,7 @@ public:
                                 std::vector<IRExpr*> stk = {e.get()};
                                 while (!stk.empty()) {
                                     auto *nd = stk.back(); stk.pop_back();
-                                    if (nd->op == IROp::Temp && nd->tempId() == baseTemp)
+                                    if (nd->op == IROp::Temp && nd->tempId() == capturedBase)
                                         nd->value = phiTemp;
                                     for (auto &k : nd->kids) if (k) stk.push_back(k.get());
                                 }
@@ -1451,7 +1452,7 @@ private:
             { std::string nearest = m_mf.nearestSymbolName(addr);
               if (!nearest.empty()) return IRExpr::mkVar(nearest); }
             const Section *dSec = m_mf.sectionForAddress(addr);
-            if (dSec && (dSec->segname == "__DATA" || dSec->segname == "__IMPORT")) {
+            if (dSec && m_mf.isDataSection(*dSec)) {
                 char gn[32]; snprintf(gn, sizeof(gn), "g_%X", addr);
                 return IRExpr::mkVar(gn);
             }
@@ -1577,7 +1578,7 @@ private:
                     if (gt && (gt->kind == StabsTypeKind::Struct ||
                                gt->kind == StabsTypeKind::Union)) {
                         const Section *sec = m_mf.sectionForAddress(addr);
-                        if (sec && sec->segname == "__IMPORT")
+                        if (sec && m_mf.isImportSection(*sec))
                             return IRExpr::mkVar(symName, gn->typeRef);
                     }
                 }
@@ -1588,7 +1589,7 @@ private:
               if (!nearest.empty()) return IRExpr::mkVar(nearest); }
             // For addresses in data sections, use a synthetic global name
             const Section *dataSec = m_mf.sectionForAddress(addr);
-            if (dataSec && (dataSec->segname == "__DATA" || dataSec->segname == "__IMPORT")) {
+            if (dataSec && m_mf.isDataSection(*dataSec)) {
                 char gname[32]; snprintf(gname, sizeof(gname), "g_%X", addr);
                 return IRExpr::mkVar(gname);
             }
@@ -1726,7 +1727,7 @@ private:
             }
             // Synthetic global name for data section addresses
             const Section *dSec = m_mf.sectionForAddress(addr);
-            if (dSec && (dSec->segname == "__DATA" || dSec->segname == "__IMPORT")) {
+            if (dSec && m_mf.isDataSection(*dSec)) {
                 char gn[32]; snprintf(gn, sizeof(gn), "g_%X", addr);
                 bb.stmts.push_back(IRStmt::mkVarSet(gn, std::move(val), NullType, storeSize));
                 return;
@@ -1804,19 +1805,13 @@ private:
 
     // ── String resolution ───────────────────────────────────────────
     std::string tryString(uint32_t addr) const {
-        int64_t off = m_mf.fileOffsetForAddress(addr);
-        if (off < 0) return "";
-        const Section *sec = m_mf.sectionForAddress(addr);
-        if (!sec || sec->sectname != "__cstring") return "";
-        const uint8_t *p = m_mf.bytesAt(off, std::min((uint32_t)80, (uint32_t)(m_mf.size() - off)));
-        if (!p) return "";
+        std::string raw = m_mf.cStringAtAddress(addr, 1, 72);
+        if (raw.empty()) return "";
         std::string s;
-        for (int i = 0; i < 72 && p[i]; ++i) {
-            if (p[i] >= 0x20 && p[i] < 0x7F) {
-                if (p[i] == '"') s += "\\\"";
-                else if (p[i] == '\\') s += "\\\\";
-                else s += (char)p[i];
-            } else { char b[8]; snprintf(b, 8, "\\x%02X", p[i]); s += b; }
+        for (char c : raw) {
+            if (c == '"') s += "\\\"";
+            else if (c == '\\') s += "\\\\";
+            else s += c;
         }
         return s.empty() ? "" : "\"" + s + "\"";
     }
