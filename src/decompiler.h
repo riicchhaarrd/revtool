@@ -5083,6 +5083,12 @@ private:
             }
             if (e->op == IROp::Load && e->loadSize == 5) return true;
             if (e->op == IROp::Cast && (e->castKind == CastKind::IntToFloat)) return true;
+            // Bitwise ops on float: if any child of And/Or/Xor is float, propagate
+            if ((e->op == IROp::And || e->op == IROp::Or || e->op == IROp::Xor) &&
+                !e->kids.empty()) {
+                for (auto &k : e->kids)
+                    if (k && isFloatExpr(k.get())) return true;
+            }
             // Float arithmetic propagates
             if ((e->op == IROp::Add || e->op == IROp::Sub || e->op == IROp::Mul || e->op == IROp::Neg) &&
                 !e->kids.empty() && isFloatExpr(e->kids[0].get())) return true;
