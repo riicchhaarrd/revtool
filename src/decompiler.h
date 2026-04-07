@@ -3266,8 +3266,9 @@ private:
                             allEmpty = false; break;
                         }
                     }
-                    if (retStmt) {
-                        // Inline the return (label stays for other gotos to same target)
+                    if (retStmt && allEmpty) {
+                        // Only inline return if all preceding statements are empty
+                        // (no Stores, Calls, or other side-effects before the Return)
                         emitStmt(out, *retStmt, indent);
                         break;
                     }
@@ -3419,20 +3420,24 @@ private:
                         }
                         if (baseType != NullType) {
                             auto *bt = m_types.resolveType(baseType);
+                            const StabsTypeInfo *target = nullptr;
                             if (bt && bt->kind == StabsTypeKind::Pointer) {
-                                auto *target = m_types.resolveType(bt->targetType);
-                                if (target && target->sizeBytes > 0 && target->sizeBytes <= 8 &&
-                                    target->kind != StabsTypeKind::Struct &&
-                                    target->kind != StabsTypeKind::Union &&
-                                    target->kind != StabsTypeKind::Array &&
-                                    target->kind != StabsTypeKind::ForwardRef) {
-                                    int elemSize = target->sizeBytes;
-                                    int idx = off / elemSize;
-                                    if (idx * elemSize == off && idx >= 0) {
-                                        out += pad(indent) + QString::fromStdString(
-                                            base + "[" + std::to_string(idx) + "] = " + val) + ";\n";
-                                        usedArrayNotation = true;
-                                    }
+                                target = m_types.resolveType(bt->targetType);
+                            } else if (bt && bt->kind == StabsTypeKind::Array) {
+                                // Array param (e.g. vec3_t = float[3]) → use array notation
+                                target = m_types.resolveType(bt->targetType);
+                            }
+                            if (target && target->sizeBytes > 0 && target->sizeBytes <= 8 &&
+                                target->kind != StabsTypeKind::Struct &&
+                                target->kind != StabsTypeKind::Union &&
+                                target->kind != StabsTypeKind::Array &&
+                                target->kind != StabsTypeKind::ForwardRef) {
+                                int elemSize = target->sizeBytes;
+                                int idx = off / elemSize;
+                                if (idx * elemSize == off && idx >= 0) {
+                                    out += pad(indent) + QString::fromStdString(
+                                        base + "[" + std::to_string(idx) + "] = " + val) + ";\n";
+                                    usedArrayNotation = true;
                                 }
                             }
                         }
@@ -3553,8 +3558,11 @@ private:
                         std::string is = emitExpr(storeIdx);
                         out += pad(indent) + QString::fromStdString(
                             "*(" + storeCast + " *)((char *)" + bs + " + " + is + " * " + std::to_string(storeScale) + ") = " + val) + ";\n";
+                    } else {
+                        // No Mul pattern found — emit general pointer store
+                        out += pad(indent) + QString::fromStdString(
+                            "*(" + storeCast + " *)((char *)(" + emitExpr(a) + ")) = " + val) + ";\n";
                     }
-                    // handled — skip remaining else-ifs
                 }
                 // Add(Add(base, Mul(idx, scale)), const) → base->arr_NN[idx] = val
                 else if (a->op == IROp::Add && a->kids.size() == 2 &&

@@ -872,8 +872,16 @@ private:
                                     // (single block with few stmts = error/exit handler).
                                     // If so, swap to preserve the original branch direction.
                                     auto &tbb = m_func->blocks[trueB];
+                                    auto &fbb = m_func->blocks[falseB];
                                     bool trueIsSmall = (tbb.stmts.size() <= 6 && tbb.succs.empty());
-                                    if (trueIsSmall) {
+                                    // Don't swap if falseB has side-effect stmts
+                                    // (Store/Call) that could get lost in structuring
+                                    bool falseHasSideEffects = false;
+                                    for (auto &s : fbb.stmts)
+                                        if (s.kind == IRStmtKind::Store || s.kind == IRStmtKind::Call ||
+                                            s.kind == IRStmtKind::VarSet)
+                                            { falseHasSideEffects = true; break; }
+                                    if (trueIsSmall && !falseHasSideEffects) {
                                         // Swap: emit if(!cond) { falseB } trueB
                                         auto swapNode = StructNode::mkIf(last.expr.get(), true);
                                         std::vector<bool> falseVisited = visited;
