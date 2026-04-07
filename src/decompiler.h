@@ -4804,24 +4804,33 @@ private:
                 case IROp::Xor:  op = " ^ "; break;
                 default: op = " + "; break;
                 }
-                if (e->op == IROp::Shr) {
-                    // Logical shift right needs unsigned cast to avoid sar
-                    // For float operands, cast to int first (SSE bit manipulation)
-                    // Check both IR type AND emitted string for float params
+                if (e->op == IROp::Shr || e->op == IROp::Sar) {
+                    // Check if operand is float (SSE bit manipulation pattern)
                     bool lhsFloat = isFloatExpr(e->kids[0].get());
                     if (!lhsFloat) {
-                        // Also check if lhs string matches a float param name
+                        // Also check if lhs string matches a float param/local name
+                        // Use formatType (not resolveType) to handle typedefs named "float"
                         for (auto &p : m_func.params)
-                            if (p.name == lhs && p.typeRef != NullType) {
-                                auto *t = m_types.resolveType(p.typeRef);
-                                if (t && (t->kind == StabsTypeKind::Float || t->kind == StabsTypeKind::Double))
+                            if (cName(p.name) == lhs && p.typeRef != NullType) {
+                                std::string ts = m_types.formatType(p.typeRef);
+                                if (ts == "float" || ts == "double")
                                     lhsFloat = true;
                             }
+                        if (!lhsFloat) {
+                            for (auto &l : m_func.locals)
+                                if (cName(l.name) == lhs && l.typeRef != NullType) {
+                                    std::string ts = m_types.formatType(l.typeRef);
+                                    if (ts == "float" || ts == "double")
+                                        lhsFloat = true;
+                                }
+                        }
                     }
                     if (lhsFloat)
                         result = "((unsigned)(int)(" + lhs + ") >> " + rhs + ")";
-                    else
+                    else if (e->op == IROp::Shr)
                         result = "((unsigned)(" + lhs + ") >> " + rhs + ")";
+                    else
+                        result = "(" + lhs + op + rhs + ")";
                 } else if (e->op == IROp::Add) {
                     // When adding to an address-of or struct/array expression,
                     // cast to (char*) to prevent pointer arithmetic scaling.
@@ -5103,15 +5112,13 @@ private:
                 if (!srcName.empty()) {
                     for (auto &p : m_func.params)
                         if (p.name == srcName && p.typeRef != NullType) {
-                            auto *t = m_types.resolveType(p.typeRef);
-                            if (t && (t->kind == StabsTypeKind::Float || t->kind == StabsTypeKind::Double))
-                                return true;
+                            std::string ts = m_types.formatType(p.typeRef);
+                            if (ts == "float" || ts == "double") return true;
                         }
                     for (auto &l : m_func.locals)
                         if (l.name == srcName && l.typeRef != NullType) {
-                            auto *t = m_types.resolveType(l.typeRef);
-                            if (t && (t->kind == StabsTypeKind::Float || t->kind == StabsTypeKind::Double))
-                                return true;
+                            std::string ts = m_types.formatType(l.typeRef);
+                            if (ts == "float" || ts == "double") return true;
                         }
                 }
                 return false;
@@ -5120,19 +5127,20 @@ private:
                 // Check if variable is declared as float
                 for (auto &l : m_func.locals)
                     if (l.name == e->name && l.typeRef != NullType) {
-                        auto *t = m_types.resolveType(l.typeRef);
-                        return t && (t->kind == StabsTypeKind::Float || t->kind == StabsTypeKind::Double);
+                        std::string ts = m_types.formatType(l.typeRef);
+                        return ts == "float" || ts == "double";
                     }
                 for (auto &p : m_func.params)
                     if (p.name == e->name && p.typeRef != NullType) {
-                        auto *t = m_types.resolveType(p.typeRef);
-                        return t && (t->kind == StabsTypeKind::Float || t->kind == StabsTypeKind::Double);
+                        std::string ts = m_types.formatType(p.typeRef);
+                        return ts == "float" || ts == "double";
                     }
             }
             if (e->op == IROp::Load && e->loadSize == 5) return true;
             if (e->op == IROp::Cast && (e->castKind == CastKind::IntToFloat)) return true;
-            // Bitwise ops on float: if any child of And/Or/Xor is float, propagate
-            if ((e->op == IROp::And || e->op == IROp::Or || e->op == IROp::Xor) &&
+            // Bitwise/shift ops on float: if any child is float, propagate
+            if ((e->op == IROp::And || e->op == IROp::Or || e->op == IROp::Xor ||
+                 e->op == IROp::Shr || e->op == IROp::Sar || e->op == IROp::Shl) &&
                 !e->kids.empty()) {
                 for (auto &k : e->kids)
                     if (k && isFloatExpr(k.get())) return true;
