@@ -251,9 +251,18 @@ public:
         }
 
         QString funcBodies;
+        std::set<uint32_t> emittedAddrs; // track to avoid duplicate function definitions
+        std::set<std::string> emittedNames;
         for (size_t fi : sorted) {
             auto &fn = mf.stabsFunctions()[fi];
             if (fn.address == 0) continue;
+            if (emittedAddrs.count(fn.address)) continue; // skip duplicate addr
+            std::string cname = fn.name;
+            { size_t p = 0; while ((p = cname.find("::", p)) != std::string::npos) cname.replace(p, 2, "_"); }
+            { size_t p = 0; while ((p = cname.find("~", p)) != std::string::npos) cname.replace(p, 1, "dtor_"); }
+            if (emittedNames.count(cname)) continue; // skip duplicate name
+            emittedAddrs.insert(fn.address);
+            emittedNames.insert(cname);
             funcBodies += decompile(mf, fn.address, false); // skip per-function formatting
             funcBodies += "\n";
         }
