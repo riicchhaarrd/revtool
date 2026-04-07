@@ -4828,14 +4828,10 @@ private:
                         result = "(" + lhs + op + rhs + ")";
                 } else if ((e->op == IROp::And || e->op == IROp::Or || e->op == IROp::Xor) &&
                            e->kids[0] && e->kids[1] &&
-                           // Only for actual float operands (Load with float size, or float Var)
-                           // NOT for comparisons (Ne, Eq, etc.) which return int
-                           e->kids[0]->op != IROp::Ne && e->kids[0]->op != IROp::Eq &&
-                           e->kids[0]->op != IROp::Slt && e->kids[0]->op != IROp::Sgt &&
-                           e->kids[0]->op != IROp::Sle && e->kids[0]->op != IROp::Sge &&
-                           (lhs.find(".0f") != std::string::npos || rhs.find(".0f") != std::string::npos ||
-                            (e->kids[0]->op == IROp::Load && e->kids[0]->loadSize == 5) ||
-                            (e->kids[1]->op == IROp::Load && e->kids[1]->loadSize == 5))) {
+                           // Only for actual float operands, NOT comparisons
+                           !(e->kids[0]->op >= IROp::Eq && e->kids[0]->op <= IROp::Uge) &&
+                           !(e->kids[1]->op >= IROp::Eq && e->kids[1]->op <= IROp::Uge) &&
+                           (isFloatExpr(e->kids[0].get()) || isFloatExpr(e->kids[1].get()))) {
                     // Float bitwise: cast operands to int (SSE andps/orps pattern)
                     result = "((int)(" + lhs + ")" + op + "(int)(" + rhs + "))";
                 } else {
@@ -5064,6 +5060,31 @@ private:
         }
 
         // Infer temp type from its defining expression (with cycle detection)
+        // Check if an expression evaluates to float type
+        bool isFloatExpr(IRExpr *e) {
+            if (!e) return false;
+            if (e->op == IROp::Temp) return inferTempType(e->tempId()) == "float";
+            if (e->op == IROp::Var && !e->name.empty()) {
+                // Check if variable is declared as float
+                for (auto &l : m_func.locals)
+                    if (l.name == e->name && l.typeRef != NullType) {
+                        auto *t = m_types.resolveType(l.typeRef);
+                        return t && (t->kind == StabsTypeKind::Float || t->kind == StabsTypeKind::Double);
+                    }
+                for (auto &p : m_func.params)
+                    if (p.name == e->name && p.typeRef != NullType) {
+                        auto *t = m_types.resolveType(p.typeRef);
+                        return t && (t->kind == StabsTypeKind::Float || t->kind == StabsTypeKind::Double);
+                    }
+            }
+            if (e->op == IROp::Load && e->loadSize == 5) return true;
+            if (e->op == IROp::Cast && (e->castKind == CastKind::IntToFloat)) return true;
+            // Float arithmetic propagates
+            if ((e->op == IROp::Add || e->op == IROp::Sub || e->op == IROp::Mul || e->op == IROp::Neg) &&
+                !e->kids.empty() && isFloatExpr(e->kids[0].get())) return true;
+            return false;
+        }
+
         std::string inferTempType(int id, int depth = 0) {
             if (depth > 10) return "int"; // depth limit to prevent infinite recursion
             auto it = m_tempDef.find(id);
