@@ -1,6 +1,7 @@
 #pragma once
 #include "demangle.h"
 #include "stabs_types.h"
+#include <capstone/capstone.h>
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -143,6 +144,60 @@ struct Dylib {
     uint32_t compat_version;
 };
 
+enum class BinaryFormat {
+    Unknown,
+    MachO32,
+    PE32,
+};
+
+struct DataDirectoryEntry {
+    std::string name;
+    uint32_t rva = 0;
+    uint32_t size = 0;
+};
+
+struct PEHeader {
+    uint32_t peOffset = 0;
+    uint32_t signature = 0;
+    uint16_t machine = 0;
+    uint16_t numberOfSections = 0;
+    uint32_t timeDateStamp = 0;
+    uint32_t pointerToSymbolTable = 0;
+    uint32_t numberOfSymbols = 0;
+    uint16_t sizeOfOptionalHeader = 0;
+    uint16_t characteristics = 0;
+    uint16_t optionalMagic = 0;
+    uint8_t  majorLinkerVersion = 0;
+    uint8_t  minorLinkerVersion = 0;
+    uint32_t sizeOfCode = 0;
+    uint32_t sizeOfInitializedData = 0;
+    uint32_t sizeOfUninitializedData = 0;
+    uint32_t addressOfEntryPoint = 0;
+    uint32_t baseOfCode = 0;
+    uint32_t baseOfData = 0;
+    uint32_t imageBase = 0;
+    uint32_t sectionAlignment = 0;
+    uint32_t fileAlignment = 0;
+    uint16_t majorOSVersion = 0;
+    uint16_t minorOSVersion = 0;
+    uint16_t majorImageVersion = 0;
+    uint16_t minorImageVersion = 0;
+    uint16_t majorSubsystemVersion = 0;
+    uint16_t minorSubsystemVersion = 0;
+    uint32_t sizeOfImage = 0;
+    uint32_t sizeOfHeaders = 0;
+    uint32_t checksum = 0;
+    uint16_t subsystem = 0;
+    uint16_t dllCharacteristics = 0;
+    uint32_t sizeOfStackReserve = 0;
+    uint32_t sizeOfStackCommit = 0;
+    uint32_t sizeOfHeapReserve = 0;
+    uint32_t sizeOfHeapCommit = 0;
+    uint32_t loaderFlags = 0;
+    uint32_t numberOfRvaAndSizes = 0;
+    std::vector<DataDirectoryEntry> dataDirectories;
+};
+
 struct StabsFunction {
     std::string name;
     std::string rawName;     // with type info
@@ -168,6 +223,7 @@ struct StabsSourceFile {
 class MachOFile {
 public:
     bool load(const std::string &path) {
+        clear();
         std::ifstream ifs(path, std::ios::binary | std::ios::ate);
         if (!ifs) return false;
         m_size = ifs.tellg();
@@ -183,6 +239,10 @@ public:
     const std::string&       path()       const { return m_path; }
     const uint8_t*           data()       const { return m_data.data(); }
     size_t                   size()       const { return m_size; }
+    BinaryFormat             format()     const { return m_format; }
+    bool                     isMachO()    const { return m_format == BinaryFormat::MachO32; }
+    bool                     isPE()       const { return m_format == BinaryFormat::PE32; }
+    const PEHeader&          peHeader()   const { return m_peHeader; }
     const MachHeader&        header()     const { return m_header; }
     const std::vector<LoadCommand>& loadCommands() const { return m_loadCmds; }
     const std::vector<Segment>&     segments()     const { return m_segments; }
@@ -192,6 +252,18 @@ public:
     const std::vector<StabsSourceFile>& stabsSourceFiles() const { return m_stabsSources; }
     const StabsTypeTable&               typeTable()        const { return m_typeTable; }
     uint32_t entryPoint() const { return m_entryPoint; }
+    const std::vector<DataDirectoryEntry>& dataDirectories() const {
+        return m_peHeader.dataDirectories;
+    }
+
+    const char* formatName() const {
+        switch (m_format) {
+        case BinaryFormat::MachO32: return "Mach-O i386";
+        case BinaryFormat::PE32:    return "PE32 i386";
+        default:                    return "Unknown";
+        }
+        return "Unknown";
+    }
 
     // Build a flat section list
     std::vector<const Section*> allSections() const {
@@ -206,7 +278,7 @@ public:
     const Section* sectionForAddress(uint32_t addr) const {
         for (auto &seg : m_segments)
             for (auto &sec : seg.sections)
-                if (addr >= sec.addr && addr < sec.addr + sec.size)
+                if (addr >= sec.addr && addr < sec.addr + sectionAddressSpan(sec))
                     return &sec;
         return nullptr;
     }
@@ -221,23 +293,94 @@ public:
 
     // Convert virtual address to file offset
     int64_t fileOffsetForAddress(uint32_t addr) const {
-        for (auto &seg : m_segments) {
-            if (addr >= seg.vmaddr && addr < seg.vmaddr + seg.vmsize) {
-                uint32_t off = addr - seg.vmaddr + seg.fileoff;
-                if (off < m_size) return off;
-            }
-        }
+        for (auto &seg : m_segments)
+            for (auto &sec : seg.sections)
+                if (addr >= sec.addr && addr < sec.addr + sectionAddressSpan(sec)) {
+                    uint32_t delta = addr - sec.addr;
+                    if (delta >= sec.size || sec.size == 0) return -1;
+                    uint32_t off = delta + sec.offset;
+                    if (off < m_size) return off;
+                }
         return -1;
     }
 
     // Convert file offset to virtual address
     int64_t addressForFileOffset(uint32_t off) const {
-        for (auto &seg : m_segments) {
-            if (off >= seg.fileoff && off < seg.fileoff + seg.filesize) {
-                return off - seg.fileoff + seg.vmaddr;
-            }
-        }
+        for (auto &seg : m_segments)
+            for (auto &sec : seg.sections)
+                if (off >= sec.offset && off < sec.offset + sec.size) {
+                    return off - sec.offset + sec.addr;
+                }
         return -1;
+    }
+
+    bool isCodeSection(const Section &sec) const {
+        if (isPE()) {
+            return (sec.flags & 0x00000020) || (sec.flags & 0x20000000) ||
+                   sec.sectname == ".text" || sec.sectname == ".code";
+        }
+        return (sec.flags & 0x80000000) || (sec.flags & 0x00000400) ||
+               ((sec.flags & 0xFF) == 0 && sec.sectname.find("text") != std::string::npos);
+    }
+
+    bool isTextSection(const Section &sec) const {
+        if (isPE()) return sec.sectname == ".text" || isCodeSection(sec);
+        return sec.sectname == "__text" || sec.sectname == "__textcoal_nt" || isCodeSection(sec);
+    }
+
+    bool isImportSection(const Section &sec) const {
+        if (isPE()) {
+            return sec.sectname == ".idata" || sec.sectname == ".didat" ||
+                   sec.sectname == ".rdata";
+        }
+        return sec.segname == "__IMPORT";
+    }
+
+    bool isCStringSection(const Section &sec) const {
+        if (isPE())
+            return sec.sectname == ".rdata" || sec.sectname == ".data" ||
+                   sec.sectname == ".idata";
+        return sec.sectname == "__cstring";
+    }
+
+    bool isDataSection(const Section &sec) const {
+        if (isCodeSection(sec)) return false;
+        if (isPE()) {
+            return sec.sectname == ".data" || sec.sectname == ".rdata" ||
+                   sec.sectname == ".idata" || sec.sectname == ".bss" ||
+                   sec.sectname == ".tls" || sec.sectname == ".rsrc" ||
+                   (sec.flags & 0x00000040) || (sec.flags & 0x00000080);
+        }
+        return sec.segname == "__DATA" || sec.segname == "__IMPORT";
+    }
+
+    std::string cStringAtAddress(uint32_t addr, size_t minLen = 1,
+                                 size_t maxLen = 256) const {
+        int64_t off = fileOffsetForAddress(addr);
+        if (off < 0) return "";
+        const Section *sec = sectionForAddress(addr);
+        if (!sec || (!isCStringSection(*sec) && !isDataSection(*sec))) return "";
+        uint32_t delta = addr - sec->addr;
+        if (delta >= sec->size || sec->size == 0) return "";
+
+        size_t limit = std::min<size_t>(maxLen, sec->size - delta);
+        const uint8_t *p = bytesAt((uint32_t)off, (uint32_t)limit);
+        if (!p || limit == 0) return "";
+
+        std::string out;
+        bool terminated = false;
+        for (size_t i = 0; i < limit; ++i) {
+            uint8_t c = p[i];
+            if (c == 0) {
+                terminated = true;
+                break;
+            }
+            if (c < 0x20 || c >= 0x7F)
+                return "";
+            out += (char)c;
+        }
+        if (!terminated || out.size() < minLen) return "";
+        return out;
     }
 
     // Read bytes at file offset
@@ -355,7 +498,75 @@ public:
         return out.empty() ? "NONE" : out;
     }
 
+    static const char* peMachineName(uint16_t machine) {
+        switch (machine) {
+        case 0x014c: return "i386";
+        case 0x8664: return "x86_64";
+        default:     return "unknown";
+        }
+    }
+
+    static const char* peSubsystemName(uint16_t subsystem) {
+        switch (subsystem) {
+        case 1: return "Native";
+        case 2: return "Windows GUI";
+        case 3: return "Windows CUI";
+        case 5: return "OS/2 CUI";
+        case 7: return "POSIX CUI";
+        case 9: return "Windows CE";
+        case 10: return "EFI Application";
+        case 11: return "EFI Boot Service Driver";
+        case 12: return "EFI Runtime Driver";
+        case 14: return "Xbox";
+        default: return "Unknown";
+        }
+    }
+
+    static std::string peCharacteristicsString(uint16_t chars) {
+        std::string out;
+        auto add = [&](uint16_t bit, const char *name) {
+            if (chars & bit) { if (!out.empty()) out += " | "; out += name; }
+        };
+        add(0x0001, "RELOCS_STRIPPED");
+        add(0x0002, "EXECUTABLE_IMAGE");
+        add(0x0004, "LINE_NUMS_STRIPPED");
+        add(0x0008, "LOCAL_SYMS_STRIPPED");
+        add(0x0010, "AGGRESSIVE_WS_TRIM");
+        add(0x0020, "LARGE_ADDRESS_AWARE");
+        add(0x0100, "32BIT_MACHINE");
+        add(0x0200, "DEBUG_STRIPPED");
+        add(0x2000, "DLL");
+        add(0x4000, "UP_SYSTEM_ONLY");
+        return out.empty() ? "NONE" : out;
+    }
+
 private:
+    uint32_t sectionAddressSpan(const Section &sec) const {
+        if (isPE() && sec.segname == "IMAGE")
+            return sec.align ? sec.align : sec.size;
+        return sec.size;
+    }
+
+    void clear() {
+        m_path.clear();
+        m_data.clear();
+        m_size = 0;
+        m_format = BinaryFormat::Unknown;
+        m_header = {};
+        m_peHeader = {};
+        m_loadCmds.clear();
+        m_segments.clear();
+        m_symbols.clear();
+        m_dataSymMap.clear();
+        m_dylibs.clear();
+        m_symoff = m_nsyms = m_stroff = m_strsize = 0;
+        m_entryPoint = 0;
+        m_stabsFuncs.clear();
+        m_stabsSources.clear();
+        m_funcMap.clear();
+        m_typeTable = StabsTypeTable();
+    }
+
     template<typename T>
     T readLE(size_t off) const {
         T val;
@@ -376,7 +587,16 @@ private:
     }
 
     bool parse() {
+        if (m_size >= 0x40 && readLE<uint16_t>(0) == 0x5A4D)
+            return parsePE();
         if (m_size < 28) return false;
+        if (readLE<uint32_t>(0) == MH_MAGIC_32)
+            return parseMachO();
+        return false;
+    }
+
+    bool parseMachO() {
+        m_format = BinaryFormat::MachO32;
         m_header.magic      = readLE<uint32_t>(0);
         m_header.cputype    = readLE<int32_t>(4);
         m_header.cpusubtype = readLE<int32_t>(8);
@@ -411,6 +631,261 @@ private:
 
         parseSTABS();
         buildFunctionMap();
+        return true;
+    }
+
+    int sectionIndexForAddress(uint32_t addr) const {
+        int idx = 0;
+        for (auto &seg : m_segments)
+            for (auto &sec : seg.sections) {
+                if (addr >= sec.addr && addr < sec.addr + sectionAddressSpan(sec))
+                    return idx;
+                ++idx;
+            }
+        return -1;
+    }
+
+    int64_t peFileOffsetForRva(uint32_t rva) const {
+        if (rva < m_peHeader.sizeOfHeaders && rva < m_size)
+            return rva;
+        for (auto &seg : m_segments) {
+            for (auto &sec : seg.sections) {
+                uint32_t secRva = sec.addr - m_peHeader.imageBase;
+                uint32_t secSpan = sectionAddressSpan(sec);
+                if (rva >= secRva && rva < secRva + secSpan) {
+                    if (sec.size == 0 || rva - secRva >= sec.size) return -1;
+                    uint32_t off = sec.offset + (rva - secRva);
+                    if (off < m_size) return off;
+                }
+            }
+        }
+        return -1;
+    }
+
+    void addPESymbol(const std::string &name, uint32_t addr, uint8_t ntype, int secIdx) {
+        if (name.empty()) return;
+        for (auto &sym : m_symbols)
+            if (sym.n_value == addr && sym.name == name && sym.n_type == ntype)
+                return;
+        NList sym{};
+        sym.n_type = ntype;
+        sym.n_sect = secIdx >= 0 ? (uint8_t)(secIdx + 1) : 0;
+        sym.n_value = addr;
+        sym.name = name;
+        m_symbols.push_back(std::move(sym));
+    }
+
+    void parsePEImports(uint32_t dirRva, uint32_t dirSize) {
+        if (!dirRva || !dirSize) return;
+        int64_t dirOff = peFileOffsetForRva(dirRva);
+        if (dirOff < 0) return;
+        for (uint32_t off = (uint32_t)dirOff; off + 20 <= m_size; off += 20) {
+            uint32_t origFirstThunk = readLE<uint32_t>(off + 0);
+            uint32_t timeDateStamp  = readLE<uint32_t>(off + 4);
+            uint32_t forwarderChain = readLE<uint32_t>(off + 8);
+            uint32_t nameRva        = readLE<uint32_t>(off + 12);
+            uint32_t firstThunk     = readLE<uint32_t>(off + 16);
+            if (!origFirstThunk && !timeDateStamp && !forwarderChain &&
+                !nameRva && !firstThunk)
+                break;
+
+            int64_t nameOff = peFileOffsetForRva(nameRva);
+            std::string dllName = nameOff >= 0 ? readString((size_t)nameOff) : "";
+            if (!dllName.empty())
+                m_dylibs.push_back({dllName, 0, 0, 0});
+
+            uint32_t thunkRva = origFirstThunk ? origFirstThunk : firstThunk;
+            int64_t thunkOff = peFileOffsetForRva(thunkRva);
+            int64_t iatOff = peFileOffsetForRva(firstThunk);
+            if (thunkOff < 0 || iatOff < 0) continue;
+
+            for (uint32_t idx = 0; ; ++idx) {
+                uint32_t tOff = (uint32_t)thunkOff + idx * 4;
+                uint32_t fOff = (uint32_t)iatOff + idx * 4;
+                if (tOff + 4 > m_size || fOff + 4 > m_size) break;
+                uint32_t thunkVal = readLE<uint32_t>(tOff);
+                if (!thunkVal) break;
+
+                std::string importName;
+                if (thunkVal & 0x80000000) {
+                    importName = dllName + "!#" + std::to_string(thunkVal & 0xFFFF);
+                } else {
+                    int64_t ibnOff = peFileOffsetForRva(thunkVal);
+                    if (ibnOff < 0 || ibnOff + 2 > (int64_t)m_size) break;
+                    importName = readString((size_t)ibnOff + 2);
+                    if (!dllName.empty())
+                        importName = dllName + "!" + importName;
+                }
+
+                uint32_t iatAddr = m_peHeader.imageBase + firstThunk + idx * 4;
+                int secIdx = sectionIndexForAddress(iatAddr);
+                addPESymbol(importName, iatAddr, N_UNDF, secIdx);
+                m_funcMap[iatAddr] = importName;
+            }
+        }
+    }
+
+    void parsePEExports(uint32_t dirRva, uint32_t dirSize) {
+        if (!dirRva || !dirSize) return;
+        int64_t dirOff = peFileOffsetForRva(dirRva);
+        if (dirOff < 0 || dirOff + 40 > (int64_t)m_size) return;
+
+        uint32_t numberOfFunctions = readLE<uint32_t>(dirOff + 20);
+        uint32_t numberOfNames = readLE<uint32_t>(dirOff + 24);
+        uint32_t addressOfFunctions = readLE<uint32_t>(dirOff + 28);
+        uint32_t addressOfNames = readLE<uint32_t>(dirOff + 32);
+        uint32_t addressOfNameOrdinals = readLE<uint32_t>(dirOff + 36);
+
+        int64_t funcsOff = peFileOffsetForRva(addressOfFunctions);
+        int64_t namesOff = peFileOffsetForRva(addressOfNames);
+        int64_t ordsOff = peFileOffsetForRva(addressOfNameOrdinals);
+        if (funcsOff < 0 || namesOff < 0 || ordsOff < 0) return;
+
+        for (uint32_t i = 0; i < numberOfNames; ++i) {
+            if (namesOff + (i + 1) * 4 > (int64_t)m_size ||
+                ordsOff + (i + 1) * 2 > (int64_t)m_size)
+                break;
+            uint32_t nameRva = readLE<uint32_t>(namesOff + i * 4);
+            uint16_t ordinal = readLE<uint16_t>(ordsOff + i * 2);
+            if (ordinal >= numberOfFunctions ||
+                funcsOff + (ordinal + 1) * 4 > (int64_t)m_size)
+                continue;
+            int64_t nameOff = peFileOffsetForRva(nameRva);
+            if (nameOff < 0) continue;
+            std::string name = readString((size_t)nameOff);
+            uint32_t funcRva = readLE<uint32_t>(funcsOff + ordinal * 4);
+            if (!funcRva) continue;
+
+            // Forwarded exports point back into the export directory.
+            if (funcRva >= dirRva && funcRva < dirRva + dirSize)
+                continue;
+
+            uint32_t addr = m_peHeader.imageBase + funcRva;
+            int secIdx = sectionIndexForAddress(addr);
+            addPESymbol(name, addr, N_SECT, secIdx);
+            if (secIdx >= 0 && m_funcMap.find(addr) == m_funcMap.end()) {
+                auto secs = allSections();
+                if (secIdx < (int)secs.size() && isCodeSection(*secs[secIdx]))
+                    m_funcMap[addr] = demangleNameOnly(name);
+            }
+        }
+    }
+
+    bool parsePE() {
+        if (m_size < 0x100 || readLE<uint16_t>(0) != 0x5A4D) return false;
+        uint32_t peOff = readLE<uint32_t>(0x3C);
+        if (peOff + 24 > m_size) return false;
+        if (readLE<uint32_t>(peOff) != 0x00004550) return false;
+
+        m_format = BinaryFormat::PE32;
+        m_peHeader.peOffset = peOff;
+        m_peHeader.signature = readLE<uint32_t>(peOff);
+        m_peHeader.machine = readLE<uint16_t>(peOff + 4);
+        m_peHeader.numberOfSections = readLE<uint16_t>(peOff + 6);
+        m_peHeader.timeDateStamp = readLE<uint32_t>(peOff + 8);
+        m_peHeader.pointerToSymbolTable = readLE<uint32_t>(peOff + 12);
+        m_peHeader.numberOfSymbols = readLE<uint32_t>(peOff + 16);
+        m_peHeader.sizeOfOptionalHeader = readLE<uint16_t>(peOff + 20);
+        m_peHeader.characteristics = readLE<uint16_t>(peOff + 22);
+
+        uint32_t optOff = peOff + 24;
+        if (optOff + m_peHeader.sizeOfOptionalHeader > m_size ||
+            m_peHeader.sizeOfOptionalHeader < 96)
+            return false;
+
+        m_peHeader.optionalMagic = readLE<uint16_t>(optOff + 0);
+        if (m_peHeader.optionalMagic != 0x10B) return false;
+        m_peHeader.majorLinkerVersion = readLE<uint8_t>(optOff + 2);
+        m_peHeader.minorLinkerVersion = readLE<uint8_t>(optOff + 3);
+        m_peHeader.sizeOfCode = readLE<uint32_t>(optOff + 4);
+        m_peHeader.sizeOfInitializedData = readLE<uint32_t>(optOff + 8);
+        m_peHeader.sizeOfUninitializedData = readLE<uint32_t>(optOff + 12);
+        m_peHeader.addressOfEntryPoint = readLE<uint32_t>(optOff + 16);
+        m_peHeader.baseOfCode = readLE<uint32_t>(optOff + 20);
+        m_peHeader.baseOfData = readLE<uint32_t>(optOff + 24);
+        m_peHeader.imageBase = readLE<uint32_t>(optOff + 28);
+        m_peHeader.sectionAlignment = readLE<uint32_t>(optOff + 32);
+        m_peHeader.fileAlignment = readLE<uint32_t>(optOff + 36);
+        m_peHeader.majorOSVersion = readLE<uint16_t>(optOff + 40);
+        m_peHeader.minorOSVersion = readLE<uint16_t>(optOff + 42);
+        m_peHeader.majorImageVersion = readLE<uint16_t>(optOff + 44);
+        m_peHeader.minorImageVersion = readLE<uint16_t>(optOff + 46);
+        m_peHeader.majorSubsystemVersion = readLE<uint16_t>(optOff + 48);
+        m_peHeader.minorSubsystemVersion = readLE<uint16_t>(optOff + 50);
+        m_peHeader.sizeOfImage = readLE<uint32_t>(optOff + 56);
+        m_peHeader.sizeOfHeaders = readLE<uint32_t>(optOff + 60);
+        m_peHeader.checksum = readLE<uint32_t>(optOff + 64);
+        m_peHeader.subsystem = readLE<uint16_t>(optOff + 68);
+        m_peHeader.dllCharacteristics = readLE<uint16_t>(optOff + 70);
+        m_peHeader.sizeOfStackReserve = readLE<uint32_t>(optOff + 72);
+        m_peHeader.sizeOfStackCommit = readLE<uint32_t>(optOff + 76);
+        m_peHeader.sizeOfHeapReserve = readLE<uint32_t>(optOff + 80);
+        m_peHeader.sizeOfHeapCommit = readLE<uint32_t>(optOff + 84);
+        m_peHeader.loaderFlags = readLE<uint32_t>(optOff + 88);
+        m_peHeader.numberOfRvaAndSizes = readLE<uint32_t>(optOff + 92);
+        m_entryPoint = m_peHeader.imageBase + m_peHeader.addressOfEntryPoint;
+
+        static const char *kDirNames[] = {
+            "Export", "Import", "Resource", "Exception",
+            "Security", "Base Reloc", "Debug", "Architecture",
+            "Global Ptr", "TLS", "Load Config", "Bound Import",
+            "IAT", "Delay Import", "CLR", "Reserved"
+        };
+        uint32_t dirCount = std::min<uint32_t>(m_peHeader.numberOfRvaAndSizes, 16);
+        for (uint32_t i = 0; i < dirCount && optOff + 96 + (i + 1) * 8 <= m_size; ++i) {
+            DataDirectoryEntry dir;
+            dir.name = kDirNames[i];
+            dir.rva = readLE<uint32_t>(optOff + 96 + i * 8);
+            dir.size = readLE<uint32_t>(optOff + 96 + i * 8 + 4);
+            m_peHeader.dataDirectories.push_back(std::move(dir));
+        }
+
+        Segment imageSeg;
+        imageSeg.segname = "IMAGE";
+        imageSeg.vmaddr = m_peHeader.imageBase;
+        imageSeg.vmsize = m_peHeader.sizeOfImage;
+        imageSeg.fileoff = 0;
+        imageSeg.filesize = (uint32_t)m_size;
+        imageSeg.nsects = m_peHeader.numberOfSections;
+        imageSeg.flags = m_peHeader.characteristics;
+
+        uint32_t secOff = optOff + m_peHeader.sizeOfOptionalHeader;
+        if (secOff + m_peHeader.numberOfSections * 40 > m_size) return false;
+        for (uint32_t i = 0; i < m_peHeader.numberOfSections; ++i) {
+            uint32_t shOff = secOff + i * 40;
+            Section sec;
+            sec.sectname = readFixedString(shOff + 0, 8);
+            sec.segname = "IMAGE";
+            uint32_t virtualSize = readLE<uint32_t>(shOff + 8);
+            uint32_t virtualAddress = readLE<uint32_t>(shOff + 12);
+            uint32_t sizeOfRawData = readLE<uint32_t>(shOff + 16);
+            uint32_t pointerToRawData = readLE<uint32_t>(shOff + 20);
+            sec.addr = m_peHeader.imageBase + virtualAddress;
+            sec.size = sizeOfRawData;
+            sec.align = virtualSize ? virtualSize : sizeOfRawData;
+            sec.offset = pointerToRawData;
+            sec.reloff = readLE<uint32_t>(shOff + 24);
+            sec.nreloc = readLE<uint16_t>(shOff + 32);
+            sec.flags = readLE<uint32_t>(shOff + 36);
+            imageSeg.sections.push_back(std::move(sec));
+        }
+        m_segments.push_back(std::move(imageSeg));
+
+        if (m_entryPoint && m_funcMap.find(m_entryPoint) == m_funcMap.end())
+            m_funcMap[m_entryPoint] = "entry_point";
+
+        if (!m_peHeader.dataDirectories.empty()) {
+            if (m_peHeader.dataDirectories.size() > 0)
+                parsePEExports(m_peHeader.dataDirectories[0].rva,
+                               m_peHeader.dataDirectories[0].size);
+            if (m_peHeader.dataDirectories.size() > 1)
+                parsePEImports(m_peHeader.dataDirectories[1].rva,
+                               m_peHeader.dataDirectories[1].size);
+        }
+
+        buildFunctionMap();
+        if (m_entryPoint && m_funcMap.find(m_entryPoint) == m_funcMap.end())
+            m_funcMap[m_entryPoint] = "entry_point";
         return true;
     }
 
@@ -865,15 +1340,135 @@ private:
                 m_funcMap[fn.address] = fn.name;
         }
         // Also add non-STABS external symbols (demangled)
+        auto secs = allSections();
         for (auto &sym : m_symbols) {
             if (sym.n_type & N_STAB) continue;
             if ((sym.n_type & N_TYPE) == N_SECT && sym.n_value) {
+                int secIdx = sym.n_sect > 0 ? (int)sym.n_sect - 1 : -1;
+                if (secIdx >= 0 && secIdx < (int)secs.size() &&
+                    !isCodeSection(*secs[secIdx]))
+                    continue;
                 if (m_funcMap.find(sym.n_value) == m_funcMap.end())
                     m_funcMap[sym.n_value] = demangleNameOnly(sym.name);
             }
         }
         // Resolve import stubs via indirect symbol table
-        resolveImportStubs();
+        if (isMachO())
+            resolveImportStubs();
+        if (isPE()) {
+            discoverFunctionStartsFromCalls();
+            discoverFunctionStartsFromPadding();
+        }
+    }
+
+    void discoverFunctionStartsFromCalls() {
+        csh cs = 0;
+        if (cs_open(CS_ARCH_X86, CS_MODE_32, &cs) != CS_ERR_OK) return;
+        cs_option(cs, CS_OPT_DETAIL, CS_OPT_ON);
+
+        for (const Section *sec : allSections()) {
+            if (!sec || !isCodeSection(*sec) || sec->size == 0) continue;
+            const uint8_t *code = bytesAt(sec->offset, sec->size);
+            if (!code) continue;
+
+            cs_insn *insn = nullptr;
+            size_t count = cs_disasm(cs, code, sec->size, sec->addr, 0, &insn);
+            if (count == 0) continue;
+
+            for (size_t i = 0; i < count; ++i) {
+                if (!insn[i].detail) continue;
+                if (std::string(insn[i].mnemonic) != "call") continue;
+                if (insn[i].detail->x86.op_count == 0) continue;
+                if (insn[i].detail->x86.operands[0].type != X86_OP_IMM) continue;
+                uint32_t tgt = (uint32_t)insn[i].detail->x86.operands[0].imm;
+                const Section *tsec = sectionForAddress(tgt);
+                if (!tsec || !isCodeSection(*tsec)) continue;
+                if (m_funcMap.count(tgt)) continue;
+                char buf[32];
+                snprintf(buf, sizeof(buf), "sub_%08X", tgt);
+                m_funcMap[tgt] = buf;
+            }
+
+            cs_free(insn, count);
+        }
+
+        cs_close(&cs);
+    }
+
+    static bool isPaddingByte(uint8_t b) {
+        return b == 0x90 || b == 0xCC || b == 0x00;
+    }
+
+    static bool isTerminatorByte(uint8_t b) {
+        switch (b) {
+        case 0xC2:
+        case 0xC3:
+        case 0xCA:
+        case 0xCB:
+        case 0xE9:
+        case 0xEB:
+            return true;
+        default:
+            return false;
+        }
+    }
+
+    static bool looksLikeFunctionHead(const uint8_t *code, size_t len) {
+        if (!code || len == 0) return false;
+        if (len >= 5 &&
+            code[0] == 0x8B && code[1] == 0xFF &&
+            code[2] == 0x55 && code[3] == 0x8B && code[4] == 0xEC)
+            return true;
+        if (len >= 3 &&
+            code[0] == 0x55 && code[1] == 0x8B && code[2] == 0xEC)
+            return true;
+        if (len >= 3 &&
+            code[0] == 0x55 && code[1] == 0x89 && code[2] == 0xE5)
+            return true;
+        if (len >= 2 && code[0] == 0x81 && code[1] == 0xEC)
+            return true;
+        if (len >= 2 && code[0] == 0x83 && code[1] == 0xEC)
+            return true;
+        switch (code[0]) {
+        case 0x51:
+        case 0x52:
+        case 0x53:
+        case 0x55:
+        case 0x56:
+        case 0x57:
+            return true;
+        default:
+            return false;
+        }
+    }
+
+    void discoverFunctionStartsFromPadding() {
+        for (const Section *sec : allSections()) {
+            if (!sec || !isCodeSection(*sec) || sec->size == 0) continue;
+            const uint8_t *code = bytesAt(sec->offset, sec->size);
+            if (!code) continue;
+
+            for (uint32_t i = 0; i < sec->size; ++i) {
+                uint32_t addr = sec->addr + i;
+                if (m_funcMap.count(addr)) continue;
+                if (isPaddingByte(code[i])) continue;
+
+                uint32_t padStart = i;
+                while (padStart > 0 && isPaddingByte(code[padStart - 1]))
+                    --padStart;
+
+                uint32_t padLen = i - padStart;
+                if (padLen < 4) continue;
+                if (padStart > 0 && !isTerminatorByte(code[padStart - 1]))
+                    continue;
+                if (!looksLikeFunctionHead(code + i, sec->size - i))
+                    continue;
+
+                char buf[32];
+                snprintf(buf, sizeof(buf), "sub_%08X", addr);
+                m_funcMap[addr] = buf;
+            }
+        }
     }
 
     void resolveImportStubs() {
@@ -984,7 +1579,7 @@ private:
         if (m_dataSymMap.empty()) buildDataSymMap();
         // Only resolve addresses that are actually in data sections
         const Section *sec = sectionForAddress(addr);
-        if (!sec || (sec->segname != "__DATA" && sec->segname != "__IMPORT")) return "";
+        if (!sec || !isDataSection(*sec)) return "";
         auto it = m_dataSymMap.upper_bound(addr);
         if (it == m_dataSymMap.begin()) return "";
         --it;
@@ -1000,10 +1595,18 @@ private:
     private:
 
     void buildDataSymMap() const {
+        auto secs = allSections();
         for (auto &sym : m_symbols) {
             if (sym.n_value == 0 || sym.name.empty()) continue;
             if (sym.n_type & 0xE0) continue;  // Skip STABS
-            if ((sym.n_type & 0x0E) != 0x0E) continue;  // Only N_SECT
+            if ((sym.n_type & 0x0E) == 0x0E) {
+                int secIdx = sym.n_sect > 0 ? (int)sym.n_sect - 1 : -1;
+                if (secIdx >= 0 && secIdx < (int)secs.size() &&
+                    isCodeSection(*secs[secIdx]))
+                    continue;
+            } else if ((sym.n_type & N_TYPE) != N_UNDF || sym.n_value == 0) {
+                continue;
+            }
             std::string name = sym.name;
             if (!name.empty() && name[0] == '_') name = name.substr(1);
             if (name.find(':') != std::string::npos) continue;
@@ -1013,6 +1616,7 @@ private:
             m_dataSymMap[sym.n_value] = name;
         }
         // Also resolve import pointer targets: map import ptr address → target name
+        if (isPE()) return;
         for (auto &seg : m_segments) {
             if (seg.segname != "__IMPORT") continue;
             for (auto &sec : seg.sections) {
@@ -1036,7 +1640,9 @@ private:
     std::string         m_path;
     std::vector<uint8_t> m_data;
     size_t              m_size = 0;
+    BinaryFormat        m_format = BinaryFormat::Unknown;
     MachHeader          m_header{};
+    PEHeader            m_peHeader{};
     std::vector<LoadCommand> m_loadCmds;
     std::vector<Segment>     m_segments;
     std::vector<NList>       m_symbols;

@@ -973,6 +973,7 @@ public:
                     // Check if the join block uses any of these conflicting temps
                     int usedTemp = -1;
                     for (auto &[pid, tid] : predTempForReg) {
+                        int capturedTid = tid;
                         for (auto &stmt : bb.stmts) {
                             // Non-recursive scan for temp ID
                             auto checkExpr = [&](const IRExpr *e) -> bool {
@@ -980,13 +981,13 @@ public:
                                 std::vector<const IRExpr*> stk = {e};
                                 while (!stk.empty()) {
                                     auto *n = stk.back(); stk.pop_back();
-                                    if (n->op == IROp::Temp && n->tempId() == tid) return true;
+                                    if (n->op == IROp::Temp && n->tempId() == capturedTid) return true;
                                     for (auto &k : n->kids) if (k) stk.push_back(k.get());
                                 }
                                 return false;
                             };
                             if (checkExpr(stmt.expr.get()) || checkExpr(stmt.addr.get()))
-                                { usedTemp = tid; break; }
+                                { usedTemp = capturedTid; break; }
                         }
                         if (usedTemp >= 0) break;
                     }
@@ -1180,6 +1181,7 @@ public:
                     if (!hasSources) continue;
 
                     // Replace baseTemp → phiTemp in all loop blocks
+                    int capturedBase = baseTemp;
                     for (int bi : loopBlocks) {
                         auto &lb = func.blocks[bi];
                         for (auto &stmt : lb.stmts) {
@@ -1189,7 +1191,7 @@ public:
                                 std::vector<IRExpr*> stk = {e.get()};
                                 while (!stk.empty()) {
                                     auto *nd = stk.back(); stk.pop_back();
-                                    if (nd->op == IROp::Temp && nd->tempId() == baseTemp)
+                                    if (nd->op == IROp::Temp && nd->tempId() == capturedBase)
                                         nd->value = phiTemp;
                                     for (auto &k : nd->kids) if (k) stk.push_back(k.get());
                                 }
@@ -1601,7 +1603,7 @@ private:
             { std::string nearest = m_mf.nearestSymbolName(addr);
               if (!nearest.empty()) return IRExpr::mkVar(nearest); }
             const Section *dSec = m_mf.sectionForAddress(addr);
-            if (dSec && (dSec->segname == "__DATA" || dSec->segname == "__IMPORT")) {
+            if (dSec && m_mf.isDataSection(*dSec)) {
                 char gn[32]; snprintf(gn, sizeof(gn), "g_%X", addr);
                 return IRExpr::mkVar(gn);
             }
@@ -1735,7 +1737,7 @@ private:
                     if (gt && (gt->kind == StabsTypeKind::Struct ||
                                gt->kind == StabsTypeKind::Union)) {
                         const Section *sec = m_mf.sectionForAddress(addr);
-                        if (sec && sec->segname == "__IMPORT")
+                        if (sec && m_mf.isImportSection(*sec))
                             return IRExpr::mkVar(symName, gn->typeRef);
                     }
                 }
@@ -1773,7 +1775,7 @@ private:
               } }
             // For addresses in data sections, use a synthetic global name
             const Section *dataSec = m_mf.sectionForAddress(addr);
-            if (dataSec && (dataSec->segname == "__DATA" || dataSec->segname == "__IMPORT")) {
+            if (dataSec && m_mf.isDataSection(*dataSec)) {
                 char gname[32]; snprintf(gname, sizeof(gname), "g_%X", addr);
                 return IRExpr::mkVar(gname);
             }
@@ -1939,7 +1941,7 @@ private:
             }
             // Synthetic global name for data section addresses
             const Section *dSec = m_mf.sectionForAddress(addr);
-            if (dSec && (dSec->segname == "__DATA" || dSec->segname == "__IMPORT")) {
+            if (dSec && m_mf.isDataSection(*dSec)) {
                 char gn[32]; snprintf(gn, sizeof(gn), "g_%X", addr);
                 bb.stmts.push_back(IRStmt::mkVarSet(gn, std::move(val), NullType, storeSize));
                 return;
@@ -2020,7 +2022,7 @@ private:
         int64_t off = m_mf.fileOffsetForAddress(addr);
         if (off < 0) return "";
         const Section *sec = m_mf.sectionForAddress(addr);
-        if (!sec || sec->sectname != "__cstring") return "";
+        if (!sec || !m_mf.isCStringSection(*sec)) return "";
         const uint8_t *p = m_mf.bytesAt(off, std::min((uint32_t)80, (uint32_t)(m_mf.size() - off)));
         if (!p) return "";
         std::string s;
@@ -2573,6 +2575,9 @@ private:
 
         // ── Return ──────────────────────────────────────────────────
         if (mn == "ret") {
+            fprintf(stderr, "RET_LIFTER: retType=(%d,%d) fpuStack=%d lastFpuTop=%d\n",
+                    m_func->returnType.first, m_func->returnType.second,
+                    (int)m_fpuStack.size(), m_lastFpuTop);
             // Return handling
             // Check if return type is void (including through typedef chains)
             if (m_func->returnType != NullType) {

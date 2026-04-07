@@ -7,8 +7,12 @@
 #include "coalesce.h"
 #include "simplify.h"
 #include "macho.h"
+#ifdef __EMSCRIPTEN__
+#include "qstring_shim.h"
+#else
 #include <QString>
 #include <QProcess>
+#endif
 #include <string>
 #include <map>
 #include <set>
@@ -899,7 +903,15 @@ public:
     // Remove empty if blocks from output text
     static QString cleanupOutput(const QString &code) {
         QString cleaned = code;
-        // Pre-pass: fix &EXPR->field_X patterns → (EXPR + 0xX)
+
+        auto isSimpleIdentifier = [](const QString &name) {
+            if (name.isEmpty()) return false;
+            for (int i = 0; i < name.size(); ++i) {
+                QChar c = name[i];
+                if (!c.isLetterOrNumber() && c != '_') return false;
+            }
+            return true;
+        };
         // &0->field_X → 0xX
         cleaned.replace("&0->field_", "0x__F");
         cleaned.replace("&(0)->field_", "0x__F");
@@ -969,9 +981,8 @@ public:
                 QString srcName = trimmed.mid(eq + 3, trimmed.size() - eq - 4).trimmed();
                 // Both must be simple identifiers
                 if (varName.isEmpty() || srcName.isEmpty()) continue;
-                bool varOk = true, srcOk = true;
-                for (auto c : varName) if (!c.isLetterOrNumber() && c != '_') { varOk = false; break; }
-                for (auto c : srcName) if (!c.isLetterOrNumber() && c != '_') { srcOk = false; break; }
+                bool varOk = isSimpleIdentifier(varName);
+                bool srcOk = isSimpleIdentifier(srcName);
                 if (!varOk || !srcOk || srcName[0].isDigit()) continue;
                 if (varName == srcName) continue;
                 // Check: is there a declaration "TYPE *varName;" earlier in the function?
@@ -1033,10 +1044,9 @@ public:
                 if (eqPos > 0) {
                     QString varName = line.left(eqPos).trimmed();
                     // varName should be a simple identifier
-                    bool ok = !varName.isEmpty();
+                    bool ok = isSimpleIdentifier(varName);
                     // Skip if this variable is used with -> (struct pointer, not array)
                     if (ok && cleaned.contains(varName + "->")) ok = false;
-                    for (auto c : varName) if (!c.isLetterOrNumber() && c != '_') { ok = false; break; }
                     if (ok) interiorPtrs[varName] = 4;
                 }
                 pos2 += 4;
@@ -1484,8 +1494,15 @@ public:
                         (line.contains("= v") || line.contains("= (v"))) {
                         // Check if the RHS variable is declared as float
                         for (int k = 0; k < i; ++k) {
-                            if (cl[k].trimmed().startsWith("float ") &&
-                                line.contains(cl[k].trimmed().mid(6).split(';').first().trimmed())) {
+                            QString decl = cl[k].trimmed();
+                            QString declName;
+                            if (decl.startsWith("float ")) {
+                                declName = decl.mid(6);
+                                int semi = declName.indexOf(';');
+                                if (semi >= 0) declName = declName.left(semi);
+                                declName = declName.trimmed();
+                            }
+                            if (!declName.isEmpty() && line.contains(declName)) {
                                 assignedFromFloat = true;
                                 break;
                             }
@@ -1816,6 +1833,9 @@ public:
 
     // Run clang-format on the output for clean formatting
     static QString clangFormat(const QString &code) {
+#ifdef __EMSCRIPTEN__
+        return code; // no subprocess support in WASM
+#else
         // Skip clang-format for very large outputs (>500KB) to avoid timeout
         if (code.size() > 500000) return code;
         QProcess proc;
@@ -1828,6 +1848,7 @@ public:
         if (!proc.waitForFinished(30000)) { proc.kill(); return code; }
         if (proc.exitCode() != 0) return code;
         return QString::fromUtf8(proc.readAllStandardOutput());
+#endif
     }
 
 private:
@@ -3944,7 +3965,7 @@ private:
                     // Function symbols don't need & (function names decay to pointers).
                     if (!result.empty() && m_addrDepth == 0) {
                         auto *sec = m_mf.sectionForAddress((uint32_t)e->value);
-                        bool isData = sec && sec->segname != "__TEXT";
+                        bool isData = sec && !m_mf.isCodeSection(*sec);
                         if (isData)
                             result = "&" + result;
                     }
