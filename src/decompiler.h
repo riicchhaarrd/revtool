@@ -4684,30 +4684,54 @@ private:
                     return emitScalar(child);
                 };
                 std::string lhs = emitChild(e->kids[0].get());
-                // (base + const) in expression context → &base->field_XX
-                // This handles the common "sub-object pointer" pattern: t = (this + 1520)
+                // (base + const) in expression context → &base->field_XX (pointer base)
+                // or ((char *)&base + offset) (struct base)
                 if (e->op == IROp::Add && e->kids[1] && e->kids[1]->isConst() &&
                     e->kids[1]->value > 0 && e->kids[1]->value < 0x10000 &&
                     (e->kids[0]->op == IROp::Var || e->kids[0]->op == IROp::Temp)) {
-                    // Only use &base->field_X when the emitted base is a simple identifier
-                    // (not an arithmetic expression like -(v16 * 2))
                     if (!lhs.empty() && (isalpha(lhs[0]) || lhs[0] == '_')) {
                         int off = (int)e->kids[1]->value;
-                        // Try type-aware field name
                         TypeRef baseType = exprType(e->kids[0].get());
+                        // Also check global type
+                        if (baseType == NullType && e->kids[0]->op == IROp::Var &&
+                            !e->kids[0]->name.empty()) {
+                            auto *g = m_types.globalByName(e->kids[0]->name);
+                            if (g) baseType = g->typeRef;
+                        }
                         std::string access;
-                        if (baseType != NullType && m_types.isStructPointer(baseType)) {
-                            TypeRef structRef = m_types.getPointedStruct(baseType);
-                            if (structRef != NullType)
-                                access = m_types.formatFieldAccess(structRef, off);
+                        bool isPtr = false;
+                        bool isStruct = false;
+                        if (baseType != NullType) {
+                            if (m_types.isStructPointer(baseType)) {
+                                isPtr = true;
+                                TypeRef structRef = m_types.getPointedStruct(baseType);
+                                if (structRef != NullType)
+                                    access = m_types.formatFieldAccess(structRef, off);
+                            } else {
+                                auto *bt = m_types.resolveType(baseType);
+                                if (bt && (bt->kind == StabsTypeKind::Struct ||
+                                           bt->kind == StabsTypeKind::Union)) {
+                                    isStruct = true;
+                                    access = m_types.formatFieldAccess(baseType, off);
+                                }
+                            }
                         }
-                        if (!access.empty())
-                            result = "&" + lhs + "->" + access;
-                        else {
-                            char fname[32]; snprintf(fname, sizeof(fname), "field_%X", (unsigned)off);
-                            result = "&" + lhs + "->" + fname;
+                        if (isPtr) {
+                            if (!access.empty())
+                                result = "&" + lhs + "->" + access;
+                            else {
+                                char fname[32]; snprintf(fname, sizeof(fname), "field_%X", (unsigned)off);
+                                result = "&" + lhs + "->" + fname;
+                            }
+                            break;
+                        } else if (isStruct) {
+                            if (!access.empty())
+                                result = "&" + lhs + "." + access;
+                            else
+                                result = "((char *)&" + lhs + " + " + std::to_string(off) + ")";
+                            break;
                         }
-                        break;
+                        // Not a struct/pointer base — fall through to other handlers
                     }
                 }
                 // Simplify: (x + -N) → (x - N)
@@ -4873,12 +4897,27 @@ private:
                     auto needsCast = [&](const std::string &s, IRExpr *kid) -> int {
                         if (s.find("&") != std::string::npos) return 1;
                         // Check if the operand is a struct/array typed variable
-                        if (kid && kid->op == IROp::Var && kid->typeRef != NullType) {
-                            auto *t = m_types.resolveType(kid->typeRef);
-                            if (t && (t->kind == StabsTypeKind::Struct ||
-                                      t->kind == StabsTypeKind::Union ||
-                                      t->kind == StabsTypeKind::Array))
-                                return 2;
+                        if (kid && kid->op == IROp::Var) {
+                            // Check IR type annotation
+                            TypeRef kidType = kid->typeRef;
+                            if (kidType != NullType) {
+                                auto *t = m_types.resolveType(kidType);
+                                if (t && (t->kind == StabsTypeKind::Struct ||
+                                          t->kind == StabsTypeKind::Union ||
+                                          t->kind == StabsTypeKind::Array))
+                                    return 2;
+                            }
+                            // Also check global type by name (covers globals without IR type annotation)
+                            if (!kid->name.empty()) {
+                                auto *g = m_types.globalByName(kid->name);
+                                if (g && g->typeRef != NullType) {
+                                    auto *t = m_types.resolveType(g->typeRef);
+                                    if (t && (t->kind == StabsTypeKind::Struct ||
+                                              t->kind == StabsTypeKind::Union ||
+                                              t->kind == StabsTypeKind::Array))
+                                        return 2;
+                                }
+                            }
                         }
                         return 0;
                     };
