@@ -2548,7 +2548,15 @@ private:
                             out += QString("    goto bb_%1;\n").arg(cit->second);
                         } else {
                             if (stmt.expr) {
-                                out += "    return " + QString::fromStdString(emitExpr(stmt.expr.get())) + ";\n";
+                                // If the return value is a call to a void function,
+                                // split into call + bare return
+                                bool isVoidCall = isVoidCallExpr(stmt.expr.get());
+                                if (isVoidCall) {
+                                    out += "    " + QString::fromStdString(emitExpr(stmt.expr.get())) + ";\n";
+                                    out += "    return;\n";
+                                } else {
+                                    out += "    return " + QString::fromStdString(emitExpr(stmt.expr.get())) + ";\n";
+                                }
                             } else {
                                 out += "    return;\n";
                             }
@@ -3741,8 +3749,15 @@ private:
             }
             case IRStmtKind::Return: {
                 if (stmt.expr) {
+                    // Check if the return value is a call to a void function
+                    bool isVoidCall = isVoidCallExpr(stmt.expr.get());
                     std::string val = emitExpr(stmt.expr.get());
-                    out += pad(indent) + "return " + QString::fromStdString(val) + ";\n";
+                    if (isVoidCall) {
+                        out += pad(indent) + QString::fromStdString(val) + ";\n";
+                        out += pad(indent) + "return;\n";
+                    } else {
+                        out += pad(indent) + "return " + QString::fromStdString(val) + ";\n";
+                    }
                 } else {
                     out += pad(indent) + "return;\n";
                 }
@@ -5090,6 +5105,25 @@ private:
 
         // Infer temp type from its defining expression (with cycle detection)
         // Check if an expression evaluates to float type
+        // Check if expression is a call to a function that returns void
+        bool isVoidCallExpr(IRExpr *e) {
+            if (!e) return false;
+            IRExpr *re = e;
+            if (re->op == IROp::Temp) {
+                auto dit = m_tempDef.find(re->tempId());
+                if (dit != m_tempDef.end() && dit->second)
+                    re = dit->second;
+            }
+            if (re->op == IROp::Call) {
+                const StabsFunction *cf = m_mf.stabsFunctionByName(re->name);
+                if (cf && cf->returnType != NullType) {
+                    std::string rt = m_types.formatType(cf->returnType);
+                    if (rt == "void") return true;
+                }
+            }
+            return false;
+        }
+
         bool isFloatExpr(IRExpr *e) {
             if (!e) return false;
             if (e->op == IROp::Temp) {
@@ -5136,6 +5170,8 @@ private:
                         return ts == "float" || ts == "double";
                     }
             }
+            // Constants that emit as float literals (e.g. 0x3F800000 → 1.0f)
+            if (e->op == IROp::Const && !tryFloatConst((uint32_t)e->value).empty()) return true;
             if (e->op == IROp::Load && e->loadSize == 5) return true;
             if (e->op == IROp::Cast && (e->castKind == CastKind::IntToFloat)) return true;
             // Bitwise/shift ops on float: if any child is float, propagate
