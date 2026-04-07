@@ -154,6 +154,7 @@ struct StabsFunction {
     std::vector<std::pair<uint32_t, int>> lineMap; // addr -> line number
     std::vector<StabsTypedVar> params;
     std::vector<StabsTypedVar> locals;
+    bool isRegparm = false;  // true if function uses regparm(3) calling convention
 };
 
 struct StabsSourceFile {

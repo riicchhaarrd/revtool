@@ -488,6 +488,8 @@ public:
         // ── Pass 5: lift instructions into basic blocks ─────────────
         m_func = &func;
         m_cs = cs;
+        m_insn = insn;
+        m_insnCount = funcEndIdx;
         m_regTemps.clear();
         m_espArgs.clear();
         m_pushArgs.clear();
@@ -560,6 +562,8 @@ public:
         }
 
         if (!func.blocks.empty() && !m_regParamRegs.empty()) {
+            // Mark this function as using regparm calling convention
+            if (sfn) const_cast<StabsFunction*>(sfn)->isRegparm = true;
             auto &bb0 = func.blocks[0];
 
             // Bind the regparam registers to parameter names
@@ -1230,6 +1234,52 @@ private:
     std::map<x86_reg, const StabsTypedVar*> m_regParamRegs;  // register params (regparm)
     std::set<x86_reg> m_regParamInjected;  // which reg params we've already injected
     std::list<StabsTypedVar> m_regParamLocals;  // stable storage for regparm stack locals
+    // Instruction array reference (set during lift)
+    cs_insn *m_insn = nullptr;
+    size_t m_insnCount = 0;
+
+    // Cache: which call target addresses use regparm(3) (static — shared across all lifts)
+    static inline std::map<uint32_t, bool> m_regparmCache;
+
+    // Detect if a function at the given address uses regparm calling convention
+    // by scanning its prologue bytes for: mov [ebp-N], eax/edx/ecx patterns.
+    // Uses raw byte scanning for speed (no Capstone disassembly needed).
+    bool isCalleeRegparm(uint32_t addr) {
+        auto cit = m_regparmCache.find(addr);
+        if (cit != m_regparmCache.end()) return cit->second;
+        bool result = false;
+        const StabsFunction *sf = m_mf.stabsFunctionAt(addr);
+        if (sf && sf->isRegparm) { result = true; }
+        else if (sf && !sf->params.empty()) {
+            int64_t fo = m_mf.fileOffsetForAddress(addr);
+            if (fo >= 0) {
+                const uint8_t *code = m_mf.bytesAt((uint32_t)fo, 32);
+                if (code) {
+                    // Scan for mov [ebp-N], reg patterns in first 32 bytes
+                    // mov [ebp+disp8], eax = 89 45 XX  (where XX is negative = <0x80)
+                    // mov [ebp+disp8], edx = 89 55 XX
+                    // mov [ebp+disp8], ecx = 89 4D XX
+                    int regSaves = 0;
+                    for (int i = 0; i < 28; ++i) {
+                        if (code[i] == 0x89 && i + 2 < 32) {
+                            uint8_t modrm = code[i+1];
+                            // modrm: mod=01 (disp8), reg=0/1/2 (eax/ecx/edx), rm=5 (ebp)
+                            if ((modrm & 0xC7) == 0x45) { // [ebp+disp8]
+                                uint8_t reg = (modrm >> 3) & 7;
+                                int8_t disp = (int8_t)code[i+2];
+                                if (disp < 0 && (reg == 0 || reg == 1 || reg == 2))
+                                    regSaves++;
+                            }
+                        }
+                    }
+                    if (regSaves >= 2) result = true;
+                }
+            }
+        }
+        m_regparmCache[addr] = result;
+        return result;
+    }
+
     std::set<uint32_t> m_floatReturnAddrs;   // call target addresses known to return float
     std::set<uint32_t> m_floatRetCallSites;  // instruction addresses of float-returning calls
 
@@ -2792,6 +2842,32 @@ private:
             } else if (!m_pushArgs.empty()) {
                 for (int a = (int)m_pushArgs.size() - 1; a >= 0; --a)
                     args.push_back(std::move(m_pushArgs[a]));
+            }
+            // Detect regparm(3) calls: check if callee uses regparm by
+            // scanning its prologue for register saves (mov [ebp-N], eax/edx/ecx).
+            {
+                const StabsFunction *callee = m_mf.stabsFunctionByName(target);
+                if (callee && callee->address && isCalleeRegparm(callee->address) &&
+                    !callee->params.empty()) {
+                    static const x86_reg regparmOrder[] = {X86_REG_EAX, X86_REG_EDX, X86_REG_ECX};
+                    int nStackArgs = (int)args.size();
+                    int nRegArgs = std::min(3, (int)callee->params.size() - nStackArgs);
+                    if (nRegArgs > 0) {
+                        std::vector<std::unique_ptr<IRExpr>> regArgs;
+                        for (int ri = 0; ri < nRegArgs; ++ri) {
+                            auto it = m_regTemps.find(regparmOrder[ri]);
+                            if (it != m_regTemps.end())
+                                regArgs.push_back(IRExpr::mkTemp(it->second,
+                                    m_func->tempType(it->second)));
+                            else
+                                break;
+                        }
+                        if ((int)regArgs.size() == nRegArgs) {
+                            for (int ri = nRegArgs - 1; ri >= 0; --ri)
+                                args.insert(args.begin(), std::move(regArgs[ri]));
+                        }
+                    }
+                }
             }
             m_espArgs.clear();
             m_pushArgs.clear();
