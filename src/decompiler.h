@@ -361,7 +361,9 @@ public:
             out.replace("const dvar_t *", "dvar_t *");
             out.replace("const struct dvar_s *", "struct dvar_s *");
         }
-        return clangFormat(cleanupOutput(out)); // cleanup + format
+        // Skip file-level cleanupOutput — it already ran per-function inside decompile().
+        // Running it again would clobber per-function variable declarations (pass 3).
+        return clangFormat(out);
     }
 
     // Dump all STABS types as a C header
