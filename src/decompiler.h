@@ -3668,6 +3668,11 @@ private:
                         // Array at offset 0: arr[0] = val
                         out += pad(indent) + QString::fromStdString(
                             addrS + "[0] = " + val) + ";\n";
+                    } else if (atInfo && (atInfo->kind == StabsTypeKind::Struct ||
+                                           atInfo->kind == StabsTypeKind::Union)) {
+                        // Struct/union at offset 0: *(type *)(&var) = val
+                        out += pad(indent) + QString::fromStdString(
+                            "*(" + storeCast + " *)(&" + addrS + ") = " + val) + ";\n";
                     } else {
                         out += pad(indent) + QString::fromStdString(
                             "*(" + storeCast + " *)((char *)(" + addrS + ")) = " + val) + ";\n";
@@ -5359,6 +5364,21 @@ private:
         }
 
         // Convert C++ scope operator :: to _ for valid C identifiers
+        // Wrap an expression for use as a pointer (e.g., in (char *)EXPR).
+        // For struct/union/array expressions, adds & to take the address.
+        std::string asPointer(const std::string &exprStr, IRExpr *expr) {
+            if (!expr) return exprStr;
+            TypeRef t = exprType(expr);
+            if (t != NullType) {
+                auto *rt = m_types.resolveType(t);
+                if (rt && (rt->kind == StabsTypeKind::Struct ||
+                           rt->kind == StabsTypeKind::Union ||
+                           rt->kind == StabsTypeKind::Array))
+                    return "&" + exprStr;
+            }
+            return exprStr;
+        }
+
         static std::string cName(const std::string &name) {
             std::string out = name;
             // Replace :: with _
