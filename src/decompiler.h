@@ -2108,6 +2108,12 @@ private:
                     // Replace void (non-pointer) with int — can't have void locals
                     if (decl.substr(0, 5) == "void " && decl.find('*') == std::string::npos)
                         decl = "int " + l.name;
+                    // Replace struct/union by-value locals with int
+                    // (decompiler uses int for all scalar values; struct types leak from inference)
+                    auto *lt = m_types.resolveType(l.typeRef);
+                    if (lt && (lt->kind == StabsTypeKind::Struct || lt->kind == StabsTypeKind::Union) &&
+                        decl.find('*') == std::string::npos)
+                        decl = "int " + l.name;
                 } else {
                     decl = "int " + l.name;
                 }
