@@ -4826,6 +4826,18 @@ private:
                         result = "(" + lhs + " + (char*)" + rhs + ")";
                     else
                         result = "(" + lhs + op + rhs + ")";
+                } else if ((e->op == IROp::And || e->op == IROp::Or || e->op == IROp::Xor) &&
+                           e->kids[0] && e->kids[1] &&
+                           // Only for actual float operands (Load with float size, or float Var)
+                           // NOT for comparisons (Ne, Eq, etc.) which return int
+                           e->kids[0]->op != IROp::Ne && e->kids[0]->op != IROp::Eq &&
+                           e->kids[0]->op != IROp::Slt && e->kids[0]->op != IROp::Sgt &&
+                           e->kids[0]->op != IROp::Sle && e->kids[0]->op != IROp::Sge &&
+                           (lhs.find(".0f") != std::string::npos || rhs.find(".0f") != std::string::npos ||
+                            (e->kids[0]->op == IROp::Load && e->kids[0]->loadSize == 5) ||
+                            (e->kids[1]->op == IROp::Load && e->kids[1]->loadSize == 5))) {
+                    // Float bitwise: cast operands to int (SSE andps/orps pattern)
+                    result = "((int)(" + lhs + ")" + op + "(int)(" + rhs + "))";
                 } else {
                     result = "(" + lhs + op + rhs + ")";
                 }
