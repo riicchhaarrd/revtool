@@ -4806,7 +4806,22 @@ private:
                 }
                 if (e->op == IROp::Shr) {
                     // Logical shift right needs unsigned cast to avoid sar
-                    result = "((unsigned)(" + lhs + ") >> " + rhs + ")";
+                    // For float operands, cast to int first (SSE bit manipulation)
+                    // Check both IR type AND emitted string for float params
+                    bool lhsFloat = isFloatExpr(e->kids[0].get());
+                    if (!lhsFloat) {
+                        // Also check if lhs string matches a float param name
+                        for (auto &p : m_func.params)
+                            if (p.name == lhs && p.typeRef != NullType) {
+                                auto *t = m_types.resolveType(p.typeRef);
+                                if (t && (t->kind == StabsTypeKind::Float || t->kind == StabsTypeKind::Double))
+                                    lhsFloat = true;
+                            }
+                    }
+                    if (lhsFloat)
+                        result = "((unsigned)(int)(" + lhs + ") >> " + rhs + ")";
+                    else
+                        result = "((unsigned)(" + lhs + ") >> " + rhs + ")";
                 } else if (e->op == IROp::Add) {
                     // When adding to an address-of or struct/array expression,
                     // cast to (char*) to prevent pointer arithmetic scaling.
@@ -4830,13 +4845,14 @@ private:
                         result = "(" + lhs + " + (char*)" + rhs + ")";
                     else
                         result = "(" + lhs + op + rhs + ")";
-                } else if ((e->op == IROp::And || e->op == IROp::Or || e->op == IROp::Xor) &&
+                } else if ((e->op == IROp::And || e->op == IROp::Or || e->op == IROp::Xor ||
+                            e->op == IROp::Shr || e->op == IROp::Sar || e->op == IROp::Shl) &&
                            e->kids[0] && e->kids[1] &&
                            // Only for actual float operands, NOT comparisons
                            !(e->kids[0]->op >= IROp::Eq && e->kids[0]->op <= IROp::Uge) &&
                            !(e->kids[1]->op >= IROp::Eq && e->kids[1]->op <= IROp::Uge) &&
                            (isFloatExpr(e->kids[0].get()) || isFloatExpr(e->kids[1].get()))) {
-                    // Float bitwise: cast operands to int (SSE andps/orps pattern)
+                    // Float bitwise/shift: cast operands to int (SSE bit manipulation)
                     result = "((int)(" + lhs + ")" + op + "(int)(" + rhs + "))";
                 } else {
                     result = "(" + lhs + op + rhs + ")";
@@ -5067,7 +5083,39 @@ private:
         // Check if an expression evaluates to float type
         bool isFloatExpr(IRExpr *e) {
             if (!e) return false;
-            if (e->op == IROp::Temp) return inferTempType(e->tempId()) == "float";
+            if (e->op == IROp::Temp) {
+                if (inferTempType(e->tempId()) == "float") return true;
+                // Follow temp definition
+                auto it = m_tempDef.find(e->tempId());
+                if (it != m_tempDef.end() && it->second)
+                    return isFloatExpr(it->second);
+                // Check copy map and tempToVar for source variable
+                std::string srcName;
+                auto cit = m_copyMap.find(e->tempId());
+                if (cit != m_copyMap.end()) srcName = cit->second;
+                if (srcName.empty()) {
+                    auto tvit = m_func.tempToVar.find(e->tempId());
+                    if (tvit != m_func.tempToVar.end()) {
+                        auto nit = m_func.varNames.find(tvit->second);
+                        if (nit != m_func.varNames.end()) srcName = nit->second;
+                    }
+                }
+                if (!srcName.empty()) {
+                    for (auto &p : m_func.params)
+                        if (p.name == srcName && p.typeRef != NullType) {
+                            auto *t = m_types.resolveType(p.typeRef);
+                            if (t && (t->kind == StabsTypeKind::Float || t->kind == StabsTypeKind::Double))
+                                return true;
+                        }
+                    for (auto &l : m_func.locals)
+                        if (l.name == srcName && l.typeRef != NullType) {
+                            auto *t = m_types.resolveType(l.typeRef);
+                            if (t && (t->kind == StabsTypeKind::Float || t->kind == StabsTypeKind::Double))
+                                return true;
+                        }
+                }
+                return false;
+            }
             if (e->op == IROp::Var && !e->name.empty()) {
                 // Check if variable is declared as float
                 for (auto &l : m_func.locals)
