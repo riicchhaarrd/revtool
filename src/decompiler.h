@@ -356,6 +356,11 @@ public:
         }
 
         out += funcBodies;
+        // Port mode: strip "const" from dvar_t pointers to match types header
+        if (s_portMode) {
+            out.replace("const dvar_t *", "dvar_t *");
+            out.replace("const struct dvar_s *", "struct dvar_s *");
+        }
         return clangFormat(cleanupOutput(out)); // cleanup + format
     }
 
