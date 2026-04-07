@@ -2080,7 +2080,8 @@ private:
                             decl = "int " + p.name;
                         } else {
                             decl = m_types.formatDecl(p.typeRef, p.name);
-                            if (p.name == "this" && decl.find("const ") == 0)
+                            // Strip const from params — decompiler may reassign them
+                            if (decl.find("const ") == 0)
                                 decl = decl.substr(6);
                         }
                     } else {
@@ -5064,8 +5065,24 @@ private:
                             }
                         }
                     }
+                    // Limit arg count to prototype when the prototype
+                    // specifies fewer args than the IR detected (false positives
+                    // from leftover register values)
+                    size_t argCount = e->kids.size();
+                    const StabsFunction *calledFn2 = m_mf.stabsFunctionByName(e->name);
+                    if (calledFn2 && !calledFn2->params.empty() &&
+                        calledFn2->params.size() < argCount) {
+                        // Check it's not a variadic function
+                        static const std::set<std::string> variadics = {
+                            "Com_Printf", "Com_Error", "Com_DPrintf", "Com_sprintf",
+                            "va", "Sys_Error", "CG_Printf", "G_Printf",
+                            "Scr_Error", "Scr_ParamError"
+                        };
+                        if (!variadics.count(e->name))
+                            argCount = calledFn2->params.size();
+                    }
                     result = funcName + "(";
-                    for (size_t i = 0; i < e->kids.size(); ++i) {
+                    for (size_t i = 0; i < argCount; ++i) {
                         if (i) result += ", ";
                         std::string arg = emitExpr(e->kids[i].get());
                         // Cast *(int *) loads to *(float *) for float params
@@ -5187,6 +5204,15 @@ private:
             if (e->op == IROp::Const && !tryFloatConst((uint32_t)e->value).empty()) return true;
             if (e->op == IROp::Load && e->loadSize == 5) return true;
             if (e->op == IROp::Cast && (e->castKind == CastKind::IntToFloat)) return true;
+            // Call to a function that returns float
+            if (e->op == IROp::Call) {
+                const StabsFunction *cf = m_mf.stabsFunctionByName(e->name);
+                if (cf && cf->returnType != NullType) {
+                    std::string rt = m_types.formatType(cf->returnType);
+                    if (rt == "float" || rt == "double" || rt == "vec_t")
+                        return true;
+                }
+            }
             // Bitwise/shift ops on float: if any child is float, propagate
             if ((e->op == IROp::And || e->op == IROp::Or || e->op == IROp::Xor ||
                  e->op == IROp::Shr || e->op == IROp::Sar || e->op == IROp::Shl) &&
@@ -5279,16 +5305,14 @@ private:
                         // STABS locals/params with float type
                         for (auto &l : m_func.locals)
                             if (l.name == k->name && l.typeRef != NullType) {
-                                auto *lt = m_types.resolveType(l.typeRef);
-                                if (lt && (lt->kind == StabsTypeKind::Float ||
-                                           lt->kind == StabsTypeKind::Double))
+                                std::string fmt = m_types.formatType(l.typeRef);
+                                if (fmt == "float" || fmt == "double" || fmt == "vec_t")
                                     return "float";
                             }
                         for (auto &p : m_func.params)
                             if (p.name == k->name && p.typeRef != NullType) {
-                                auto *pt = m_types.resolveType(p.typeRef);
-                                if (pt && (pt->kind == StabsTypeKind::Float ||
-                                           pt->kind == StabsTypeKind::Double))
+                                std::string fmt = m_types.formatType(p.typeRef);
+                                if (fmt == "float" || fmt == "double" || fmt == "vec_t")
                                     return "float";
                             }
                     }
@@ -5296,9 +5320,8 @@ private:
                     if (k->op == IROp::Temp) {
                         auto tit = m_func.tempTypes.find(k->tempId());
                         if (tit != m_func.tempTypes.end() && tit->second != NullType) {
-                            auto *tt = m_types.resolveType(tit->second);
-                            if (tt && (tt->kind == StabsTypeKind::Float ||
-                                       tt->kind == StabsTypeKind::Double))
+                            std::string fmt = m_types.formatType(tit->second);
+                            if (fmt == "float" || fmt == "double" || fmt == "vec_t")
                                 return "float";
                         }
                         // Check the coalesced var type
@@ -5315,13 +5338,14 @@ private:
                         if (inferTempType(k->tempId(), depth + 1) == "float")
                             return "float";
                     }
-                    // Check if operand is a Call to a known float-returning function
+                    // Check if operand is a Call to a float-returning function
                     if (k->op == IROp::Call) {
-                        std::string cname = k->name;
-                        if (cname == "fabsf" || cname == "sqrtf" || cname == "fminf" ||
-                            cname == "fmaxf" || cname == "sinf" || cname == "cosf" ||
-                            cname == "floorf" || cname == "ceilf" || cname == "acosf")
-                            return "float";
+                        const StabsFunction *cf = m_mf.stabsFunctionByName(k->name);
+                        if (cf && cf->returnType != NullType) {
+                            std::string rt = m_types.formatType(cf->returnType);
+                            if (rt == "float" || rt == "double" || rt == "vec_t")
+                                return "float";
+                        }
                     }
                 }
             }
