@@ -5162,6 +5162,23 @@ private:
                             arg.find("*(int *)") == 0) {
                             arg = "*(float *)" + arg.substr(8);
                         }
+                        // Cast scalar args to union/struct types when prototype expects them
+                        // (small unions/structs passed by value are int-sized on x86)
+                        if (calledFn2 && i < calledFn2->params.size()) {
+                            auto &par = calledFn2->params[i];
+                            if (par.typeRef != NullType) {
+                                auto *pt = m_types.resolveType(par.typeRef);
+                                if (pt && (pt->kind == StabsTypeKind::Union ||
+                                          (pt->kind == StabsTypeKind::Struct &&
+                                           pt->sizeBytes > 0 && pt->sizeBytes <= 8))) {
+                                    std::string ptype = m_types.formatType(par.typeRef);
+                                    // Only cast if the arg doesn't already match
+                                    if (arg.find(ptype) == std::string::npos &&
+                                        arg.find("union ") != 0 && arg.find("struct ") != 0)
+                                        arg = "*(" + ptype + " *)&(int){" + arg + "}";
+                                }
+                            }
+                        }
                         result += arg;
                     }
                     result += ")";
