@@ -416,6 +416,12 @@ public:
                                                 e->op == IROp::Or || e->op == IROp::Xor ||
                                                 e->op == IROp::Shl || e->op == IROp::Shr ||
                                                 e->op == IROp::Sar);
+                                // Don't count Sub(ptr, ptr) as arithmetic — it's pointer diff
+                                // Don't count as arithmetic inside Store/Load address context
+                                if (e->op == IROp::Sub && e->kids.size() == 2 &&
+                                    e->kids[0] && e->kids[1] &&
+                                    (e->kids[0]->op == IROp::Temp || e->kids[1]->op == IROp::Temp))
+                                    isArith = false;
                                 for (auto &k : e->kids)
                                     if (scan(k.get(), isArith)) return true;
                                 return false;
@@ -445,11 +451,17 @@ public:
                         if (usedInArith) break;
                     }
                     if (usedInArith) {
-                        bestType = NullType;
-                        // Also clear tempTypes for all temps in this group
-                        // to prevent the emitter from falling back to the wrong type
+                        // Don't clear type if any temp in the group is known to be a pointer
+                        // (from TypeInferer Store/Load/Field analysis)
+                        bool hasPointerEvidence = false;
                         for (int idx : members)
-                            func.tempTypes.erase(tempList[idx]);
+                            if (func.pointerTemps.count(tempList[idx]))
+                                { hasPointerEvidence = true; break; }
+                        if (!hasPointerEvidence) {
+                            bestType = NullType;
+                            for (int idx : members)
+                                func.tempTypes.erase(tempList[idx]);
+                        }
                     }
                 }
             }

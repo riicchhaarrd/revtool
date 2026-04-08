@@ -1192,36 +1192,6 @@ public:
         // Simplify redundant casts on literals: (unsigned char)(1) → 1
         cleaned.replace("(unsigned char)(0)", "0");
         cleaned.replace("(unsigned char)(1)", "1");
-        // Fix variables used with -> but declared as int: change to char *
-        {
-            // Collect decompiler variable names used with ->
-            std::set<std::string> arrowVars;
-            {
-                std::string s = cleaned.toStdString();
-                size_t pos = 0;
-                while ((pos = s.find("->", pos)) != std::string::npos) {
-                    size_t end = pos;
-                    while (end > 0 && s[end-1] == ' ') end--;
-                    size_t start = end;
-                    while (start > 0 && (isalnum(s[start-1]) || s[start-1] == '_')) start--;
-                    std::string name = s.substr(start, end - start);
-                    if (name.size() >= 2 && (name[0] == 'v' || name[0] == 't') && isdigit(name[1]))
-                        arrowVars.insert(name);
-                    pos += 2;
-                }
-            }
-            for (auto &var : arrowVars) {
-                std::string from = "\n    int " + var + ";\n";
-                std::string to = "\n    char *" + var + ";\n";
-                std::string s = cleaned.toStdString();
-                size_t pos = 0;
-                while ((pos = s.find(from, pos)) != std::string::npos) {
-                    s.replace(pos, from.size(), to);
-                    pos += to.size();
-                }
-                cleaned = QString::fromStdString(s);
-            }
-        }
         // Remove trailing "return;" at end of void functions
         // (the last statement before the closing brace)
         if (cleaned.contains("void ") && !cleaned.contains("return ")) {
@@ -2359,10 +2329,12 @@ private:
                             ttype = m_types.formatType(sit->second);
                         else {
                             // Check if ANY temp in the coalesced group is a pointer
-                            bool anyPointer = m_pointerTemps.count(id) > 0;
+                            bool anyPointer = m_pointerTemps.count(id) > 0 ||
+                                              m_func.pointerTemps.count(id) > 0;
                             if (!anyPointer && vit != m_func.tempToVar.end()) {
                                 for (auto &[t2, v2] : m_func.tempToVar)
-                                    if (v2 == vit->second && m_pointerTemps.count(t2))
+                                    if (v2 == vit->second &&
+                                        (m_pointerTemps.count(t2) || m_func.pointerTemps.count(t2)))
                                         { anyPointer = true; break; }
                             }
                             if (anyPointer && ttype == "int")

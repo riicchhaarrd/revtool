@@ -240,9 +240,17 @@ private:
             break;
         }
         case IRStmtKind::Store: {
-            // Store(addr, val): if addr is a Temp, it's a pointer
-            if (stmt.addr && stmt.addr->op == IROp::Temp) {
-                markAsPointer(stmt.addr->tempId());
+            // Store(addr, val): addr (or addr's base) is a pointer
+            if (stmt.addr) {
+                auto *a = stmt.addr.get();
+                if (a->op == IROp::Temp)
+                    markAsPointer(a->tempId());
+                else if (a->op == IROp::Add && !a->kids.empty() && a->kids[0] &&
+                         a->kids[0]->op == IROp::Temp)
+                    markAsPointer(a->kids[0]->tempId());
+                else if (a->op == IROp::Field && !a->kids.empty() && a->kids[0] &&
+                         a->kids[0]->op == IROp::Temp)
+                    markAsPointer(a->kids[0]->tempId());
             }
             // Propagate: if we know the addr's pointee type, the stored value has that type
             if (stmt.addr && stmt.expr) {
@@ -348,16 +356,16 @@ private:
     }
 
     void markAsPointer(int tid) {
+        // Mark this temp as a pointer in the IRFunc so the emitter knows
+        m_func->pointerTemps.insert(tid);
         int root = find(tid);
-        // Don't override a known struct pointer with plain pointer
+        // Don't override a known struct pointer type
         auto kit = m_knownType.find(root);
         if (kit != m_knownType.end() && kit->second != NullType) {
             auto *t = m_types->resolveType(kit->second);
-            if (t && t->kind == StabsTypeKind::Pointer) return; // already a pointer type
+            if (t && t->kind == StabsTypeKind::Pointer) return;
         }
-        // We note this temp is a pointer but can't infer the pointee type
-        // without more context.  Just mark it for the emitter.
-        m_func->tempTypes[tid]; // ensure entry exists (default NullType)
+        m_func->tempTypes[tid]; // ensure entry exists
     }
 
     TypeRef inferExprType(const IRExpr *e) {
