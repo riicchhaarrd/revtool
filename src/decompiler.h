@@ -4345,9 +4345,20 @@ private:
                         }
                     }
                     if (result.empty()) {
+                        // Check if base is a struct/union (needs &)
+                        std::string baseRef = base;
+                        TypeRef bt = exprType(addr->kids[0].get());
+                        if (bt != NullType) {
+                            auto *bti = m_types.resolveType(bt);
+                            std::string btName = m_types.formatType(bt);
+                            if ((bti && (bti->kind == StabsTypeKind::Struct ||
+                                         bti->kind == StabsTypeKind::Union)) ||
+                                btName.find("struct ") == 0 || btName.find("union ") == 0)
+                                baseRef = "&" + base;
+                        }
                         char buf[256];
                         snprintf(buf, sizeof(buf), "*(%s *)((char *)%s + 0x%llX)",
-                                 loadCastType(e->loadSize), base.c_str(), (unsigned long long)off);
+                                 loadCastType(e->loadSize), baseRef.c_str(), (unsigned long long)off);
                         result = buf;
                     }
                 }
@@ -4728,8 +4739,10 @@ private:
                                     access = m_types.formatFieldAccess(structRef, off);
                             } else {
                                 auto *bt = m_types.resolveType(baseType);
-                                if (bt && (bt->kind == StabsTypeKind::Struct ||
-                                           bt->kind == StabsTypeKind::Union)) {
+                                std::string btName = m_types.formatType(baseType);
+                                if ((bt && (bt->kind == StabsTypeKind::Struct ||
+                                            bt->kind == StabsTypeKind::Union)) ||
+                                    btName.find("struct ") == 0 || btName.find("union ") == 0) {
                                     isStruct = true;
                                     access = m_types.formatFieldAccess(baseType, off);
                                 }
@@ -4926,11 +4939,22 @@ private:
                                           t->kind == StabsTypeKind::Array))
                                     return 2;
                             }
-                            // Also check global type by name (covers globals without IR type annotation)
+                            // Check params, locals, and globals by name
                             if (!kid->name.empty()) {
-                                auto *g = m_types.globalByName(kid->name);
-                                if (g && g->typeRef != NullType) {
-                                    auto *t = m_types.resolveType(g->typeRef);
+                                TypeRef found = NullType;
+                                for (auto &p : m_func.params)
+                                    if (p.name == kid->name && p.typeRef != NullType)
+                                        { found = p.typeRef; break; }
+                                if (found == NullType)
+                                    for (auto &l : m_func.locals)
+                                        if (l.name == kid->name && l.typeRef != NullType)
+                                            { found = l.typeRef; break; }
+                                if (found == NullType) {
+                                    auto *g = m_types.globalByName(kid->name);
+                                    if (g) found = g->typeRef;
+                                }
+                                if (found != NullType) {
+                                    auto *t = m_types.resolveType(found);
                                     if (t && (t->kind == StabsTypeKind::Struct ||
                                               t->kind == StabsTypeKind::Union ||
                                               t->kind == StabsTypeKind::Array))
@@ -5170,10 +5194,12 @@ private:
                                 auto *pt = m_types.resolveType(par.typeRef);
                                 if (pt && (pt->kind == StabsTypeKind::Union ||
                                           (pt->kind == StabsTypeKind::Struct &&
-                                           pt->sizeBytes > 0 && pt->sizeBytes <= 8))) {
+                                           pt->sizeBytes > 0 && pt->sizeBytes <= 4))) {
                                     std::string ptype = m_types.formatType(par.typeRef);
-                                    // Only cast if the arg doesn't already match
-                                    if (arg.find(ptype) == std::string::npos &&
+                                    // Skip C++ template types and complex names
+                                    if (ptype.find('<') == std::string::npos &&
+                                        ptype.find("std::") == std::string::npos &&
+                                        arg.find(ptype) == std::string::npos &&
                                         arg.find("union ") != 0 && arg.find("struct ") != 0)
                                         arg = "*(" + ptype + " *)&(int){" + arg + "}";
                                 }
