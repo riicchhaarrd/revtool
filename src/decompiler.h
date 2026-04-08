@@ -3725,8 +3725,21 @@ private:
                     if (bogus) break;
                 }
                 // Check if destination is an array type — use dest[0] instead
-                if (stmt.destType != NullType) {
-                    auto *dt = m_types.resolveType(stmt.destType);
+                {
+                    TypeRef destTypeRef = stmt.destType;
+                    // Fallback: check global type by name
+                    if (destTypeRef == NullType) {
+                        auto *g = m_types.globalByName(stmt.destVar);
+                        if (g) destTypeRef = g->typeRef;
+                    }
+                    // Fallback: check local type
+                    if (destTypeRef == NullType) {
+                        for (auto &l : m_func.locals)
+                            if (l.name == stmt.destVar && l.typeRef != NullType)
+                                { destTypeRef = l.typeRef; break; }
+                    }
+                if (destTypeRef != NullType) {
+                    auto *dt = m_types.resolveType(destTypeRef);
                     if (dt && dt->kind == StabsTypeKind::Array)
                         dest += "[0]";
                     // If dest is a struct/union and value is a scalar, cast the store
@@ -3744,6 +3757,7 @@ private:
                         break;
                     }
                 }
+                } // end array/struct type check
                 // For sub-word stores (16-bit/8-bit), use pointer cast to force
                 // the correct store width: *(short *)(&dest) = val
                 if (s_cosmeticMode && (stmt.storeSize == 2 || stmt.storeSize == 1)) {
