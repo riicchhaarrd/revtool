@@ -1189,6 +1189,18 @@ public:
                 pos += 1;
             }
         }
+        // Simplify redundant casts on literals: (unsigned char)(1) → 1
+        cleaned.replace("(unsigned char)(0)", "0");
+        cleaned.replace("(unsigned char)(1)", "1");
+        // Remove trailing "return;" at end of void functions
+        // (the last statement before the closing brace)
+        if (cleaned.contains("void ") && !cleaned.contains("return ")) {
+            // Only if the function is void and has no return-with-value
+            int lastReturn = cleaned.lastIndexOf("    return;\n}");
+            if (lastReturn >= 0)
+                cleaned.remove(lastReturn, 12); // remove "    return;\n"
+        }
+
         // Fix variadic functions: detect va_list usage and fix signature + va_start
         {
             bool hasVaList = cleaned.contains("va_list ");
@@ -3684,6 +3696,16 @@ private:
                             tgt->kind != StabsTypeKind::Union) {
                             out += pad(indent) + QString::fromStdString(
                                 addrS + "[0] = " + val) + ";\n";
+                        } else if (tgt && (tgt->kind == StabsTypeKind::Struct ||
+                                           tgt->kind == StabsTypeKind::Union)) {
+                            // Struct pointer at offset 0: use first field name
+                            std::string field0 = m_types.formatFieldAccess(atInfo->targetType, 0);
+                            if (!field0.empty())
+                                out += pad(indent) + QString::fromStdString(
+                                    addrS + "->" + field0 + " = " + val) + ";\n";
+                            else
+                                out += pad(indent) + QString::fromStdString(
+                                    "*(" + storeCast + " *)(" + addrS + ") = " + val) + ";\n";
                         } else {
                             out += pad(indent) + QString::fromStdString(
                                 "*(" + storeCast + " *)(" + addrS + ") = " + val) + ";\n";
@@ -4393,7 +4415,16 @@ private:
                                 tgt->kind != StabsTypeKind::Union &&
                                 tgt->kind != StabsTypeKind::Pointer)
                                 result = emitExpr(addr) + "[0]";
-                            else
+                            else if (tgt && (tgt->kind == StabsTypeKind::Struct ||
+                                             tgt->kind == StabsTypeKind::Union)) {
+                                // Struct pointer at offset 0: use first field name
+                                std::string field0 = m_types.formatFieldAccess(at->targetType, 0);
+                                std::string base = emitExpr(addr);
+                                if (!field0.empty())
+                                    result = base + "->" + field0;
+                                else
+                                    result = "*(" + base + ")";
+                            } else
                                 result = "*(" + emitExpr(addr) + ")";
                         } else if (at && at->kind == StabsTypeKind::Array) {
                             // Array variable at offset 0: arr[0]
