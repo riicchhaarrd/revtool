@@ -1192,6 +1192,36 @@ public:
         // Simplify redundant casts on literals: (unsigned char)(1) → 1
         cleaned.replace("(unsigned char)(0)", "0");
         cleaned.replace("(unsigned char)(1)", "1");
+        // Fix variables used with -> but declared as int: change to char *
+        {
+            // Collect decompiler variable names used with ->
+            std::set<std::string> arrowVars;
+            {
+                std::string s = cleaned.toStdString();
+                size_t pos = 0;
+                while ((pos = s.find("->", pos)) != std::string::npos) {
+                    size_t end = pos;
+                    while (end > 0 && s[end-1] == ' ') end--;
+                    size_t start = end;
+                    while (start > 0 && (isalnum(s[start-1]) || s[start-1] == '_')) start--;
+                    std::string name = s.substr(start, end - start);
+                    if (name.size() >= 2 && (name[0] == 'v' || name[0] == 't') && isdigit(name[1]))
+                        arrowVars.insert(name);
+                    pos += 2;
+                }
+            }
+            for (auto &var : arrowVars) {
+                std::string from = "\n    int " + var + ";\n";
+                std::string to = "\n    char *" + var + ";\n";
+                std::string s = cleaned.toStdString();
+                size_t pos = 0;
+                while ((pos = s.find(from, pos)) != std::string::npos) {
+                    s.replace(pos, from.size(), to);
+                    pos += to.size();
+                }
+                cleaned = QString::fromStdString(s);
+            }
+        }
         // Remove trailing "return;" at end of void functions
         // (the last statement before the closing brace)
         if (cleaned.contains("void ") && !cleaned.contains("return ")) {
@@ -2327,8 +2357,17 @@ private:
                         auto sit = m_tempStructPtr.find(id);
                         if (sit != m_tempStructPtr.end() && sit->second != NullType)
                             ttype = m_types.formatType(sit->second);
-                        else if (m_pointerTemps.count(id) && ttype == "int")
-                            ttype = "char *";
+                        else {
+                            // Check if ANY temp in the coalesced group is a pointer
+                            bool anyPointer = m_pointerTemps.count(id) > 0;
+                            if (!anyPointer && vit != m_func.tempToVar.end()) {
+                                for (auto &[t2, v2] : m_func.tempToVar)
+                                    if (v2 == vit->second && m_pointerTemps.count(t2))
+                                        { anyPointer = true; break; }
+                            }
+                            if (anyPointer && ttype == "int")
+                                ttype = "char *";
+                        }
                     }
                     // Strip const from temp declarations (temps are always assignable)
                     if (ttype.substr(0, 6) == "const ") ttype = ttype.substr(6);
@@ -2912,6 +2951,47 @@ private:
                 stmt.expr->op == IROp::AddrOf && !stmt.expr->kids.empty() &&
                 stmt.expr->kids[0]->op == IROp::Field) {
                 m_interiorPtrVars.insert("__temp_" + std::to_string(stmt.destTemp));
+            }
+            // Track variables used as struct pointer bases in Load/Store field access
+            // This ensures they get declared as pointers, not int
+            {
+                // Helper: mark a base expression as a pointer
+                auto markAsPointer = [&](IRExpr *base) {
+                    if (!base) return;
+                    if (base->op == IROp::Var && !base->name.empty())
+                        m_pointerVars.insert(base->name);
+                    if (base->op == IROp::Temp)
+                        m_pointerTemps.insert(base->tempId());
+                };
+                // Store address analysis
+                if (stmt.kind == IRStmtKind::Store && stmt.addr) {
+                    auto *a = stmt.addr.get();
+                    // Store(Add(base, const), val) - pointer arithmetic store
+                    if (a->op == IROp::Add && a->kids.size() == 2 && a->kids[1]->isConst())
+                        markAsPointer(a->kids[0].get());
+                    // Store(Field(base, ...), val) - struct field store
+                    if (a->op == IROp::Field && !a->kids.empty())
+                        markAsPointer(a->kids[0].get());
+                    // Store(Var/Temp, val) - bare pointer dereference
+                    markAsPointer(a);
+                }
+                // Load address analysis (in expressions)
+                std::function<void(IRExpr*)> scanLoads = [&](IRExpr *e) {
+                    if (!e) return;
+                    if (e->op == IROp::Load && !e->kids.empty()) {
+                        auto *loadAddr = e->kids[0].get();
+                        if (loadAddr) {
+                            if (loadAddr->op == IROp::Add && loadAddr->kids.size() == 2 &&
+                                loadAddr->kids[1]->isConst())
+                                markAsPointer(loadAddr->kids[0].get());
+                            if (loadAddr->op == IROp::Field && !loadAddr->kids.empty())
+                                markAsPointer(loadAddr->kids[0].get());
+                        }
+                    }
+                    for (auto &k : e->kids) scanLoads(k.get());
+                };
+                if (stmt.expr) scanLoads(stmt.expr.get());
+                if (stmt.addr) scanLoads(stmt.addr.get());
             }
             // Also catch Add(structPtr, const) patterns — these are LEA instructions
             // that create pointers into the middle of a struct (e.g., &ent->r.origin).
