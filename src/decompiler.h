@@ -3856,7 +3856,26 @@ private:
                     out += pad(indent) + QString::fromStdString(
                         "*(char *)(&" + cName(dest) + ") = " + val) + ";\n";
                 } else {
-                    out += pad(indent) + QString::fromStdString(cName(dest) + " = " + val) + ";\n";
+                    // Check if source is a struct/union variable — cast to int
+                    bool srcIsStruct = false;
+                    if (stmt.expr && stmt.expr->op == IROp::Var && !stmt.expr->name.empty()) {
+                        auto *g = m_types.globalByName(stmt.expr->name);
+                        TypeRef stype = stmt.expr->typeRef;
+                        if (stype == NullType && g) stype = g->typeRef;
+                        if (stype != NullType) {
+                            auto *st = m_types.resolveType(stype);
+                            std::string sname = m_types.formatType(stype);
+                            if ((st && (st->kind == StabsTypeKind::Struct ||
+                                        st->kind == StabsTypeKind::Union)) ||
+                                sname.find("struct ") == 0 || sname.find("union ") == 0)
+                                srcIsStruct = true;
+                        }
+                    }
+                    if (srcIsStruct)
+                        out += pad(indent) + QString::fromStdString(
+                            cName(dest) + " = *(int *)(&" + val + ")") + ";\n";
+                    else
+                        out += pad(indent) + QString::fromStdString(cName(dest) + " = " + val) + ";\n";
                 }
                 break;
             }
