@@ -190,6 +190,9 @@ public:
                 const StabsFunction *callee = mf.stabsFunctionAt(target);
                 if (!callee) callee = mf.stabsFunctionByName(calleeName);
                 if (!callee || callee->returnType == NullType) continue;
+                // In port mode, skip forward declarations — the types header
+                // already provides prototypes and extra decls cause conflicts
+                if (s_portMode) continue;
                 emittedProtos.insert(calleeName);
                 // Sanitize C++ names for C
                 std::string cname = calleeName;
@@ -2080,8 +2083,10 @@ private:
                             decl = "int " + p.name;
                         } else {
                             decl = m_types.formatDecl(p.typeRef, p.name);
-                            // Strip const from params — decompiler may reassign them
-                            if (decl.find("const ") == 0)
+                            // Strip const from non-pointer params — decompiler may
+                            // reassign them. Keep const on pointer params to match
+                            // the types header prototype.
+                            if (decl.find("const ") == 0 && decl.find('*') == std::string::npos)
                                 decl = decl.substr(6);
                         }
                     } else {
