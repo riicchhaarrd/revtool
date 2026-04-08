@@ -703,7 +703,12 @@ public:
             if (f.name.find("=") != std::string::npos) continue;
             // Skip fields with no size (C++ static members, vtable pointers)
             if (f.bitSize == 0 && f.bitOffset == 0) continue;
-            out += "    " + formatDecl(f.typeRef, f.name) + ";\n";
+            // Skip C++ vtable pointers (_vptr$ClassName)
+            if (f.name.find("_vptr$") != std::string::npos) continue;
+            std::string fdecl = formatDecl(f.typeRef, f.name);
+            // Skip fields with invalid C syntax (function pointer pointers etc.)
+            if (fdecl.find("(*)()") != std::string::npos) continue;
+            out += "    " + fdecl + ";\n";
         }
         out += "}";
         return out;

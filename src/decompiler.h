@@ -522,6 +522,8 @@ public:
             for (auto &c : cname) { if (c == ':') c = '_'; if (c == '~') c = 'd'; }
             if (protoDeclared.count(cname)) continue;
             if (cname.find('<') != std::string::npos) continue;
+            // Skip names with spaces (C++ constructor/destructor stubs)
+            if (cname.find(' ') != std::string::npos) continue;
             protoDeclared.insert(cname);
             std::string retStr = fn.returnType != NullType ?
                 types.formatType(fn.returnType) : "int";
@@ -538,6 +540,15 @@ public:
                         out += "int " + QString::fromStdString(p.name);
                 }
             }
+            // Add variadic markers for known variadic functions
+            static const std::set<std::string> variadicProtos = {
+                "Com_Printf", "Com_DPrintf", "Com_Error", "Com_sprintf",
+                "va", "Cbuf_AddText", "Sys_Error", "CG_Printf", "G_Printf",
+                "Scr_Error", "Scr_ParamError", "SV_SendServerCommand",
+                "NET_OutOfBandPrint"
+            };
+            if (variadicProtos.count(fn.name))
+                out += ", ...";
             out += ");\n";
         }
 
