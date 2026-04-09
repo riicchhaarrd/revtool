@@ -1255,24 +1255,30 @@ private:
             if (fo >= 0) {
                 const uint8_t *code = m_mf.bytesAt((uint32_t)fo, 32);
                 if (code) {
-                    // Scan for mov [ebp-N], reg patterns in first 32 bytes
-                    // mov [ebp+disp8], eax = 89 45 XX  (where XX is negative = <0x80)
-                    // mov [ebp+disp8], edx = 89 55 XX
-                    // mov [ebp+disp8], ecx = 89 4D XX
+                    // Scan prologue for regparm patterns in first 32 bytes:
+                    // 1. mov [ebp-N], eax/edx/ecx (save to stack)
+                    // 2. mov edi/esi/ebx, eax/edx/ecx (save to callee-saved reg)
                     int regSaves = 0;
                     for (int i = 0; i < 28; ++i) {
-                        if (code[i] == 0x89 && i + 2 < 32) {
+                        if (code[i] == 0x89 && i + 1 < 32) {
                             uint8_t modrm = code[i+1];
-                            // modrm: mod=01 (disp8), reg=0/1/2 (eax/ecx/edx), rm=5 (ebp)
-                            if ((modrm & 0xC7) == 0x45) { // [ebp+disp8]
-                                uint8_t reg = (modrm >> 3) & 7;
+                            uint8_t srcReg = (modrm >> 3) & 7;
+                            // Pattern 1: mov [ebp+disp8], eax/ecx/edx
+                            if (i + 2 < 32 && (modrm & 0xC7) == 0x45) {
                                 int8_t disp = (int8_t)code[i+2];
-                                if (disp < 0 && (reg == 0 || reg == 1 || reg == 2))
+                                if (disp < 0 && (srcReg == 0 || srcReg == 1 || srcReg == 2))
                                     regSaves++;
+                            }
+                            // Pattern 2: mov reg, eax/ecx/edx (reg-to-reg, mod=11)
+                            else if ((modrm & 0xC0) == 0xC0) {
+                                uint8_t dstReg = modrm & 7;
+                                if ((srcReg == 0 || srcReg == 1 || srcReg == 2) &&
+                                    (dstReg == 7 || dstReg == 6 || dstReg == 3))
+                                    regSaves++; // mov edi/esi/ebx, eax/ecx/edx
                             }
                         }
                     }
-                    if (regSaves >= 2) result = true;
+                    if (regSaves >= 1) result = true; // even 1 save suggests regparm
                 }
             }
         }
