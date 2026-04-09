@@ -3848,8 +3848,14 @@ private:
                         dest += "[0]";
                     // If dest is a struct/union and value is a scalar, cast the store
                     // But respect storeSize — sub-word stores need proper width cast
-                    if (dt && (dt->kind == StabsTypeKind::Struct || dt->kind == StabsTypeKind::Union) &&
-                        stmt.storeSize != 2 && stmt.storeSize != 1) {
+                    bool destIsAggregate = dt && (dt->kind == StabsTypeKind::Struct ||
+                                                   dt->kind == StabsTypeKind::Union);
+                    if (!destIsAggregate && destTypeRef != NullType) {
+                        std::string tn = m_types.formatType(destTypeRef);
+                        if (tn.find("struct ") == 0 || tn.find("union ") == 0)
+                            destIsAggregate = true;
+                    }
+                    if (destIsAggregate && stmt.storeSize != 2 && stmt.storeSize != 1) {
                         if (s_cosmeticMode) {
                             // Cosmetic: simple assignment for readability
                             out += pad(indent) + QString::fromStdString(
