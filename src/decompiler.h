@@ -2135,7 +2135,7 @@ private:
                 if (l.typeRef != NullType) {
                     decl = m_types.formatDecl(l.typeRef, l.name);
                     // Strip const from local declarations (locals may be reassigned)
-                    if (decl.substr(0, 6) == "const " && decl.find('*') == std::string::npos)
+                    if (decl.substr(0, 6) == "const ")
                         decl = decl.substr(6);
                     // Replace void (non-pointer) with int — can't have void locals
                     if (decl.substr(0, 5) == "void " && decl.find('*') == std::string::npos)
