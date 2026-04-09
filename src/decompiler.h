@@ -197,7 +197,7 @@ public:
                 // Sanitize C++ names for C
                 std::string cname = calleeName;
                 { size_t p = 0; while ((p = cname.find("::", p)) != std::string::npos)
-                    cname.replace(p, 2, "_"); }
+                    { cname.replace(p, 2, "__"); p += 2; } }
                 { size_t p = 0; while ((p = cname.find("~", p)) != std::string::npos)
                     cname.replace(p, 1, "dtor_"); }
                 std::string retStr = types.formatType(callee->returnType);
@@ -238,7 +238,7 @@ public:
                 if (fn.address == 0 || fn.isGlobal) continue; // only static functions
                 std::string cname = fn.name;
                 { size_t p = 0; while ((p = cname.find("::", p)) != std::string::npos)
-                    cname.replace(p, 2, "_"); }
+                    { cname.replace(p, 2, "__"); p += 2; } }
                 { size_t p = 0; while ((p = cname.find("~", p)) != std::string::npos)
                     cname.replace(p, 1, "dtor_"); }
                 { size_t p = 0; while ((p = cname.find(" ", p)) != std::string::npos)
@@ -261,7 +261,7 @@ public:
             if (fn.address == 0) continue;
             if (emittedAddrs.count(fn.address)) continue; // skip duplicate addr
             std::string cname = fn.name;
-            { size_t p = 0; while ((p = cname.find("::", p)) != std::string::npos) cname.replace(p, 2, "_"); }
+            { size_t p = 0; while ((p = cname.find("::", p)) != std::string::npos) { cname.replace(p, 2, "__"); p += 2; } }
             { size_t p = 0; while ((p = cname.find("~", p)) != std::string::npos) cname.replace(p, 1, "dtor_"); }
             if (emittedNames.count(cname)) continue; // skip duplicate name
             emittedAddrs.insert(fn.address);
@@ -519,7 +519,8 @@ public:
         for (auto &fn : mf.stabsFunctions()) {
             if (fn.address == 0 || fn.name.empty()) continue;
             std::string cname = fn.name;
-            for (auto &c : cname) { if (c == ':') c = '_'; if (c == '~') c = 'd'; }
+            { size_t p = 0; while ((p = cname.find("::", p)) != std::string::npos) { cname.replace(p, 2, "__"); p += 2; } }
+            { size_t p = 0; while ((p = cname.find("~", p)) != std::string::npos) cname.replace(p, 1, "dtor_"); }
             if (protoDeclared.count(cname)) continue;
             if (cname.find('<') != std::string::npos) continue;
             // Skip names with spaces (C++ constructor/destructor stubs)
@@ -5623,10 +5624,11 @@ private:
 
         static std::string cName(const std::string &name) {
             std::string out = name;
-            // Replace :: with _
+            // Replace :: with __ (double underscore to match types header)
             size_t pos = 0;
             while ((pos = out.find("::", pos)) != std::string::npos) {
-                out.replace(pos, 2, "_");
+                out.replace(pos, 2, "__");
+                pos += 2;
             }
             // Replace operator symbols
             pos = 0;
