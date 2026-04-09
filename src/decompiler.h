@@ -2942,6 +2942,15 @@ private:
                     // Store(Add(base, const), val) - pointer arithmetic store
                     if (a->op == IROp::Add && a->kids.size() == 2 && a->kids[1]->isConst())
                         markAsPointer(a->kids[0].get());
+                    // Store(Add(base, Mul(idx, scale)), val) - array subscript store
+                    if (a->op == IROp::Add && a->kids.size() == 2) {
+                        for (int side = 0; side < 2; ++side) {
+                            auto *maybeIdx = a->kids[side].get();
+                            auto *maybeBase = a->kids[1-side].get();
+                            if (maybeIdx && maybeIdx->op == IROp::Mul)
+                                markAsPointer(maybeBase);
+                        }
+                    }
                     // Store(Field(base, ...), val) - struct field store
                     if (a->op == IROp::Field && !a->kids.empty())
                         markAsPointer(a->kids[0].get());
@@ -2957,6 +2966,15 @@ private:
                             if (loadAddr->op == IROp::Add && loadAddr->kids.size() == 2 &&
                                 loadAddr->kids[1]->isConst())
                                 markAsPointer(loadAddr->kids[0].get());
+                            // Load(Add(base, Mul(idx, scale))) - array subscript load
+                            if (loadAddr->op == IROp::Add && loadAddr->kids.size() == 2) {
+                                for (int side = 0; side < 2; ++side) {
+                                    auto *mi = loadAddr->kids[side].get();
+                                    auto *mb = loadAddr->kids[1-side].get();
+                                    if (mi && mi->op == IROp::Mul)
+                                        markAsPointer(mb);
+                                }
+                            }
                             if (loadAddr->op == IROp::Field && !loadAddr->kids.empty())
                                 markAsPointer(loadAddr->kids[0].get());
                         }
