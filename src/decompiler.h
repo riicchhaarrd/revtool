@@ -5439,6 +5439,15 @@ private:
                     if (rt == "float" || rt == "double" || rt == "vec_t")
                         return true;
                 }
+                static const std::set<std::string> floatFuncs = {
+                    "atof", "strtof", "strtod",
+                    "sinf", "cosf", "tanf", "asinf", "acosf", "atanf", "atan2f",
+                    "sqrtf", "fabsf", "fminf", "fmaxf", "floorf", "ceilf",
+                    "powf", "fmodf", "expf", "logf", "log10f",
+                    "sin", "cos", "tan", "sqrt", "fabs", "floor", "ceil",
+                    "pow", "fmod", "exp", "log", "atan2",
+                };
+                if (floatFuncs.count(e->name)) return true;
             }
             // Bitwise/shift ops on float: if any child is float, propagate
             if ((e->op == IROp::And || e->op == IROp::Or || e->op == IROp::Xor ||
@@ -5573,6 +5582,17 @@ private:
                             if (rt == "float" || rt == "double" || rt == "vec_t")
                                 return "float";
                         }
+                        // Hardcoded float-returning C library functions
+                        static const std::set<std::string> floatFuncs = {
+                            "atof", "strtof", "strtod",
+                            "sinf", "cosf", "tanf", "asinf", "acosf", "atanf", "atan2f",
+                            "sqrtf", "fabsf", "fminf", "fmaxf", "floorf", "ceilf",
+                            "powf", "fmodf", "expf", "logf", "log10f",
+                            "sin", "cos", "tan", "asin", "acos", "atan", "atan2",
+                            "sqrt", "fabs", "fmin", "fmax", "floor", "ceil",
+                            "pow", "fmod", "exp", "log", "log10",
+                        };
+                        if (floatFuncs.count(k->name)) return "float";
                     }
                 }
             }
