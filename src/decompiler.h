@@ -2246,9 +2246,38 @@ private:
                 } else {
                     decl = "int " + l.name;
                 }
-                // Override int → char* for locals used as pointers
-                if (m_pointerVars.count(l.name) && decl == "int " + l.name)
-                    decl = "char *" + l.name;
+                // Override int → char* for locals used as pointers,
+                // BUT only if the var isn't used with array subscript (var[N])
+                // because subscript on char* yields wrong type vs int→implicit cast
+                if (m_pointerVars.count(l.name) && decl == "int " + l.name) {
+                    bool usedAsSubscript = false;
+                    for (auto &bb2 : m_func.blocks)
+                        for (auto &s2 : bb2.stmts) {
+                            std::function<bool(const IRExpr*)> hasSubscript = [&](const IRExpr *e) -> bool {
+                                if (!e) return false;
+                                // Load(Add(Var(name), Mul(...))) = subscript pattern
+                                if (e->op == IROp::Load && !e->kids.empty()) {
+                                    auto *a = e->kids[0].get();
+                                    if (a && a->op == IROp::Add && a->kids.size() == 2) {
+                                        for (int side = 0; side < 2; ++side) {
+                                            auto *base = a->kids[side].get();
+                                            auto *idx = a->kids[1-side].get();
+                                            if (base && base->op == IROp::Var && base->name == l.name &&
+                                                idx && idx->op == IROp::Mul)
+                                                return true;
+                                        }
+                                    }
+                                }
+                                for (auto &k : e->kids) if (hasSubscript(k.get())) return true;
+                                return false;
+                            };
+                            if (hasSubscript(s2.expr.get()) || hasSubscript(s2.addr.get()))
+                                { usedAsSubscript = true; break; }
+                            if (usedAsSubscript) break;
+                        }
+                    if (!usedAsSubscript)
+                        decl = "char *" + l.name;
+                }
                 out += "    " + QString::fromStdString(decl) + ";\n";
             }
 
