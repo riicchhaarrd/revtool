@@ -359,10 +359,31 @@ public:
         }
 
         out += funcBodies;
-        // Port mode: strip "const" from dvar_t pointers to match types header
+        // Port mode: strip "const" from specific pointers to match types header
         if (s_portMode) {
             out.replace("const dvar_t *", "dvar_t *");
             out.replace("const struct dvar_s *", "struct dvar_s *");
+            // Strip "const" from "this" parameters — constructors modify through them
+            {
+                std::string s = out.toStdString();
+                size_t p = 0;
+                int cnt = 0;
+                while ((p = s.find("const struct ", p)) != std::string::npos) {
+                    size_t nl = s.find('\n', p);
+                    if (nl == std::string::npos) nl = s.size();
+                    // Match both "*this" and "* this" (formatted vs unformatted)
+                    size_t tp = s.find("*this", p);
+                    if (tp == std::string::npos || tp >= nl)
+                        tp = s.find("* this", p);
+                    if (tp != std::string::npos && tp < nl) {
+                        s.erase(p, 6); // erase "const "
+                        cnt++;
+                    } else {
+                        p += 13;
+                    }
+                }
+                out = QString::fromStdString(s);
+            }
         }
         // Skip file-level cleanupOutput — it already ran per-function inside decompile().
         // Running it again would clobber per-function variable declarations (pass 3).
@@ -552,6 +573,10 @@ public:
                 out += ", ...";
             out += ");\n";
         }
+
+        // Strip const from dvar_t pointers to match port mode output
+        out.replace("const dvar_t *", "dvar_t *");
+        out.replace("const struct dvar_s *", "struct dvar_s *");
 
         return out;
     }
