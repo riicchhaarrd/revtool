@@ -3899,8 +3899,24 @@ private:
                     if (srcIsStruct)
                         out += pad(indent) + QString::fromStdString(
                             cName(dest) + " = *(int *)(&" + val + ")") + ";\n";
-                    else
-                        out += pad(indent) + QString::fromStdString(cName(dest) + " = " + val) + ";\n";
+                    else {
+                        // Also check: is the DEST a struct/union global?
+                        // If so, use *(int*)(&dest) = val instead of dest = val
+                        bool destIsStruct = false;
+                        auto *dg = m_types.globalByName(dest);
+                        if (dg && dg->typeRef != NullType) {
+                            auto *dt = m_types.resolveType(dg->typeRef);
+                            std::string dn = m_types.formatType(dg->typeRef);
+                            if ((dt && (dt->kind == StabsTypeKind::Struct || dt->kind == StabsTypeKind::Union)) ||
+                                dn.find("struct ") == 0 || dn.find("union ") == 0)
+                                destIsStruct = true;
+                        }
+                        if (destIsStruct)
+                            out += pad(indent) + QString::fromStdString(
+                                "*(int *)(&" + cName(dest) + ") = (int)" + val) + ";\n";
+                        else
+                            out += pad(indent) + QString::fromStdString(cName(dest) + " = " + val) + ";\n";
+                    }
                 }
                 break;
             }
@@ -5108,8 +5124,34 @@ private:
                         result = "(" + rhs + " + (char*)" + (lhsCast == 2 ? "&" : "") + lhs + ")";
                     else if (rhsCast)
                         result = "(" + lhs + " + (char*)" + (rhsCast == 2 ? "&" : "") + rhs + ")";
-                    else
-                        result = "(" + lhs + op + rhs + ")";
+                    else {
+                        // Check if both operands are pointers (ptr + ptr is invalid C)
+                        auto isPtrExpr = [&](IRExpr *kid) -> bool {
+                            if (!kid) return false;
+                            if (kid->op == IROp::Var && m_pointerVars.count(kid->name)) return true;
+                            if (kid->op == IROp::Temp) {
+                                if (m_pointerTemps.count(kid->tempId()) || m_func.pointerTemps.count(kid->tempId())) return true;
+                                std::string it = inferTempType(kid->tempId());
+                                if (it.find('*') != std::string::npos) return true;
+                            }
+                            TypeRef t = exprType(kid);
+                            if (t != NullType) {
+                                auto *rt = m_types.resolveType(t);
+                                if (rt && rt->kind == StabsTypeKind::Pointer) return true;
+                                if (m_types.formatType(t).find('*') != std::string::npos) return true;
+                            }
+                            if (kid->op == IROp::Var) {
+                                for (auto &p : m_func.params)
+                                    if (p.name == kid->name && p.typeRef != NullType &&
+                                        m_types.formatType(p.typeRef).find('*') != std::string::npos) return true;
+                            }
+                            return false;
+                        };
+                        if (isPtrExpr(e->kids[0].get()) && isPtrExpr(e->kids[1].get()))
+                            result = "(" + lhs + " + (int)" + rhs + ")";
+                        else
+                            result = "(" + lhs + op + rhs + ")";
+                    }
                 } else if ((e->op == IROp::And || e->op == IROp::Or || e->op == IROp::Xor ||
                             e->op == IROp::Shr || e->op == IROp::Sar || e->op == IROp::Shl) &&
                            e->kids[0] && e->kids[1] &&
@@ -5119,6 +5161,43 @@ private:
                            (isFloatExpr(e->kids[0].get()) || isFloatExpr(e->kids[1].get()))) {
                     // Float bitwise/shift: cast operands to int (SSE bit manipulation)
                     result = "((int)(" + lhs + ")" + op + "(int)(" + rhs + "))";
+                } else if (e->op == IROp::Add && e->kids[0] && e->kids[1]) {
+                    // When both operands are pointers, cast RHS to int
+                    // (ptr + ptr is invalid C; one should be an offset)
+                    auto isPtr = [&](IRExpr *kid) -> bool {
+                        if (!kid) return false;
+                        if (kid->op == IROp::Var && !kid->name.empty() &&
+                            m_pointerVars.count(kid->name)) return true;
+                        if (kid->op == IROp::Temp) {
+                            if (m_pointerTemps.count(kid->tempId())) return true;
+                            if (m_func.pointerTemps.count(kid->tempId())) return true;
+                            // Check inferred type
+                            std::string itype = inferTempType(kid->tempId());
+                            if (itype.find('*') != std::string::npos) return true;
+                        }
+                        TypeRef t = exprType(kid);
+                        if (t != NullType) {
+                            auto *rt = m_types.resolveType(t);
+                            if (rt && rt->kind == StabsTypeKind::Pointer) return true;
+                            std::string ft = m_types.formatType(t);
+                            if (ft.find('*') != std::string::npos) return true;
+                        }
+                        // Check params/locals by name
+                        if (kid->op == IROp::Var && !kid->name.empty()) {
+                            for (auto &p : m_func.params)
+                                if (p.name == kid->name && p.typeRef != NullType) {
+                                    std::string pt = m_types.formatType(p.typeRef);
+                                    if (pt.find('*') != std::string::npos) return true;
+                                }
+                        }
+                        return false;
+                    };
+                    bool lhsPtr = isPtr(e->kids[0].get());
+                    bool rhsPtr = isPtr(e->kids[1].get());
+                    if (lhsPtr && rhsPtr)
+                        result = "(" + lhs + " + (int)" + rhs + ")";
+                    else
+                        result = "(" + lhs + op + rhs + ")";
                 } else {
                     result = "(" + lhs + op + rhs + ")";
                 }
