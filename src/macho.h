@@ -192,6 +192,7 @@ public:
     const std::vector<StabsFunction>&   stabsFunctions()   const { return m_stabsFuncs; }
     const std::vector<StabsSourceFile>& stabsSourceFiles() const { return m_stabsSources; }
     const StabsTypeTable&               typeTable()        const { return m_typeTable; }
+    StabsTypeTable&                     mutableTypeTable()        { return m_typeTable; }
     uint32_t entryPoint() const { return m_entryPoint; }
 
     // Build a flat section list

@@ -623,6 +623,50 @@ public:
         return NullType;
     }
 
+    // ── Synthetic type creation (for struct inference) ──────────────
+    // Allocate a new TypeRef for a synthetic type
+    TypeRef allocSyntheticType() {
+        int id = --m_syntheticCounter;
+        return TypeRef{-99, id}; // unit -99 to avoid collision with real types
+    }
+
+    // Create a synthetic struct type and return its TypeRef
+    TypeRef createSyntheticStruct(const std::string &name,
+                                  const std::vector<StabsTypeField> &fields,
+                                  int sizeBytes) {
+        TypeRef ref = allocSyntheticType();
+        auto &ti = m_types[ref];
+        ti.kind = StabsTypeKind::Struct;
+        ti.name = name;
+        ti.sizeBytes = sizeBytes;
+        ti.fields = fields;
+        return ref;
+    }
+
+    // Replace a char[] field in an existing struct with a sub-struct type
+    bool replaceFieldType(TypeRef structRef, int fieldByteOffset, TypeRef newFieldType) {
+        auto it = m_types.find(structRef);
+        if (it == m_types.end()) return false;
+        int bitTarget = fieldByteOffset * 8;
+        for (auto &f : it->second.fields) {
+            if (f.bitOffset == bitTarget || f.bitOffset / 8 == fieldByteOffset) {
+                f.typeRef = newFieldType;
+                // Update the field name to use the new type's name
+                auto *nt = getType(newFieldType);
+                if (nt && !nt->name.empty())
+                    f.name = f.name; // keep original name
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Get mutable access to a type (for field modification)
+    StabsTypeInfo* getMutableType(TypeRef ref) {
+        auto it = m_types.find(ref);
+        return it != m_types.end() ? &it->second : nullptr;
+    }
+
     // Global/static variable lookups
     const std::vector<StabsGlobalVar>& globals() const { return m_globals; }
 
@@ -736,6 +780,7 @@ private:
     std::unordered_map<uint32_t, std::vector<size_t>> m_globalByAddr;
     std::vector<std::string>                 m_includes;
     int                                      m_unit = 0;
+    int                                      m_syntheticCounter = -1000000; // negative TypeRefs for synthetic types
 
     // Check if a type ref should be protected from overwrite.
     // ForwardRefs with real tag names (like clientStatic_t) carry valuable

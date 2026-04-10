@@ -6,6 +6,7 @@
 #include "type_infer.h"
 #include "coalesce.h"
 #include "type_recovery.h"
+#include "struct_infer.h"
 #include "simplify.h"
 #include "macho.h"
 #include <QString>
@@ -65,11 +66,17 @@ public:
     }
 
     // Decompile a whole source file
-    static QString decompileFile(const MachOFile &mf, int srcIdx) {
+    static QString decompileFile(MachOFile &mf, int srcIdx) {
         auto &sources = mf.stabsSourceFiles();
         if (srcIdx < 0 || srcIdx >= (int)sources.size()) return "";
         auto &sf = sources[srcIdx];
         auto &types = mf.typeTable();
+
+        // Port mode: run struct inference to refine char[] fields into sub-structs
+        if (s_portMode) {
+            StructInferer si;
+            si.run(mf, srcIdx);
+        }
 
         QString dir = QString::fromStdString(sf.directory);
         QString fname = QString::fromStdString(sf.filename);
