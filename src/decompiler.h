@@ -1776,10 +1776,43 @@ public:
                     if (!nm.isEmpty()) declared.insert(nm);
                 }
             }
+            // Determine type for undeclared variables by analyzing usage context
+            auto inferVarType = [&](const QString &name) -> QString {
+                std::string n = name.toStdString();
+                for (auto &line : pass2) {
+                    std::string l = line.toStdString();
+                    // Check if used as pointer: *(type *)(name), name->field, name[idx]
+                    if (l.find("*(" ) != std::string::npos && l.find("*)(" + n + ")") != std::string::npos)
+                        return "char *";
+                    if (l.find(n + "->") != std::string::npos)
+                        return "char *";
+                    if (l.find(n + "[") != std::string::npos)
+                        return "char *";
+                    // Check if assigned from a pointer expression: name = (ptr + offset)
+                    // where ptr is char* or involves casts
+                    size_t assignPos = l.find(n + " = ");
+                    if (assignPos != std::string::npos) {
+                        std::string rhs = l.substr(assignPos + n.size() + 3);
+                        if (rhs.find("(char *)") != std::string::npos ||
+                            rhs.find("char *") != std::string::npos)
+                            return "char *";
+                    }
+                    // Check if passed to functions expecting pointers (memcpy, strcpy etc.)
+                    if (l.find("memcpy(" + n + ",") != std::string::npos ||
+                        l.find("memcpy(" + n + " ") != std::string::npos ||
+                        l.find("memset(" + n + ",") != std::string::npos ||
+                        l.find("strcpy(" + n + ",") != std::string::npos ||
+                        l.find("strlen(" + n + ")") != std::string::npos ||
+                        l.find("free(" + n + ")") != std::string::npos)
+                        return "char *";
+                }
+                return "int";
+            };
             QStringList newDecls;
             for (auto &name : used) {
                 if (declared.count(name)) continue;
-                newDecls.append("    int " + name + ";");
+                QString type = inferVarType(name);
+                newDecls.append("    " + type + " " + name + ";");
             }
             if (!newDecls.isEmpty() && bracePos >= 0) {
                 std::sort(newDecls.begin(), newDecls.end());
@@ -2148,6 +2181,42 @@ private:
                 out += "void";
             }
             out += ")\n{\n";
+
+            // Pre-scan: find temps AND vars used as pointers (dereferenced in Load/Store)
+            // This must run BEFORE local declarations so pointer vars get char* type
+            {
+                auto markPointerEarly = [&](const IRExpr *e) {
+                    if (!e) return;
+                    if (e->op == IROp::Temp) m_pointerTemps.insert(e->tempId());
+                    if (e->op == IROp::Var && !e->name.empty()) m_pointerVars.insert(e->name);
+                };
+                for (auto &bb : m_func.blocks)
+                    for (auto &stmt : bb.stmts) {
+                        if (stmt.kind == IRStmtKind::Store && stmt.addr) {
+                            markPointerEarly(stmt.addr.get());
+                            for (auto &k : stmt.addr->kids)
+                                if (k) markPointerEarly(k.get());
+                        }
+                        std::function<void(const IRExpr*)> scanLoadsEarly = [&](const IRExpr *e) {
+                            if (!e) return;
+                            if (e->op == IROp::Load && !e->kids.empty() && e->kids[0]) {
+                                auto *addr = e->kids[0].get();
+                                markPointerEarly(addr);
+                                if (addr->op == IROp::Add && !addr->kids.empty()) {
+                                    markPointerEarly(addr->kids[0].get());
+                                    for (int side = 0; side < 2 && addr->kids.size() == 2; ++side) {
+                                        if (addr->kids[side]->op == IROp::Mul)
+                                            markPointerEarly(addr->kids[1-side].get());
+                                    }
+                                }
+                            }
+                            for (auto &k : e->kids) if (k) scanLoadsEarly(k.get());
+                        };
+                        scanLoadsEarly(stmt.expr.get());
+                        scanLoadsEarly(stmt.addr.get());
+                        for (auto &a : stmt.args) scanLoadsEarly(a.get());
+                    }
+            }
 
             // Local variable declarations — skip params (already declared in signature)
             std::set<std::string> paramNames;
@@ -4012,7 +4081,16 @@ private:
                         }
                     }
                 }
-                out += pad(indent) + QString::fromStdString(text) + ";\n";
+                // In port mode, replace "goto *tN" (indirect jumps through vtable)
+                // with "return 0;" since they're typically tail calls
+                if (s_portMode && text.find("goto *") == 0) {
+                    if (!m_emittedRetVoid)
+                        out += pad(indent) + "return 0;\n";
+                    else
+                        out += pad(indent) + "return;\n";
+                } else {
+                    out += pad(indent) + QString::fromStdString(text) + ";\n";
+                }
                 break;
             }
             case IRStmtKind::Switch: {
