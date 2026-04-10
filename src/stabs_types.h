@@ -402,7 +402,7 @@ public:
         for (auto &f : t->fields) {
             if (f.name.empty() || f.name[0] == '!' || f.name[0] == '/' ||
                 f.name.find("::") != std::string::npos ||
-                (f.bitSize == 0 && f.bitOffset == 0))
+                (f.bitSize == 0 && f.bitOffset == 0 && f.name.size() > 1))
                 continue;
             if (bitTarget > f.bitOffset && bitTarget < f.bitOffset + f.bitSize) {
                 int fieldByteStart = f.bitOffset / 8;
@@ -446,7 +446,7 @@ public:
                 f.name.find("(") != std::string::npos ||
                 f.name.find("<") != std::string::npos ||
                 f.name.find("operator") == 0 ||
-                (f.bitSize == 0 && f.bitOffset == 0))
+                (f.bitSize == 0 && f.bitOffset == 0 && f.name.size() > 1))
                 continue;
             if (f.bitOffset == bitTarget || f.bitOffset / 8 == byteOffset) {
                 // Check if this field is actually inside a larger array field

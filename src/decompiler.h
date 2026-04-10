@@ -3814,9 +3814,14 @@ private:
                             addrS + "[0] = " + val) + ";\n";
                     } else if (atInfo && (atInfo->kind == StabsTypeKind::Struct ||
                                            atInfo->kind == StabsTypeKind::Union)) {
-                        // Struct/union at offset 0: *(type *)(&var) = val
-                        out += pad(indent) + QString::fromStdString(
-                            "*(" + storeCast + " *)(&" + addrS + ") = " + val) + ";\n";
+                        // Struct/union at offset 0: use first field if available
+                        std::string field0 = m_types.formatFieldAccess(at, 0);
+                        if (!field0.empty() && stmt.storeSize < (int)atInfo->sizeBytes)
+                            out += pad(indent) + QString::fromStdString(
+                                addrS + "." + field0 + " = " + val) + ";\n";
+                        else
+                            out += pad(indent) + QString::fromStdString(
+                                "*(" + storeCast + " *)(&" + addrS + ") = " + val) + ";\n";
                     } else {
                         out += pad(indent) + QString::fromStdString(
                             "*(" + storeCast + " *)((char *)(" + addrS + ")) = " + val) + ";\n";
@@ -3883,8 +3888,17 @@ private:
                             destIsAggregate = true;
                     }
                     if (destIsAggregate && stmt.storeSize != 2 && stmt.storeSize != 1) {
-                        if (s_cosmeticMode) {
-                            // Cosmetic: simple assignment for readability
+                        if (s_cosmeticMode && dt) {
+                            // Use first field at offset 0 for struct stores
+                            std::string field0 = m_types.formatFieldAccess(destTypeRef, 0);
+                            if (!field0.empty() && dt->sizeBytes > 0 &&
+                                stmt.storeSize < (int)dt->sizeBytes)
+                                out += pad(indent) + QString::fromStdString(
+                                    cName(dest) + "." + field0 + " = " + val) + ";\n";
+                            else
+                                out += pad(indent) + QString::fromStdString(
+                                    cName(dest) + " = " + val) + ";\n";
+                        } else if (s_cosmeticMode) {
                             out += pad(indent) + QString::fromStdString(
                                 cName(dest) + " = " + val) + ";\n";
                         } else {
