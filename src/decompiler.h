@@ -1906,6 +1906,48 @@ public:
                 }
             }
         }
+        // Port mode: remove "arrayVar = expr;" lines where arrayVar is declared as TYPE name[N]
+        if (s_portMode) {
+            std::set<QString> arrayVars;
+            QStringList lines = result.split('\n');
+            // Collect array variable names from declarations
+            for (auto &line : lines) {
+                QString t = line.trimmed();
+                // Match: TYPE NAME[N]; (array declaration)
+                int bracket = t.indexOf('[');
+                if (bracket > 0 && t.endsWith(';') && !t.contains('=')) {
+                    // Extract variable name (word before [)
+                    int ns = bracket - 1;
+                    while (ns > 0 && (t[ns-1].isLetterOrNumber() || t[ns-1] == '_')) ns--;
+                    QString varName = t.mid(ns, bracket - ns).trimmed();
+                    if (!varName.isEmpty() && varName[0].isLetter())
+                        arrayVars.insert(varName);
+                }
+            }
+            // Remove "arrayVar = expr;" lines
+            if (!arrayVars.isEmpty()) {
+                QStringList filtered;
+                for (auto &line : lines) {
+                    QString t = line.trimmed();
+                    bool suppress = false;
+                    if (t.endsWith(';') && t.contains(" = ")) {
+                        for (auto &av : arrayVars) {
+                            if (t.startsWith(av + " = ") || t.startsWith(av + "[0] = ")) {
+                                // Check RHS isn't a function call (those have side effects)
+                                QString rhs = t.mid(t.indexOf(" = ") + 3);
+                                rhs.chop(1); // remove ;
+                                if (!rhs.contains('('))
+                                    suppress = true;
+                            }
+                        }
+                    }
+                    if (!suppress)
+                        filtered.append(line);
+                }
+                result = filtered.join('\n');
+            }
+        }
+
         return result;
     }
 
@@ -3990,8 +4032,12 @@ private:
                     }
                 if (destTypeRef != NullType) {
                     auto *dt = m_types.resolveType(destTypeRef);
-                    if (dt && dt->kind == StabsTypeKind::Array)
+                    if (dt && dt->kind == StabsTypeKind::Array) {
+                        // In port mode, suppress assignment to array variables
+                        // (can't assign to arrays in C; this is dead pointer iteration)
+                        if (s_portMode) break;
                         dest += "[0]";
+                    }
                     // If dest is a struct/union and value is a scalar, cast the store
                     // But respect storeSize — sub-word stores need proper width cast
                     bool destIsAggregate = dt && (dt->kind == StabsTypeKind::Struct ||
