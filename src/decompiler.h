@@ -5,6 +5,7 @@
 #include "ssa.h"
 #include "type_infer.h"
 #include "coalesce.h"
+#include "type_recovery.h"
 #include "simplify.h"
 #include "macho.h"
 #include <QString>
@@ -47,6 +48,8 @@ public:
             IRSimplifier().simplify(func);
             TypeInferer().infer(func, mf.typeTable(), &mf);
         }
+        if (s_portMode)
+            TypeRecovery().run(func, mf.typeTable());
         VarCoalescer().coalesce(func, mf.typeTable());
 
         CfgStructurer structurer;
