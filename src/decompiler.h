@@ -2085,6 +2085,7 @@ private:
                 retType = "void";
             else if (m_func.returnType != NullType)
                 retType = m_types.formatType(m_func.returnType);
+            m_emittedRetVoid = (retType == "void");
 
             // In port mode, skip "static" to avoid conflicts with types header
             std::string qual = (m_func.isStatic && !s_portMode) ? "static " : "";
@@ -2718,6 +2719,7 @@ private:
         std::map<int, TypeRef> m_tempStructPtr;   // temp → struct pointer type (from Field access)
         std::set<int>         m_forceDeclareTemps; // temps that leak as raw tN and need declaration
         std::set<int>         m_inliningTemps;    // cycle guard for temp inlining in emitExpr
+        bool                  m_emittedRetVoid = true; // true if function signature says void
         int                   m_addrDepth = 0;     // >0 when emitting Load/Store address sub-exprs
         std::set<int>         m_loadAddrTemps;    // temps used in Load address expressions
         std::map<int, TypeRef> m_cosmeticTypes;    // cosmetic: inferred types for temps/vars
@@ -3932,12 +3934,19 @@ private:
                     std::string val = emitExpr(stmt.expr.get());
                     if (isVoidCall) {
                         out += pad(indent) + QString::fromStdString(val) + ";\n";
-                        out += pad(indent) + "return;\n";
+                        if (!m_emittedRetVoid)
+                            out += pad(indent) + "return 0;\n";
+                        else
+                            out += pad(indent) + "return;\n";
                     } else {
                         out += pad(indent) + "return " + QString::fromStdString(val) + ";\n";
                     }
                 } else {
-                    out += pad(indent) + "return;\n";
+                    // In port mode, emit "return 0;" for non-void functions with bare returns
+                    if (!m_emittedRetVoid)
+                        out += pad(indent) + "return 0;\n";
+                    else
+                        out += pad(indent) + "return;\n";
                 }
                 break;
             }
