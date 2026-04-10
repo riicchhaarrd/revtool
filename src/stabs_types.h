@@ -367,7 +367,10 @@ public:
                 return ret + " (*" + varName + ")()";
             }
         }
-        return formatType(ref) + " " + varName;
+        std::string typeStr = formatType(ref);
+        // void* can't be subscripted or used in arithmetic — use char*
+        // void*→char* too broad, disabled
+        return typeStr + " " + varName;
     }
 
     // Find struct/union field at a given byte offset
