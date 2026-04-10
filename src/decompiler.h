@@ -5326,9 +5326,6 @@ private:
                 } else if ((e->op == IROp::And || e->op == IROp::Or || e->op == IROp::Xor ||
                             e->op == IROp::Shr || e->op == IROp::Sar || e->op == IROp::Shl) &&
                            e->kids[0] && e->kids[1] &&
-                           // Only for actual float operands, NOT comparisons
-                           !(e->kids[0]->op >= IROp::Eq && e->kids[0]->op <= IROp::Uge) &&
-                           !(e->kids[1]->op >= IROp::Eq && e->kids[1]->op <= IROp::Uge) &&
                            (isFloatExpr(e->kids[0].get()) || isFloatExpr(e->kids[1].get()))) {
                     // Float bitwise/shift: cast operands to int (SSE bit manipulation)
                     result = "((int)(" + lhs + ")" + op + "(int)(" + rhs + "))";
