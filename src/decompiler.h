@@ -445,6 +445,42 @@ public:
                     p += pat.size();
                 }
             }
+            // Fix char* variables used in multiplication — downgrade to int
+            // Pattern: "char *vN;" declared but "vN * N" or "(vN *" used
+            {
+                // Find char* declarations
+                size_t p2 = 0;
+                while ((p2 = s.find("char *", p2)) != std::string::npos) {
+                    // Check it's a declaration line (indent + "char *NAME;")
+                    size_t ls = s.rfind('\n', p2);
+                    if (ls == std::string::npos) ls = 0; else ls++;
+                    size_t le = s.find('\n', p2);
+                    if (le == std::string::npos) le = s.size();
+                    std::string line = s.substr(ls, le - ls);
+                    size_t fs2 = line.find_first_not_of(" \t");
+                    if (fs2 != std::string::npos) line = line.substr(fs2);
+                    if (line.find("char *") == 0 && line.back() == ';' &&
+                        line.find('=') == std::string::npos && line.find('(') == std::string::npos) {
+                        // Extract var name
+                        std::string varName = line.substr(6); // after "char *"
+                        if (!varName.empty() && varName.back() == ';')
+                            varName.pop_back();
+                        // Trim spaces
+                        while (!varName.empty() && varName.back() == ' ') varName.pop_back();
+                        // Check if this var is used in multiplication: (varName * N) or (N * varName)
+                        if (!varName.empty() && s.find("(" + varName + " * ") != std::string::npos) {
+                            // Downgrade: replace "char *NAME;" with "int NAME;"
+                            std::string oldDecl = "char *" + varName + ";";
+                            std::string newDecl = "int " + varName + ";";
+                            size_t dp = s.find(oldDecl, ls);
+                            if (dp != std::string::npos)
+                                s.replace(dp, oldDecl.size(), newDecl);
+                        }
+                    }
+                    p2 += 6;
+                }
+            }
+
             out = QString::fromStdString(s);
         }
 
@@ -2319,6 +2355,14 @@ private:
                         for (auto &s2 : bb2.stmts) {
                             std::function<bool(const IRExpr*)> hasSubscript = [&](const IRExpr *e) -> bool {
                                 if (!e) return false;
+                                // Mul(Var(name), ...) or Mul(..., Var(name)) = multiplication
+                                if (e->op == IROp::Mul && e->kids.size() == 2) {
+                                    for (int side = 0; side < 2; ++side) {
+                                        auto *kid = e->kids[side].get();
+                                        if (kid && kid->op == IROp::Var && kid->name == l.name)
+                                            return true;
+                                    }
+                                }
                                 // Load(Add(Var(name), Mul(...))) = subscript pattern
                                 if (e->op == IROp::Load && !e->kids.empty()) {
                                     auto *a = e->kids[0].get();
@@ -2471,7 +2515,7 @@ private:
                         ttype = inferTempType(id);
                     // If type is a pointer but the temp is used in multiplication,
                     // it's actually a scalar value (not a pointer)
-                    if (ttype.find("*") != std::string::npos && ttype.find("char *") == std::string::npos && ttype.find("const") == std::string::npos) {
+                    if (ttype.find("*") != std::string::npos && ttype.find("const") == std::string::npos) {
                         // Collect all temps in this coalesced group
                         std::set<int> groupTemps;
                         if (vit != m_func.tempToVar.end()) {
@@ -2494,18 +2538,28 @@ private:
                             for (auto &k : e->kids) if (hasMulChild(k.get(), depth + 1)) return true;
                             return false;
                         };
+                        // Recursive check: is any group temp used inside a Mul anywhere?
+                        std::function<void(const IRExpr*)> scanForMulUse;
+                        scanForMulUse = [&](const IRExpr *e) {
+                            if (!e || usedInMul) return;
+                            if (e->op == IROp::Mul || e->op == IROp::SDiv) {
+                                for (auto &k : e->kids)
+                                    if (k && k->op == IROp::Temp && groupTemps.count(k->tempId()))
+                                        usedInMul = true;
+                            }
+                            for (auto &k : e->kids) scanForMulUse(k.get());
+                        };
                         for (auto &bb : m_func.blocks) {
+                            if (usedInMul) break;
                             for (auto &stmt : bb.stmts) {
-                                // Check if any group temp is used as Mul operand
-                                if (stmt.expr && (stmt.expr->op == IROp::Mul ||
-                                    stmt.expr->op == IROp::SDiv))
-                                    for (auto &k : stmt.expr->kids)
-                                        if (k && k->op == IROp::Temp && groupTemps.count(k->tempId()))
-                                            usedInMul = true;
+                                scanForMulUse(stmt.expr.get());
+                                scanForMulUse(stmt.addr.get());
+                                for (auto &a : stmt.args) scanForMulUse(a.get());
                                 // Check if any group temp is DEFINED by an expression containing Mul
                                 if (stmt.kind == IRStmtKind::Assign && groupTemps.count(stmt.destTemp))
                                     if (hasMulChild(stmt.expr.get(), 0))
                                         usedInMul = true;
+                                if (usedInMul) break;
                             }
                         }
                         if (usedInMul) {
