@@ -397,6 +397,57 @@ public:
         }
         // Skip file-level cleanupOutput — it already ran per-function inside decompile().
         // Running it again would clobber per-function variable declarations (pass 3).
+
+        // Port mode: remove assignments to local array variables (can't assign to arrays in C)
+        if (s_portMode) {
+            std::string s = out.toStdString();
+            std::set<std::string> arrayVars;
+            size_t pos = 0;
+            while ((pos = s.find('[', pos)) != std::string::npos) {
+                size_t lineStart = s.rfind('\n', pos);
+                if (lineStart == std::string::npos) lineStart = 0; else lineStart++;
+                size_t lineEnd = s.find('\n', pos);
+                if (lineEnd == std::string::npos) lineEnd = s.size();
+                std::string line = s.substr(lineStart, lineEnd - lineStart);
+                size_t fs = line.find_first_not_of(" \t");
+                if (fs != std::string::npos) line = line.substr(fs);
+                if (!line.empty() && line.back() == ';' && line.find('=') == std::string::npos &&
+                    line.find('(') == std::string::npos) {
+                    size_t br = line.find('[');
+                    if (br > 0) {
+                        size_t ns = br;
+                        while (ns > 0 && (isalnum(line[ns-1]) || line[ns-1] == '_')) ns--;
+                        std::string varName = line.substr(ns, br - ns);
+                        if (!varName.empty() && isalpha(varName[0]))
+                            arrayVars.insert(varName);
+                    }
+                }
+                pos++;
+            }
+            for (auto &av : arrayVars) {
+                std::string pat = av + " = ";
+                size_t p = 0;
+                while ((p = s.find(pat, p)) != std::string::npos) {
+                    size_t ls = s.rfind('\n', p);
+                    if (ls == std::string::npos) ls = 0; else ls++;
+                    bool allSpace = true;
+                    for (size_t i = ls; i < p; ++i)
+                        if (s[i] != ' ' && s[i] != '\t') { allSpace = false; break; }
+                    if (allSpace) {
+                        size_t le = s.find('\n', p);
+                        if (le == std::string::npos) le = s.size();
+                        std::string rhs = s.substr(p + pat.size(), le - p - pat.size());
+                        if (rhs.find('(') == std::string::npos) {
+                            s.erase(ls, le - ls + 1);
+                            continue;
+                        }
+                    }
+                    p += pat.size();
+                }
+            }
+            out = QString::fromStdString(s);
+        }
+
         return clangFormat(out);
     }
 
@@ -1906,48 +1957,6 @@ public:
                 }
             }
         }
-        // Port mode: remove "arrayVar = expr;" lines where arrayVar is declared as TYPE name[N]
-        if (s_portMode) {
-            std::set<QString> arrayVars;
-            QStringList lines = result.split('\n');
-            // Collect array variable names from declarations
-            for (auto &line : lines) {
-                QString t = line.trimmed();
-                // Match: TYPE NAME[N]; (array declaration)
-                int bracket = t.indexOf('[');
-                if (bracket > 0 && t.endsWith(';') && !t.contains('=')) {
-                    // Extract variable name (word before [)
-                    int ns = bracket - 1;
-                    while (ns > 0 && (t[ns-1].isLetterOrNumber() || t[ns-1] == '_')) ns--;
-                    QString varName = t.mid(ns, bracket - ns).trimmed();
-                    if (!varName.isEmpty() && varName[0].isLetter())
-                        arrayVars.insert(varName);
-                }
-            }
-            // Remove "arrayVar = expr;" lines
-            if (!arrayVars.isEmpty()) {
-                QStringList filtered;
-                for (auto &line : lines) {
-                    QString t = line.trimmed();
-                    bool suppress = false;
-                    if (t.endsWith(';') && t.contains(" = ")) {
-                        for (auto &av : arrayVars) {
-                            if (t.startsWith(av + " = ") || t.startsWith(av + "[0] = ")) {
-                                // Check RHS isn't a function call (those have side effects)
-                                QString rhs = t.mid(t.indexOf(" = ") + 3);
-                                rhs.chop(1); // remove ;
-                                if (!rhs.contains('('))
-                                    suppress = true;
-                            }
-                        }
-                    }
-                    if (!suppress)
-                        filtered.append(line);
-                }
-                result = filtered.join('\n');
-            }
-        }
-
         return result;
     }
 
