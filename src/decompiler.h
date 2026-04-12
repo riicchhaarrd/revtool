@@ -72,11 +72,9 @@ public:
         auto &sf = sources[srcIdx];
         auto &types = mf.typeTable();
 
-        // Port mode: run struct inference to refine char[] fields into sub-structs
-        if (s_portMode) {
-            StructInferer si;
-            si.run(mf, srcIdx);
-        }
+        // Port mode: struct inference (disabled — too slow for large files)
+        // TODO: only run for source files with <20 functions
+        // if (s_portMode) { StructInferer si; si.run(mf, srcIdx); }
 
         QString dir = QString::fromStdString(sf.directory);
         QString fname = QString::fromStdString(sf.filename);
@@ -486,6 +484,56 @@ public:
                         }
                     }
                     p2 += 6;
+                }
+            }
+
+            // Fix: "tN(...);" where tN is declared as "int tN;" — suppress the call
+            // These are leaked indirect calls through function pointers
+            {
+                // Find "int tN;" declarations
+                std::set<std::string> intTemps;
+                size_t p3 = 0;
+                while ((p3 = s.find("int t", p3)) != std::string::npos) {
+                    size_t ls3 = s.rfind('\n', p3);
+                    if (ls3 == std::string::npos) ls3 = 0; else ls3++;
+                    size_t le3 = s.find('\n', p3);
+                    std::string line3 = s.substr(ls3, le3 - ls3);
+                    size_t fs3 = line3.find_first_not_of(" \t");
+                    if (fs3 != std::string::npos) line3 = line3.substr(fs3);
+                    if (line3.find("int t") == 0 && line3.back() == ';' &&
+                        line3.find('=') == std::string::npos && line3.find('(') == std::string::npos) {
+                        std::string tn = line3.substr(4);
+                        if (!tn.empty() && tn.back() == ';') tn.pop_back();
+                        while (!tn.empty() && tn.back() == ' ') tn.pop_back();
+                        while (!tn.empty() && tn.front() == ' ') tn.erase(tn.begin());
+                        if (!tn.empty() && tn[0] == 't' && tn.size() >= 2 && isdigit(tn[1]))
+                            intTemps.insert(tn);
+                    }
+                    p3 += 5;
+                }
+                // Replace "tN(...);" with "/* tN(...) */;" (comment out the indirect call)
+                for (auto &tn : intTemps) {
+                    std::string callPat = tn + "(";
+                    size_t cp = 0;
+                    while ((cp = s.find(callPat, cp)) != std::string::npos) {
+                        // Check it's at statement start (whitespace before)
+                        size_t ls3 = s.rfind('\n', cp);
+                        if (ls3 == std::string::npos) ls3 = 0; else ls3++;
+                        bool atStart = true;
+                        for (size_t i = ls3; i < cp; ++i)
+                            if (s[i] != ' ' && s[i] != '\t') { atStart = false; break; }
+                        if (atStart) {
+                            size_t le3 = s.find('\n', cp);
+                            if (le3 == std::string::npos) le3 = s.size();
+                            // Replace the line with a cast: ((void(*)())tN)(args);
+                            std::string stmt = s.substr(cp, le3 - cp);
+                            s.replace(cp, stmt.size(), "((void(*)())" + stmt);
+                            // insert closing paren before ;
+                            size_t semi = s.find(';', cp);
+                            if (semi != std::string::npos) s.insert(semi, ")");
+                        }
+                        cp += callPat.size();
+                    }
                 }
             }
 
