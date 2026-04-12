@@ -2453,10 +2453,10 @@ private:
                 } else {
                     decl = "int " + l.name;
                 }
-                // Override int → char* for locals used as pointers,
-                // BUT only if the var isn't used with array subscript (var[N])
-                // because subscript on char* yields wrong type vs int→implicit cast
-                if (m_pointerVars.count(l.name) && decl == "int " + l.name) {
+                // Override int → char* for locals used as pointers
+                // DISABLED in port mode: cmake's -Wno-int-conversion handles int↔pointer,
+                // and char* causes incompatible-pointer-type errors that are worse
+                if (!s_portMode && m_pointerVars.count(l.name) && decl == "int " + l.name) {
                     bool usedAsSubscript = false;
                     for (auto &bb2 : m_func.blocks)
                         for (auto &s2 : bb2.stmts) {
@@ -2690,7 +2690,7 @@ private:
                                         (m_pointerTemps.count(t2) || m_func.pointerTemps.count(t2)))
                                         { anyPointer = true; break; }
                             }
-                            if (anyPointer && ttype == "int")
+                            if (anyPointer && ttype == "int" && !s_portMode)
                                 ttype = "char *";
                         }
                     }
@@ -5541,10 +5541,47 @@ private:
                     }
                 } else if ((e->op == IROp::And || e->op == IROp::Or || e->op == IROp::Xor ||
                             e->op == IROp::Shr || e->op == IROp::Sar || e->op == IROp::Shl) &&
-                           e->kids[0] && e->kids[1] &&
-                           (isFloatExpr(e->kids[0].get()) || isFloatExpr(e->kids[1].get()))) {
-                    // Float bitwise/shift: cast operands to int (SSE bit manipulation)
-                    result = "((int)(" + lhs + ")" + op + "(int)(" + rhs + "))";
+                           e->kids[0] && e->kids[1]) {
+                    // Check if either operand is a float expression
+                    bool anyFloat = isFloatExpr(e->kids[0].get()) || isFloatExpr(e->kids[1].get());
+                    // Text fallback: check emitted strings for float literals
+                    if (!anyFloat) {
+                        anyFloat = lhs.find("f)") != std::string::npos ||
+                                   rhs.find("f)") != std::string::npos ||
+                                   lhs.find(".0") != std::string::npos ||
+                                   rhs.find(".0") != std::string::npos;
+                    }
+                    // Also check: if either operand is a Var/Temp declared as float
+                    if (!anyFloat) {
+                        for (auto &kid : e->kids) {
+                            if (!kid) continue;
+                            int tid = -1;
+                            if (kid->op == IROp::Temp) tid = kid->tempId();
+                            if (tid >= 0) {
+                                auto it = m_func.tempTypes.find(tid);
+                                if (it != m_func.tempTypes.end() && it->second != NullType) {
+                                    auto *t = m_types.resolveType(it->second);
+                                    if (t && (t->kind == StabsTypeKind::Float ||
+                                              t->kind == StabsTypeKind::Double))
+                                        anyFloat = true;
+                                }
+                                // Check cosmetic type
+                                auto cit = m_cosmeticTypes.find(tid);
+                                if (cit != m_cosmeticTypes.end() && cit->second != NullType) {
+                                    auto *t = m_types.resolveType(cit->second);
+                                    if (t && (t->kind == StabsTypeKind::Float ||
+                                              t->kind == StabsTypeKind::Double))
+                                        anyFloat = true;
+                                }
+                            }
+                        }
+                    }
+                    if (anyFloat) {
+                        // Float bitwise/shift: cast operands to int (SSE bit manipulation)
+                        result = "((int)(" + lhs + ")" + op + "(int)(" + rhs + "))";
+                    } else {
+                        result = "(" + lhs + op + rhs + ")";
+                    }
                 } else if (e->op == IROp::Add && e->kids[0] && e->kids[1]) {
                     // When both operands are pointers, cast RHS to int
                     // (ptr + ptr is invalid C; one should be an offset)
