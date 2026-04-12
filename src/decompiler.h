@@ -465,16 +465,24 @@ public:
                         std::string varName = line.substr(6); // after "char *"
                         if (!varName.empty() && varName.back() == ';')
                             varName.pop_back();
-                        // Trim spaces
+                        // Trim spaces from both ends
                         while (!varName.empty() && varName.back() == ' ') varName.pop_back();
+                        while (!varName.empty() && varName.front() == ' ') varName.erase(varName.begin());
                         // Check if this var is used in multiplication: (varName * N) or (N * varName)
+                            varName.c_str(), (int)(s.find("(" + varName + " * ") != std::string::npos));
                         if (!varName.empty() && s.find("(" + varName + " * ") != std::string::npos) {
-                            // Downgrade: replace "char *NAME;" with "int NAME;"
+                            // Downgrade: replace "char *NAME;" or "char * NAME;" with "int NAME;"
+                            // Try both patterns (with/without space after *)
                             std::string oldDecl = "char *" + varName + ";";
+                            std::string oldDecl2 = "char * " + varName + ";";
                             std::string newDecl = "int " + varName + ";";
                             size_t dp = s.find(oldDecl, ls);
-                            if (dp != std::string::npos)
-                                s.replace(dp, oldDecl.size(), newDecl);
+                            if (dp == std::string::npos) dp = s.find(oldDecl2, ls);
+                            if (dp != std::string::npos) {
+                                size_t oldLen = (s.substr(dp, oldDecl2.size()) == oldDecl2) ?
+                                    oldDecl2.size() : oldDecl.size();
+                                s.replace(dp, oldLen, newDecl);
+                            }
                         }
                     }
                     p2 += 6;
