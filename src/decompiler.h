@@ -536,6 +536,24 @@ public:
                 }
             }
 
+            // Fix: &_name___0xOFF_ where _name___0xOFF_ is an offset macro
+            // The macro already computes the address, so & is redundant/invalid
+            {
+                size_t p4 = 0;
+                while ((p4 = s.find("&_", p4)) != std::string::npos) {
+                    // Check if this is an offset macro: &_name___0xHEX_
+                    size_t end = p4 + 2;
+                    while (end < s.size() && (isalnum(s[end]) || s[end] == '_')) end++;
+                    std::string name = s.substr(p4 + 1, end - p4 - 1);
+                    if (name.find("___0x") != std::string::npos && name.back() == '_') {
+                        // Remove the & prefix
+                        s.erase(p4, 1);
+                    } else {
+                        p4 = end;
+                    }
+                }
+            }
+
             out = QString::fromStdString(s);
         }
 
