@@ -467,7 +467,6 @@ public:
                         while (!varName.empty() && varName.back() == ' ') varName.pop_back();
                         while (!varName.empty() && varName.front() == ' ') varName.erase(varName.begin());
                         // Check if this var is used in multiplication: (varName * N) or (N * varName)
-                            varName.c_str(), (int)(s.find("(" + varName + " * ") != std::string::npos));
                         if (!varName.empty() && s.find("(" + varName + " * ") != std::string::npos) {
                             // Downgrade: replace "char *NAME;" or "char * NAME;" with "int NAME;"
                             // Try both patterns (with/without space after *)
@@ -2049,6 +2048,40 @@ public:
                 }
             }
         }
+        // Port mode: cast "tN(...);" calls where tN is declared as "int tN;"
+        // These are indirect calls through function pointers that lost their type
+        if (s_portMode) {
+            QStringList lines = result.split('\n');
+            std::set<QString> intTemps;
+            // Find "int tN;" declarations
+            for (auto &l : lines) {
+                QString t = l.trimmed();
+                if (t.startsWith("int t") && t.endsWith(';') && !t.contains('=') && !t.contains('(')) {
+                    QString tn = t.mid(4); // after "int "
+                    tn.chop(1); // remove ;
+                    tn = tn.trimmed();
+                    if (tn.size() >= 2 && tn[0] == 't' && tn[1].isDigit())
+                        intTemps.insert(tn);
+                }
+            }
+            // Replace "tN(...);" with "((void(*)())tN)(...);"
+            if (!intTemps.empty()) {
+                for (int i = 0; i < lines.size(); ++i) {
+                    QString t = lines[i].trimmed();
+                    for (auto &tn : intTemps) {
+                        if (t.startsWith(tn + "(") && t.endsWith(';')) {
+                            // Found: indent + "tN(...);" → indent + "((void(*)())tN)(...);"
+                            int indent = lines[i].indexOf(tn);
+                            QString ws = lines[i].left(indent);
+                            lines[i] = ws + "((void(*)())" + t.left(t.size()-1) + ");";
+                            break;
+                        }
+                    }
+                }
+                result = lines.join('\n');
+            }
+        }
+
         return result;
     }
 
