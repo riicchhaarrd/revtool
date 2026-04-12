@@ -185,12 +185,16 @@ private:
                 if (et && (et->kind == StabsTypeKind::Union || et->kind == StabsTypeKind::Struct))
                     exprT = NullType;
                 // Also check by formatted name (cross-CU type conflicts)
+                // But preserve pointer-to-struct types (they're valid for temps)
                 if (exprT != NullType) {
                     std::string fmt = m_types->formatType(exprT);
-                    if (fmt.find("DvarValue") != std::string::npos ||
-                        fmt.find("DvarLimits") != std::string::npos ||
-                        fmt.find("union ") == 0 || fmt.find("struct ") == 0)
-                        exprT = NullType;
+                    bool isPointer = fmt.find('*') != std::string::npos;
+                    if (!isPointer) {
+                        if (fmt.find("DvarValue") != std::string::npos ||
+                            fmt.find("DvarLimits") != std::string::npos ||
+                            fmt.find("union ") == 0 || fmt.find("struct ") == 0)
+                            exprT = NullType;
+                    }
                 }
                 if (exprT != NullType)
                     setType(stmt.destTemp, exprT);
@@ -206,14 +210,20 @@ private:
                 bool isStructType = false;
                 if (srcType != NullType) {
                     auto *st = m_types->resolveType(srcType);
+                    // Only block by-value struct types, not pointers-to-struct
                     isStructType = st && (st->kind == StabsTypeKind::Struct ||
                                           st->kind == StabsTypeKind::Union);
-                    // Also check formatted name for cross-CU conflicts
-                    if (!isStructType) {
+                    // Allow struct pointers to propagate
+                    if (st && st->kind == StabsTypeKind::Pointer)
+                        isStructType = false;
+                    // Also check formatted name for cross-CU conflicts (only non-pointer)
+                    if (!isStructType && srcType != NullType) {
                         std::string fmt = m_types->formatType(srcType);
-                        if (fmt.find("State") != std::string::npos ||
-                            fmt.find("_s") != std::string::npos)
-                            isStructType = true;
+                        if (fmt.find('*') == std::string::npos) {
+                            if (fmt.find("State") != std::string::npos ||
+                                fmt.find("_s") != std::string::npos)
+                                isStructType = true;
+                        }
                     }
                 }
                 if (isStructType) {
@@ -402,8 +412,19 @@ private:
                     if (pointee != NullType) {
                         auto *pt = m_types->resolveType(pointee);
                         if (pt && (pt->kind == StabsTypeKind::Struct || pt->kind == StabsTypeKind::Union)) {
-                            // Don't return the struct type — return NullType so the
-                            // temp gets a scalar type from context instead
+                            // Look up the actual field type at this offset
+                            int offset = (int)addr->kids[1]->value;
+                            auto *field = m_types->findFieldAtOffset(pointee, offset);
+                            if (field && field->typeRef != NullType) {
+                                auto *ft = m_types->resolveType(field->typeRef);
+                                // Return the field type if it's a pointer or scalar
+                                if (ft && ft->kind == StabsTypeKind::Pointer)
+                                    return field->typeRef;
+                                if (ft && ft->kind != StabsTypeKind::Struct &&
+                                    ft->kind != StabsTypeKind::Union)
+                                    return field->typeRef;
+                            }
+                            // Fall through to NullType for struct/union fields
                             return NullType;
                         }
                     }
