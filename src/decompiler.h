@@ -4718,9 +4718,34 @@ private:
                         }
                     }
                     if (arrBase && arrIdx) {
+                        // Only emit base[idx] if base is pointer-to-scalar (stride=4 matches elemSize).
+                        // For pointer-to-struct with size != 4, base[idx] strides by sizeof(struct)
+                        // which is wrong — fall through to *(int*)((char*)base + idx*4).
+                        bool okToSubscript = true;
+                        TypeRef bty = s_cosmeticMode ? safeExprType(arrBase) : exprType(arrBase);
+                        if (bty != NullType) {
+                            auto *bti = m_types.resolveType(bty);
+                            if (bti && bti->kind == StabsTypeKind::Pointer) {
+                                auto *tgt = m_types.resolveType(bti->targetType);
+                                // Pointer-to-struct/union: subscript would stride by
+                                // sizeof(struct), not by the 4-byte load granularity we're
+                                // emitting — wrong regardless of whether size is known.
+                                if (tgt && (tgt->kind == StabsTypeKind::Struct ||
+                                            tgt->kind == StabsTypeKind::Union ||
+                                            tgt->kind == StabsTypeKind::ForwardRef))
+                                    okToSubscript = false;
+                                else if (tgt && tgt->sizeBytes > 0 && tgt->sizeBytes != 4 &&
+                                         tgt->kind != StabsTypeKind::Array)
+                                    okToSubscript = false;
+                            } else if (bti && (bti->kind == StabsTypeKind::Struct ||
+                                               bti->kind == StabsTypeKind::Union)) {
+                                // base is a struct value, not a pointer — definitely not subscriptable
+                                okToSubscript = false;
+                            }
+                        }
                         std::string bs = emitExpr(arrBase);
                         std::string is = emitExpr(arrIdx);
-                        if (!bs.empty() && !is.empty()) {
+                        if (okToSubscript && !bs.empty() && !is.empty()) {
                             // Mark the base as a pointer (used in array subscript)
                             if (arrBase->op == IROp::Var && !arrBase->name.empty())
                                 m_pointerVars.insert(arrBase->name);
@@ -5075,6 +5100,11 @@ private:
                         auto *bt = m_types.resolveType(baseType);
                         if (bt && bt->kind == StabsTypeKind::Pointer) {
                             auto *target = m_types.resolveType(bt->targetType);
+                            // Unwrap typedef layers so typedef-to-struct is caught below.
+                            for (int _d = 0; _d < 8 && target &&
+                                 target->kind == StabsTypeKind::Typedef; ++_d) {
+                                target = m_types.resolveType(target->targetType);
+                            }
                             // Scalar types: float, int, char, etc. (not struct/union/array)
                             if (target &&
                                 target->kind != StabsTypeKind::Struct &&
