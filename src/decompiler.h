@@ -2082,17 +2082,29 @@ public:
                         intTemps.insert(tn);
                 }
             }
-            // Replace "tN(...);" with "((void(*)())tN)(...);"
+            // Replace "tN(...)" (as statement OR in assignment RHS) with
+            // "((int(*)())tN)(...)" so gcc accepts the call through int-typed temp.
             if (!intTemps.empty()) {
+                // Match "tN(" where tN is a bare int temp (not preceded by letter/digit/_)
                 for (int i = 0; i < lines.size(); ++i) {
-                    QString t = lines[i].trimmed();
+                    QString &line = lines[i];
                     for (auto &tn : intTemps) {
-                        if (t.startsWith(tn + "(") && t.endsWith(';')) {
-                            // Found: indent + "tN(...);" → indent + "((void(*)())tN)(...);"
-                            int indent = lines[i].indexOf(tn);
-                            QString ws = lines[i].left(indent);
-                            lines[i] = ws + "((void(*)())" + t.left(t.size()-1) + ");";
-                            break;
+                        int searchFrom = 0;
+                        while (true) {
+                            int idx = line.indexOf(tn + "(", searchFrom);
+                            if (idx < 0) break;
+                            // Ensure tN is a standalone identifier (left boundary)
+                            if (idx > 0) {
+                                QChar c = line[idx - 1];
+                                if (c.isLetterOrNumber() || c == '_') {
+                                    searchFrom = idx + tn.size();
+                                    continue;
+                                }
+                            }
+                            QString prefix = line.left(idx);
+                            QString suffix = line.mid(idx + tn.size());
+                            line = prefix + "((int(*)())" + tn + ")" + suffix;
+                            searchFrom = idx + (QString("((int(*)())") + tn + ")").size();
                         }
                     }
                 }
