@@ -13,6 +13,8 @@
 #include "decompiler.h"
 #include "macho.h"
 #include <QCoreApplication>
+#include <set>
+#include <string>
 #include <QProcess>
 #include <cstdio>
 #include <cstring>
@@ -114,6 +116,8 @@ int main(int argc, char *argv[]) {
     uint32_t funcAddr = 0;
     int srcIdx = -1;
     const char *funcName = nullptr;
+    const char *outDir = nullptr;
+    const char *onlyList = nullptr;
 
     for (int i = 2; i < argc; ++i) {
         if (strcmp(argv[i], "-l") == 0) doList = true;
@@ -134,6 +138,10 @@ int main(int argc, char *argv[]) {
             srcIdx = atoi(argv[++i]);
         else if (strcmp(argv[i], "-n") == 0 && i + 1 < argc)
             funcName = argv[++i];
+        else if (strcmp(argv[i], "-o") == 0 && i + 1 < argc)
+            outDir = argv[++i];
+        else if (strcmp(argv[i], "--only") == 0 && i + 1 < argc)
+            onlyList = argv[++i];
     }
 
     MachOFile mf;
@@ -189,15 +197,56 @@ int main(int argc, char *argv[]) {
     } else if (srcIdx >= 0) {
         output = Decompiler::decompileFile(mf, srcIdx);
     } else if (doAll) {
+        // Optional allow-list: one basename (without .c) per line.
+        std::set<std::string> onlySet;
+        if (onlyList) {
+            FILE *fp = fopen(onlyList, "r");
+            if (!fp) {
+                fprintf(stderr, "Cannot open --only list: %s\n", onlyList);
+                return 1;
+            }
+            char line[256];
+            while (fgets(line, sizeof(line), fp)) {
+                std::string s(line);
+                while (!s.empty() && (s.back() == '\n' || s.back() == '\r' || s.back() == ' '))
+                    s.pop_back();
+                if (!s.empty()) onlySet.insert(s);
+            }
+            fclose(fp);
+        }
+
         auto &sources = mf.stabsSourceFiles();
-        int totalErrors = 0;
+        int totalErrors = 0, written = 0, skipped = 0;
         for (size_t i = 0; i < sources.size(); ++i) {
             auto &sf = sources[i];
             if (sf.functionIndices.empty()) continue;
+
+            // Derive basename: strip directory prefix and extension
+            std::string base = sf.filename;
+            size_t slash = base.find_last_of('/');
+            if (slash != std::string::npos) base.erase(0, slash + 1);
+            size_t dot = base.find_last_of('.');
+            if (dot != std::string::npos) base.erase(dot);
+            if (!onlySet.empty() && !onlySet.count(base)) {
+                skipped++;
+                continue;
+            }
+
             fprintf(stderr, "Decompiling [%zu] %s%s...\n",
                     i, sf.directory.c_str(), sf.filename.c_str());
             QString fileOut = Decompiler::decompileFile(mf, (int)i);
-            if (!quiet) {
+            if (outDir) {
+                std::string outPath = std::string(outDir) + "/" + base + ".c";
+                FILE *fp = fopen(outPath.c_str(), "w");
+                if (!fp) {
+                    fprintf(stderr, "Cannot write %s\n", outPath.c_str());
+                    continue;
+                }
+                QByteArray ba = fileOut.toUtf8();
+                fwrite(ba.data(), 1, ba.size(), fp);
+                fclose(fp);
+                written++;
+            } else if (!quiet) {
                 printf("// ═══ [%zu] %s%s ═══\n",
                        i, sf.directory.c_str(), sf.filename.c_str());
                 printf("%s\n", fileOut.toUtf8().constData());
@@ -207,6 +256,8 @@ int main(int argc, char *argv[]) {
                 if (errs > 0) totalErrors += errs;
             }
         }
+        if (outDir)
+            fprintf(stderr, "Wrote %d files to %s (%d skipped)\n", written, outDir, skipped);
         if (doGcc)
             printf("\n=== Total: %d gcc errors across %zu files ===\n",
                    totalErrors, sources.size());
