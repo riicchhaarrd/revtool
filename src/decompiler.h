@@ -5610,9 +5610,13 @@ private:
                     // Returns 0=no cast, 1=has & already, 2=struct/union/array (needs &)
                     auto needsCast = [&](const std::string &s, IRExpr *kid) -> int {
                         if (s.find("&") != std::string::npos) return 1;
-                        // Check if the operand is a struct/array typed variable
-                        if (kid && kid->op == IROp::Var) {
-                            // Check IR type annotation
+                        // Check if the operand's emitted string refers to a known
+                        // struct-valued global/local.  We check by *name* whether
+                        // the IR op is Var or Temp, because coalesced temps can
+                        // emit a global name via tempToVar->varNames.
+                        std::string checkName;
+                        if (kid && kid->op == IROp::Var && !kid->name.empty()) {
+                            // Check IR type annotation first
                             TypeRef kidType = kid->typeRef;
                             if (kidType != NullType) {
                                 auto *t = m_types.resolveType(kidType);
@@ -5621,27 +5625,34 @@ private:
                                           t->kind == StabsTypeKind::Array))
                                     return 2;
                             }
-                            // Check params, locals, and globals by name
-                            if (!kid->name.empty()) {
-                                TypeRef found = NullType;
-                                for (auto &p : m_func.params)
-                                    if (p.name == kid->name && p.typeRef != NullType)
-                                        { found = p.typeRef; break; }
-                                if (found == NullType)
-                                    for (auto &l : m_func.locals)
-                                        if (l.name == kid->name && l.typeRef != NullType)
-                                            { found = l.typeRef; break; }
-                                if (found == NullType) {
-                                    auto *g = m_types.globalByName(kid->name);
-                                    if (g) found = g->typeRef;
-                                }
-                                if (found != NullType) {
-                                    auto *t = m_types.resolveType(found);
-                                    if (t && (t->kind == StabsTypeKind::Struct ||
-                                              t->kind == StabsTypeKind::Union ||
-                                              t->kind == StabsTypeKind::Array))
-                                        return 2;
-                                }
+                            checkName = kid->name;
+                        }
+                        // If kid is a Temp or Var that emitted a bare symbol (no
+                        // parentheses, casts, arithmetic, etc.), use the emitted
+                        // string as the symbol name for lookup.
+                        if (checkName.empty() && !s.empty() &&
+                            s.find_first_of("()+-*/[&*, ") == std::string::npos) {
+                            checkName = s;
+                        }
+                        if (!checkName.empty()) {
+                            TypeRef found = NullType;
+                            for (auto &p : m_func.params)
+                                if (p.name == checkName && p.typeRef != NullType)
+                                    { found = p.typeRef; break; }
+                            if (found == NullType)
+                                for (auto &l : m_func.locals)
+                                    if (l.name == checkName && l.typeRef != NullType)
+                                        { found = l.typeRef; break; }
+                            if (found == NullType) {
+                                auto *g = m_types.globalByName(checkName);
+                                if (g) found = g->typeRef;
+                            }
+                            if (found != NullType) {
+                                auto *t = m_types.resolveType(found);
+                                if (t && (t->kind == StabsTypeKind::Struct ||
+                                          t->kind == StabsTypeKind::Union ||
+                                          t->kind == StabsTypeKind::Array))
+                                    return 2;
                             }
                         }
                         return 0;
