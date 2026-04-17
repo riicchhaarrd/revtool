@@ -4812,7 +4812,16 @@ private:
                                 m_pointerVars.insert(arrBase->name);
                             else if (arrBase->op == IROp::Temp)
                                 m_pointerTemps.insert(arrBase->tempId());
-                            result = bs + "[" + is + "]";
+                            // A Const literal base (e.g. `0x705BC0`) is an integer in
+                            // C, not a pointer — `0x705BC0[v53]` fails to compile.
+                            // Cast to a pointer of the right load type so the subscript
+                            // is valid: `((int *)0x705BC0)[v53]`.
+                            if (arrBase->op == IROp::Const) {
+                                std::string ct = loadCastType(e->loadSize);
+                                result = "((" + ct + " *)" + bs + ")[" + is + "]";
+                            } else {
+                                result = bs + "[" + is + "]";
+                            }
                             break;
                         }
                     }
