@@ -242,6 +242,25 @@ public:
             }
             if (fallback) return fallback;
         }
+        // Incomplete struct/union (name set but empty fields) — try to find
+        // a fully-defined sibling with the same name, analogous to ForwardRef.
+        // This matters when a typedef chain resolves to an "opaque" declaration
+        // (`struct X;`) before its body is parsed; without this, field-offset
+        // resolution (formatFieldAccess etc.) sees no fields and emits bare
+        // base names for what should be `field[i]` or `.subfield` access.
+        if ((t->kind == StabsTypeKind::Struct || t->kind == StabsTypeKind::Union) &&
+            t->fields.empty() && !t->name.empty()) {
+            int refCU = ref.first / 10000;
+            const StabsTypeInfo *fallback = nullptr;
+            for (auto &[tref, ti] : m_types) {
+                if (tref == ref) continue;
+                if (ti.kind == t->kind && ti.name == t->name && !ti.fields.empty()) {
+                    if (tref.first / 10000 == refCU) return &ti;
+                    if (!fallback) fallback = &ti;
+                }
+            }
+            if (fallback) return fallback;
+        }
         return t;
     }
 
@@ -373,6 +392,18 @@ public:
         return typeStr + " " + varName;
     }
 
+    // Field bit size with fallback to the field type's size in bits.
+    // STABS sometimes omits the explicit bit width for typedef'd array fields
+    // (e.g., `D3DMATRIX viewProjectionMatrix` — D3DMATRIX is typedef int[16]).
+    // Without the fallback, range checks like `bitTarget < f.bitOffset + f.bitSize`
+    // collapse to strict-equality and we lose `field[i]` resolution entirely.
+    int fieldBitSize(const StabsTypeField &f) const {
+        if (f.bitSize > 0) return f.bitSize;
+        auto *ft = resolveType(f.typeRef);
+        if (ft && ft->sizeBytes > 0) return ft->sizeBytes * 8;
+        return 0;
+    }
+
     // Find struct/union field at a given byte offset
     const StabsTypeField* findFieldAtOffset(TypeRef ref, int byteOffset) const {
         auto *t = resolveType(ref);
@@ -385,7 +416,8 @@ public:
         }
         // Try nested: find the field whose range contains the offset
         for (auto &f : t->fields) {
-            if (bitTarget >= f.bitOffset && bitTarget < f.bitOffset + f.bitSize)
+            int sz = fieldBitSize(f);
+            if (sz > 0 && bitTarget >= f.bitOffset && bitTarget < f.bitOffset + sz)
                 return &f;
         }
         return nullptr;
@@ -407,10 +439,25 @@ public:
                 f.name.find("::") != std::string::npos ||
                 (f.bitSize == 0 && f.bitOffset == 0 && f.name.size() > 1))
                 continue;
-            if (bitTarget > f.bitOffset && bitTarget < f.bitOffset + f.bitSize) {
+            int fBitSize = fieldBitSize(f);
+            if (bitTarget > f.bitOffset && bitTarget < f.bitOffset + fBitSize) {
                 int fieldByteStart = f.bitOffset / 8;
                 int offsetInField = byteOffset - fieldByteStart;
                 auto *ft = resolveType(f.typeRef);
+                // Opaque struct (declared but no body) — treat as int array so
+                // accesses into it round-trip as `field[i]` instead of the bare
+                // field name.  Covers cases like `D3DMATRIX viewProjectionMatrix`
+                // where the typedef chain resolves to a struct with sizeBytes
+                // set but no fields parsed.
+                if (ft && (ft->kind == StabsTypeKind::Struct ||
+                           ft->kind == StabsTypeKind::Union) &&
+                    ft->fields.empty() && ft->sizeBytes > 0) {
+                    int elemSize = 4;
+                    int idx = offsetInField / elemSize;
+                    int subOff = offsetInField % elemSize;
+                    if (subOff == 0)
+                        return f.name + "[" + std::to_string(idx) + "]";
+                }
                 if (ft && ft->kind == StabsTypeKind::Array) {
                     auto *elemT = resolveType(ft->targetType);
                     int elemSize = elemT ? elemT->sizeBytes : 4;
@@ -455,10 +502,12 @@ public:
                 // Check if this field is actually inside a larger array field
                 // (STABS may have overlapping fields for array elements)
                 for (auto &af : t->fields) {
-                    if (af.name.empty() || af.bitSize == 0) continue;
+                    if (af.name.empty()) continue;
+                    int afBitSize = fieldBitSize(af);
+                    if (afBitSize == 0) continue;
                     auto *aft = resolveType(af.typeRef);
                     if (aft && aft->kind == StabsTypeKind::Array &&
-                        bitTarget >= af.bitOffset && bitTarget < af.bitOffset + af.bitSize &&
+                        bitTarget >= af.bitOffset && bitTarget < af.bitOffset + afBitSize &&
                         af.bitOffset != bitTarget) {
                         // This offset is inside a larger array field — prefer array access
                         auto *elemT = resolveType(aft->targetType);
@@ -534,6 +583,11 @@ public:
                 // If field is an array, accessing at its base offset = first element
                 if (ft && ft->kind == StabsTypeKind::Array)
                     return f.name + "[0]";
+                // Opaque struct with known size — treat as int array [0]
+                if (ft && (ft->kind == StabsTypeKind::Struct ||
+                           ft->kind == StabsTypeKind::Union) &&
+                    ft->fields.empty() && ft->sizeBytes >= 4)
+                    return f.name + "[0]";
                 return f.name;
             }
         }
@@ -544,11 +598,13 @@ public:
                 f.name.find("::") != std::string::npos ||
                 (f.bitSize == 0 && f.bitOffset == 0))
                 continue;
-            if (bitTarget >= f.bitOffset && bitTarget < f.bitOffset + f.bitSize) {
+            int fBitSize2 = fieldBitSize(f);
+            if (fBitSize2 > 0 && bitTarget >= f.bitOffset && bitTarget < f.bitOffset + fBitSize2) {
                 int fieldByteStart = f.bitOffset / 8;
                 int offsetInField = byteOffset - fieldByteStart;
-                // Check if field type is an array
-                auto *ft = getType(f.typeRef);
+                // Check if field type is an array — use resolveType so typedefs
+                // (e.g. D3DMATRIX = int[16]) are followed to the underlying Array.
+                auto *ft = resolveType(f.typeRef);
                 if (ft && ft->kind == StabsTypeKind::Array) {
                     auto *elemT = resolveType(ft->targetType);
                     int elemSize = elemT ? elemT->sizeBytes : 4;
