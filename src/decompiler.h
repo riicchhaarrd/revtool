@@ -2458,8 +2458,16 @@ private:
                     // (decompiler uses int for all scalar values; struct types leak from inference)
                     if (s_portMode) {
                         auto *lt = m_types.resolveType(l.typeRef);
+                        // Keep the real struct/union type when the header
+                        // carries a body (non-empty fields): `struct SysInfo
+                        // info;` compiles and lets `info.cpuGHz = ...` type-
+                        // check.  Demote to int only for genuinely opaque
+                        // types — otherwise we force the decompiler to drop
+                        // every by-value struct local to int and break all
+                        // its .field accesses downstream.
                         if (lt && (lt->kind == StabsTypeKind::Struct || lt->kind == StabsTypeKind::Union) &&
-                            decl.find('*') == std::string::npos)
+                            decl.find('*') == std::string::npos &&
+                            lt->fields.empty())
                             decl = "int " + l.name;
                         // Decay array local to pointer if it's *assigned* a pointer-arith
                         // expression (a walking pointer, not a real stack buffer).
