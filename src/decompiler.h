@@ -2461,6 +2461,34 @@ private:
                         if (lt && (lt->kind == StabsTypeKind::Struct || lt->kind == StabsTypeKind::Union) &&
                             decl.find('*') == std::string::npos)
                             decl = "int " + l.name;
+                        // Decay array local to pointer if it's *assigned* a pointer-arith
+                        // expression (a walking pointer, not a real stack buffer).
+                        // Pattern: `vec2_t v3; v3 = (hull + idx*8);` — v3 is used as a
+                        // pointer that walks along `hull`, not as a 2-float stack value.
+                        // Constrained to Add/Sub/Call expressions so real stack arrays
+                        // (`char buf[256];` with per-index stores) are not decayed.
+                        if (lt && lt->kind == StabsTypeKind::Array &&
+                            decl.find('*') == std::string::npos) {
+                            bool assignedPointer = false;
+                            for (auto &bb2 : m_func.blocks) {
+                                if (assignedPointer) break;
+                                for (auto &s2 : bb2.stmts) {
+                                    if (s2.kind != IRStmtKind::VarSet ||
+                                        s2.destVar != l.name || !s2.expr) continue;
+                                    auto op = s2.expr->op;
+                                    if (op == IROp::Add || op == IROp::Sub ||
+                                        op == IROp::Call || op == IROp::Var ||
+                                        op == IROp::Load) {
+                                        assignedPointer = true; break;
+                                    }
+                                }
+                            }
+                            if (assignedPointer) {
+                                std::string elem = m_types.formatType(lt->targetType);
+                                if (!elem.empty())
+                                    decl = elem + " *" + l.name;
+                            }
+                        }
                     }
                 } else {
                     decl = "int " + l.name;
