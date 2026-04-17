@@ -5893,6 +5893,29 @@ private:
                     for (size_t i = 0; i < argCount; ++i) {
                         if (i) result += ", ";
                         std::string arg = emitExpr(e->kids[i].get());
+                        // Prepend `&` when passing a struct-by-value global/var as
+                        // a pointer argument.  The binary takes the address
+                        // (via `lea`) but the lifter currently emits the symbol
+                        // name alone, so the C call `Field_Clear(g_consoleField)`
+                        // is rejected when g_consoleField is declared as
+                        // `struct field_t` (not a pointer) in the header.
+                        if (calledFn2 && i < calledFn2->params.size()) {
+                            auto &par2 = calledFn2->params[i];
+                            if (par2.typeRef != NullType) {
+                                auto *ptInfo = m_types.resolveType(par2.typeRef);
+                                if (ptInfo && ptInfo->kind == StabsTypeKind::Pointer &&
+                                    e->kids[i] && e->kids[i]->op == IROp::Var &&
+                                    !e->kids[i]->name.empty() &&
+                                    e->kids[i]->typeRef != NullType) {
+                                    auto *vtInfo = m_types.resolveType(e->kids[i]->typeRef);
+                                    if (vtInfo && (vtInfo->kind == StabsTypeKind::Struct ||
+                                                   vtInfo->kind == StabsTypeKind::Union) &&
+                                        arg.find('&') != 0 && arg.find('*') == std::string::npos) {
+                                        arg = "&" + arg;
+                                    }
+                                }
+                            }
+                        }
                         // Cast *(int *) loads to *(float *) for float params
                         if (i < dParamTypes.size() &&
                             (dParamTypes[i] == "float" || dParamTypes[i] == "double") &&
