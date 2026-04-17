@@ -391,10 +391,21 @@ public:
     // (e.g., `D3DMATRIX viewProjectionMatrix` — D3DMATRIX is typedef int[16]).
     // Without the fallback, range checks like `bitTarget < f.bitOffset + f.bitSize`
     // collapse to strict-equality and we lose `field[i]` resolution entirely.
+    //
+    // IMPORTANT: the fallback is gated on the resolved type being Array or an
+    // opaque Struct/Union.  Applying it to fully-defined struct fields makes
+    // the "falls inside larger field" path drill into every unrelated sub-
+    // struct (sharedUiInfo_t.serverStatus — char[] in the header, struct in
+    // STABS — would emit serverStatus.sortKey etc.), breaking ui_main_mp/
+    // ui_shared_obj by ~150 errors each.
     int fieldBitSize(const StabsTypeField &f) const {
         if (f.bitSize > 0) return f.bitSize;
         auto *ft = resolveType(f.typeRef);
-        if (ft && ft->sizeBytes > 0) return ft->sizeBytes * 8;
+        if (!ft || ft->sizeBytes <= 0) return 0;
+        if (ft->kind == StabsTypeKind::Array) return ft->sizeBytes * 8;
+        if ((ft->kind == StabsTypeKind::Struct || ft->kind == StabsTypeKind::Union) &&
+            ft->fields.empty())
+            return ft->sizeBytes * 8;
         return 0;
     }
 
@@ -596,9 +607,15 @@ public:
             if (fBitSize2 > 0 && bitTarget >= f.bitOffset && bitTarget < f.bitOffset + fBitSize2) {
                 int fieldByteStart = f.bitOffset / 8;
                 int offsetInField = byteOffset - fieldByteStart;
-                // Check if field type is an array — use resolveType so typedefs
-                // (e.g. D3DMATRIX = int[16]) are followed to the underlying Array.
-                auto *ft = resolveType(f.typeRef);
+                // Check if field type is an array.
+                // NOTE: keep getType (not resolveType) here.  Using resolveType
+                // here follows typedefs onto large struct buffers (serverStatus
+                // char[] that STABS types as struct serverStatus_s) and drills
+                // into the struct body, producing wrong `.sub` accesses on
+                // what the header carries as char[].  The viewProjectionMatrix
+                // array case is handled earlier by the opaque-struct-as-int-
+                // array block in the "inside larger field FIRST" loop.
+                auto *ft = getType(f.typeRef);
                 if (ft && ft->kind == StabsTypeKind::Array) {
                     auto *elemT = resolveType(ft->targetType);
                     int elemSize = elemT ? elemT->sizeBytes : 4;
