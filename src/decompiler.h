@@ -2681,7 +2681,40 @@ private:
                                 if (usedInMul) break;
                             }
                         }
-                        if (usedInMul) {
+                        // Only strip the pointer if we can PROVE this is a non-pointer
+                        // integer slot.  A coalesced group member being used in Mul isn't
+                        // enough — different temps in the same group can have different
+                        // roles (e.g., v17 is an int-index used in Mul, then v18 in the
+                        // same group holds the gentity_t* returned by SV_GentityNum(v17)).
+                        // Evidence that preserves the pointer: any temp in the group is
+                        // assigned the result of a pointer-returning call, OR used with
+                        // -> field access (m_pointerTemps / m_tempStructPtr), OR this
+                        // specific temp has a struct-pointer target recorded.
+                        bool groupHasPointerDef = false;
+                        for (int t2 : groupTemps) {
+                            if (m_tempStructPtr.count(t2)) { groupHasPointerDef = true; break; }
+                            if (m_pointerTemps.count(t2) || m_func.pointerTemps.count(t2)) {
+                                groupHasPointerDef = true; break;
+                            }
+                        }
+                        if (!groupHasPointerDef) {
+                            for (auto &bb : m_func.blocks) {
+                                if (groupHasPointerDef) break;
+                                for (auto &stmt : bb.stmts) {
+                                    if (stmt.kind != IRStmtKind::Assign) continue;
+                                    if (!groupTemps.count(stmt.destTemp)) continue;
+                                    const IRExpr *e = stmt.expr.get();
+                                    if (!e || e->op != IROp::Call) continue;
+                                    auto *cf = m_mf.stabsFunctionByName(e->name);
+                                    if (!cf || cf->returnType == NullType) continue;
+                                    auto *rrt = m_types.resolveType(cf->returnType);
+                                    if (rrt && rrt->kind == StabsTypeKind::Pointer) {
+                                        groupHasPointerDef = true; break;
+                                    }
+                                }
+                            }
+                        }
+                        if (usedInMul && !groupHasPointerDef) {
                             size_t star = ttype.find(" *");
                             if (star != std::string::npos)
                                 ttype = ttype.substr(0, star);
