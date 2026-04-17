@@ -4240,6 +4240,15 @@ private:
                     if (vsti && vsti->kind == StabsTypeKind::Array) val += "[0]";
                 }
                 std::string dest = stmt.destVar;
+                // Compound dest (array-subscript "a[4]" or dotted "a.b") is already a
+                // valid C expression — don't run it through cName or the brackets/dot
+                // collapse into underscores and we emit "a_4_" as a bogus identifier.
+                bool destIsCompound = dest.find('[') != std::string::npos ||
+                                      dest.find('.') != std::string::npos ||
+                                      dest.find("->") != std::string::npos;
+                auto cNameOrKeep = [&](const std::string &s) -> std::string {
+                    return destIsCompound ? s : cName(s);
+                };
                 // Suppress parameter slot reuse when assigning a string literal to a param
                 // (clear indicator of Com_Error/Com_Printf call argument setup)
                 {
@@ -4297,16 +4306,16 @@ private:
                             if (!field0.empty() && dt->sizeBytes > 0 &&
                                 stmt.storeSize < (int)dt->sizeBytes)
                                 out += pad(indent) + QString::fromStdString(
-                                    cName(dest) + "." + field0 + " = " + val) + ";\n";
+                                    cNameOrKeep(dest) + "." + field0 + " = " + val) + ";\n";
                             else
                                 out += pad(indent) + QString::fromStdString(
-                                    cName(dest) + " = " + val) + ";\n";
+                                    cNameOrKeep(dest) + " = " + val) + ";\n";
                         } else if (s_cosmeticMode) {
                             out += pad(indent) + QString::fromStdString(
-                                cName(dest) + " = " + val) + ";\n";
+                                cNameOrKeep(dest) + " = " + val) + ";\n";
                         } else {
                             out += pad(indent) + QString::fromStdString(
-                                "*(int *)(&" + cName(dest) + ") = (int)" + val) + ";\n";
+                                "*(int *)(&" + cNameOrKeep(dest) + ") = (int)" + val) + ";\n";
                         }
                         break;
                     }
@@ -4317,13 +4326,13 @@ private:
                 if (s_cosmeticMode && (stmt.storeSize == 2 || stmt.storeSize == 1)) {
                     // Cosmetic: simple assignment for readability
                     out += pad(indent) + QString::fromStdString(
-                        cName(dest) + " = " + val) + ";\n";
+                        cNameOrKeep(dest) + " = " + val) + ";\n";
                 } else if (stmt.storeSize == 2) {
                     out += pad(indent) + QString::fromStdString(
-                        "*(short *)(&" + cName(dest) + ") = " + val) + ";\n";
+                        "*(short *)(&" + cNameOrKeep(dest) + ") = " + val) + ";\n";
                 } else if (stmt.storeSize == 1) {
                     out += pad(indent) + QString::fromStdString(
-                        "*(char *)(&" + cName(dest) + ") = " + val) + ";\n";
+                        "*(char *)(&" + cNameOrKeep(dest) + ") = " + val) + ";\n";
                 } else {
                     // Check if source is a struct/union variable — cast to int
                     bool srcIsStruct = false;
@@ -4342,7 +4351,7 @@ private:
                     }
                     if (srcIsStruct)
                         out += pad(indent) + QString::fromStdString(
-                            cName(dest) + " = *(int *)(&" + val + ")") + ";\n";
+                            cNameOrKeep(dest) + " = *(int *)(&" + val + ")") + ";\n";
                     else {
                         // Also check: is the DEST a struct/union global?
                         // If so, use *(int*)(&dest) = val instead of dest = val
@@ -4357,9 +4366,9 @@ private:
                         }
                         if (destIsStruct)
                             out += pad(indent) + QString::fromStdString(
-                                "*(int *)(&" + cName(dest) + ") = (int)" + val) + ";\n";
+                                "*(int *)(&" + cNameOrKeep(dest) + ") = (int)" + val) + ";\n";
                         else
-                            out += pad(indent) + QString::fromStdString(cName(dest) + " = " + val) + ";\n";
+                            out += pad(indent) + QString::fromStdString(cNameOrKeep(dest) + " = " + val) + ";\n";
                     }
                 }
                 break;
