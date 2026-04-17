@@ -248,19 +248,13 @@ public:
         // (`struct X;`) before its body is parsed; without this, field-offset
         // resolution (formatFieldAccess etc.) sees no fields and emits bare
         // base names for what should be `field[i]` or `.subfield` access.
-        if ((t->kind == StabsTypeKind::Struct || t->kind == StabsTypeKind::Union) &&
-            t->fields.empty() && !t->name.empty()) {
-            int refCU = ref.first / 10000;
-            const StabsTypeInfo *fallback = nullptr;
-            for (auto &[tref, ti] : m_types) {
-                if (tref == ref) continue;
-                if (ti.kind == t->kind && ti.name == t->name && !ti.fields.empty()) {
-                    if (tref.first / 10000 == refCU) return &ti;
-                    if (!fallback) fallback = &ti;
-                }
-            }
-            if (fallback) return fallback;
-        }
+        // NOTE: an earlier attempt fell back from an empty struct to a
+        // fully-defined sibling here (analogous to ForwardRef resolution).
+        // That over-matched in practice: unrelated structs sharing a CU-local
+        // name got swapped in and formatFieldAccess emitted wrong field
+        // names.  Kept out intentionally — any cross-CU completion should
+        // route through the ForwardRef path or require stronger identity
+        // evidence (sizeBytes + first-field match).
         return t;
     }
 
