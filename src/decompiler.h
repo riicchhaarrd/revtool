@@ -4556,8 +4556,13 @@ private:
                     std::string en = m_types.findEnumName(e->typeRef, e->value);
                     if (!en.empty()) { result = en; break; }
                 }
-                // Check for IEEE 754 float bit patterns for common constants
-                result = tryFloatConst((uint32_t)e->value);
+                // Check for IEEE 754 float bit patterns for common constants.
+                // BUT: when we're inside a Load/Store address expression, the
+                // constant is being used as a raw address — showing it as a
+                // float literal would emit `*(int *)(-2022.18f)` which the C
+                // compiler rejects ("cannot convert to a pointer type").
+                if (m_addrDepth == 0)
+                    result = tryFloatConst((uint32_t)e->value);
                 // Check for FourCC constants (4 printable ASCII bytes)
                 if (result.empty()) result = tryFourCC((uint32_t)e->value);
                 // Try to resolve large constants as global variable/function addresses
@@ -5279,7 +5284,10 @@ private:
                     default: folded = false;
                     }
                     if (folded) {
-                        result = tryFloatConst((uint32_t)r);
+                        // Don't show folded value as float if inside an address
+                        // expression — `*(int *)(-2022.18f)` is invalid C.
+                        if (m_addrDepth == 0)
+                            result = tryFloatConst((uint32_t)r);
                         if (result.empty()) result = std::to_string(r);
                         break;
                     }
