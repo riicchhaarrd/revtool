@@ -5539,6 +5539,35 @@ private:
                 case IROp::Xor:  op = " ^ "; break;
                 default: op = " + "; break;
                 }
+                // For bitwise ops on float operands (SSE bit-manipulation
+                // patterns like sign masks), cast each operand to int.
+                // This mirrors how the i386 backend uses integer instructions
+                // on memory holding a float: `and reg, 0x7FFFFFFF` on a float
+                // to clear the sign bit.  Without the cast the C code is
+                // rejected as `invalid operands to binary & (float and float)`.
+                if (e->op == IROp::And || e->op == IROp::Or || e->op == IROp::Xor) {
+                    bool lhsFloat = isFloatExpr(e->kids[0].get());
+                    bool rhsFloat = e->kids.size() > 1 && isFloatExpr(e->kids[1].get());
+                    // Direct float literals (IR-level Const with float type) only.
+                    // Avoid string-based sniffing — it misfires on nested expressions
+                    // that contain a float literal as a sub-term but whose outer
+                    // result is already (int)(...).
+                    if (lhsFloat || rhsFloat) {
+                        std::string l2 = lhsFloat ? "(int)(" + lhs + ")" : lhs;
+                        std::string r2 = rhsFloat ? "(int)(" + rhs + ")" : rhs;
+                        // Logical || override still applies for Or
+                        if (e->op == IROp::Or) {
+                            bool lhsBool = e->kids[0] && (e->kids[0]->op >= IROp::Eq && e->kids[0]->op <= IROp::Uge);
+                            bool rhsBool = e->kids[1] && (e->kids[1]->op >= IROp::Eq && e->kids[1]->op <= IROp::Uge);
+                            if (lhsBool && rhsBool) {
+                                result = "(" + lhs + " || " + rhs + ")";
+                                break;
+                            }
+                        }
+                        result = "(" + l2 + op + r2 + ")";
+                        break;
+                    }
+                }
                 if (e->op == IROp::Shr || e->op == IROp::Sar) {
                     // Check if operand is float (SSE bit manipulation pattern)
                     bool lhsFloat = isFloatExpr(e->kids[0].get());
@@ -6036,6 +6065,35 @@ private:
             if (!e) return false;
             if (e->op == IROp::Temp) {
                 if (inferTempType(e->tempId()) == "float") return true;
+                // Check tempTypes directly
+                {
+                    auto ttit = m_func.tempTypes.find(e->tempId());
+                    if (ttit != m_func.tempTypes.end() && ttit->second != NullType) {
+                        auto *rt = m_types.resolveType(ttit->second);
+                        if (rt && (rt->kind == StabsTypeKind::Float ||
+                                   rt->kind == StabsTypeKind::Double ||
+                                   rt->kind == StabsTypeKind::LongDouble))
+                            return true;
+                        std::string ts = m_types.formatType(ttit->second);
+                        if (ts.find("float") != std::string::npos ||
+                            ts.find("double") != std::string::npos ||
+                            ts == "vec_t" || ts == "const vec_t")
+                            return true;
+                    }
+                }
+                // Check coalesced var type directly (v7 / v13 — temps that
+                // became 'float v7;' via varTypes but aren't in stabs locals)
+                auto tvit = m_func.tempToVar.find(e->tempId());
+                if (tvit != m_func.tempToVar.end()) {
+                    auto vtit = m_func.varTypes.find(tvit->second);
+                    if (vtit != m_func.varTypes.end() && vtit->second != NullType) {
+                        auto *rt = m_types.resolveType(vtit->second);
+                        if (rt && (rt->kind == StabsTypeKind::Float ||
+                                   rt->kind == StabsTypeKind::Double ||
+                                   rt->kind == StabsTypeKind::LongDouble))
+                            return true;
+                    }
+                }
                 // Follow temp definition
                 auto it = m_tempDef.find(e->tempId());
                 if (it != m_tempDef.end() && it->second)
@@ -6045,7 +6103,6 @@ private:
                 auto cit = m_copyMap.find(e->tempId());
                 if (cit != m_copyMap.end()) srcName = cit->second;
                 if (srcName.empty()) {
-                    auto tvit = m_func.tempToVar.find(e->tempId());
                     if (tvit != m_func.tempToVar.end()) {
                         auto nit = m_func.varNames.find(tvit->second);
                         if (nit != m_func.varNames.end()) srcName = nit->second;
@@ -6066,6 +6123,11 @@ private:
                 return false;
             }
             if (e->op == IROp::Var && !e->name.empty()) {
+                // IR-side type hint takes priority.
+                if (e->typeRef != NullType) {
+                    std::string ts = m_types.formatType(e->typeRef);
+                    if (ts == "float" || ts == "double" || ts == "vec_t") return true;
+                }
                 // Check if variable is declared as float
                 for (auto &l : m_func.locals)
                     if (l.name == e->name && l.typeRef != NullType) {
@@ -6077,6 +6139,22 @@ private:
                         std::string ts = m_types.formatType(p.typeRef);
                         return ts == "float" || ts == "double";
                     }
+                // Check coalesced varType by name (v7 / v13 etc. — auto-generated
+                // names that aren't in STABS locals but get types from coalescing)
+                for (auto &[vid, vname] : m_func.varNames) {
+                    if (vname != e->name) continue;
+                    auto it = m_func.varTypes.find(vid);
+                    if (it == m_func.varTypes.end() || it->second == NullType) continue;
+                    auto *rt = m_types.resolveType(it->second);
+                    if (rt && (rt->kind == StabsTypeKind::Float ||
+                               rt->kind == StabsTypeKind::Double ||
+                               rt->kind == StabsTypeKind::LongDouble))
+                        return true;
+                    std::string ts = m_types.formatType(it->second);
+                    if (ts == "float" || ts == "double" || ts == "vec_t" ||
+                        ts == "const vec_t" || ts == "const float" || ts == "const double")
+                        return true;
+                }
             }
             // Constants that emit as float literals (e.g. 0x3F800000 → 1.0f)
             if (e->op == IROp::Const && !tryFloatConst((uint32_t)e->value).empty()) return true;
