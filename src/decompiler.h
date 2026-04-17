@@ -4561,20 +4561,42 @@ private:
                 // Check for FourCC constants (4 printable ASCII bytes)
                 if (result.empty()) result = tryFourCC((uint32_t)e->value);
                 // Try to resolve large constants as global variable/function addresses
+                bool inlineFormUsed = false;
                 if (result.empty() && e->value > 0x10000) {
                     std::string sym = m_mf.symbolNameAtAddress((uint32_t)e->value);
                     if (!sym.empty()) {
                         result = cName(sym);
                     } else {
                         std::string nearest = m_mf.nearestSymbolName((uint32_t)e->value);
-                        if (!nearest.empty()) result = cName(nearest);
+                        if (!nearest.empty()) {
+                            // nearest is "(name + 0xNN)" when the address falls inside
+                            // a known global but not at its start.  cName would turn
+                            // this into a macro identifier like `_name___0xNN_` which
+                            // the C code only compiles if that macro is predeclared
+                            // in a header — and for rarely-used globals (tess, ...)
+                            // those macros don't exist.  Emit the inline form
+                            // `((char *)&name + 0xNN)` directly instead, so the
+                            // decomp output is self-sufficient.
+                            size_t plus = nearest.find(" + 0x");
+                            if (plus != std::string::npos &&
+                                nearest.front() == '(' && nearest.back() == ')') {
+                                std::string gname = cName(nearest.substr(1, plus - 1));
+                                std::string offstr = nearest.substr(plus + 3, nearest.size() - plus - 4);
+                                result = "((char *)&" + gname + " + " + offstr + ")";
+                                inlineFormUsed = true;
+                            } else {
+                                result = cName(nearest);
+                            }
+                        }
                     }
                     // Data symbols need & (address-of) since the constant IS
                     // the address, not the value at the address.
                     // Exception: inside Load/Store address expressions, the constant
                     // is already being used as an address — no & needed.
                     // Function symbols don't need & (function names decay to pointers).
-                    if (!result.empty() && m_addrDepth == 0) {
+                    // Also skip when we already emitted the inline form ((char*)&X + N),
+                    // which is already a pointer expression — an outer & would be invalid.
+                    if (!result.empty() && m_addrDepth == 0 && !inlineFormUsed) {
                         auto *sec = m_mf.sectionForAddress((uint32_t)e->value);
                         bool isData = sec && sec->segname != "__TEXT";
                         if (isData)
