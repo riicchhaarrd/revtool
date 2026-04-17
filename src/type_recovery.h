@@ -24,21 +24,32 @@ public:
     void run(IRFunc &func, const StabsTypeTable &types) {
         m_func = &func;
         m_types = &types;
-        m_structGlobals.clear();
         m_inferredStructs.clear();
 
-        // Collect known struct globals from STABS (with full field info)
-        for (auto &g : types.globals()) {
-            if (g.name.empty() || g.address == 0) continue;
-            TypeRef tr = g.typeRef;
-            if (tr == NullType) continue;
-            auto *t = types.resolveType(tr);
-            if (!t) continue;
-            if (t->kind == StabsTypeKind::Struct || t->kind == StabsTypeKind::Union) {
-                if (t->sizeBytes > 0 && !t->fields.empty())
-                    m_structGlobals[g.name] = {tr, t};
+        // Struct-globals map is the same across every function in a binary —
+        // the type table and globals list don't change per-function.  Scanning
+        // ~1160 globals per function dominates TypeRecovery cost for large
+        // source files (rb_backend: 50 funcs × 1160 = 58k wasted scans).
+        // Cache on first call keyed by the type table pointer so a rebuild
+        // only happens if the binary (and thus its types) changes.
+        static const StabsTypeTable *cachedTypes = nullptr;
+        static std::map<std::string, StructInfo> cachedGlobals;
+        if (cachedTypes != &types) {
+            cachedGlobals.clear();
+            for (auto &g : types.globals()) {
+                if (g.name.empty() || g.address == 0) continue;
+                TypeRef tr = g.typeRef;
+                if (tr == NullType) continue;
+                auto *t = types.resolveType(tr);
+                if (!t) continue;
+                if (t->kind == StabsTypeKind::Struct || t->kind == StabsTypeKind::Union) {
+                    if (t->sizeBytes > 0 && !t->fields.empty())
+                        cachedGlobals[g.name] = {tr, t};
+                }
             }
+            cachedTypes = &types;
         }
+        m_structGlobals = cachedGlobals;
 
         // Phase 1: Infer struct layouts from access patterns
         inferStructLayouts(func);
