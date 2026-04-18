@@ -3142,6 +3142,33 @@ private:
         std::set<std::string> m_pointerVars;   // var NAMES used as pointers
         std::map<int, TypeRef> m_tempStructPtr;   // temp → struct pointer type (from Field access)
         std::set<int>         m_forceDeclareTemps; // temps that leak as raw tN and need declaration
+
+        // Port mode: wrap a temp expression in a struct pointer cast for -> access.
+        // Returns the casted expression string, or the original if no cast needed.
+        std::string portCastForArrow(const std::string &base, IRExpr *baseExpr, TypeRef baseType,
+                                      const std::string &fieldName = "") {
+            if (!s_portMode || !baseExpr) return base;
+            if (baseType == NullType) return base;
+            // Skip cast for synthetic fields — the struct might not have them
+            if (!fieldName.empty() && fieldName.find("field_") == 0)
+                return base;
+            if (!fieldName.empty() && fieldName.find("arr_") == 0)
+                return base;
+            auto *bt = m_types.resolveType(baseType);
+            if (!bt || bt->kind != StabsTypeKind::Pointer) return base;
+            auto *tgt = m_types.resolveType(bt->targetType);
+            if (!tgt || (tgt->kind != StabsTypeKind::Struct && tgt->kind != StabsTypeKind::Union))
+                return base;
+            // Only cast if the temp is declared as int (i.e., NOT already in m_tempStructPtr)
+            if (baseExpr->op == IROp::Temp && m_tempStructPtr.count(baseExpr->tempId()))
+                return base;
+            std::string castType = m_types.formatType(baseType);
+            if (castType.find('*') == std::string::npos || castType.find("$_") != std::string::npos)
+                return base;
+            if (castType.substr(0, 6) == "const ")
+                castType = castType.substr(6);
+            return "((" + castType + ")" + base + ")";
+        }
         std::set<int>         m_inliningTemps;    // cycle guard for temp inlining in emitExpr
         bool                  m_emittedRetVoid = true; // true if function signature says void
         int                   m_addrDepth = 0;     // >0 when emitting Load/Store address sub-exprs
@@ -3890,6 +3917,7 @@ private:
                                     m_types.formatFieldAccess(structRef, combinedOff) : "";
                                 if (!access.empty()) {
                                     std::string origStr = emitExpr(origBase);
+                                    origStr = portCastForArrow(origStr, origBase, origType, access);
                                     out += pad(indent) + QString::fromStdString(
                                         origStr + "->" + access + " = " + val) + ";\n";
                                     folded = true;
@@ -3986,6 +4014,7 @@ private:
                                         m_types.formatFieldAccess(structRef, combinedOff) : "";
                                     if (!access.empty()) {
                                         std::string origStr = emitExpr(origBase);
+                                        origStr = portCastForArrow(origStr, origBase, origType, access);
                                         out += pad(indent) + QString::fromStdString(
                                             origStr + "->" + access + " = " + val) + ";\n";
                                         foldedInterior = true;
@@ -4043,7 +4072,7 @@ private:
                                     fieldBase = dit->second->kids[0]->name;
                             }
                             out += pad(indent) + QString::fromStdString(
-                                fieldBase + "->" + access + " = " + val) + ";\n";
+                                portCastForArrow(fieldBase, a->kids[0].get(), stBaseType, access) + "->" + access + " = " + val) + ";\n";
                         } else {
                             char buf[512];
                             snprintf(buf, sizeof(buf), "*(%s *)((char *)%s + 0x%X) = %s",
@@ -4113,13 +4142,13 @@ private:
                         if (bracket != std::string::npos && fieldAccess.substr(bracket) == "[0]")
                             fieldAccess = fieldAccess.substr(0, bracket);
                         out += pad(indent) + QString::fromStdString(
-                            base + "->" + fieldAccess + "[" + idx + "] = " + val) + ";\n";
+                            portCastForArrow(base, a->kids[0]->kids[0].get(), stBaseType, fieldAccess) + "->" + fieldAccess + "[" + idx + "] = " + val) + ";\n";
                     } else {
                         TypeRef stType = exprType(a->kids[0]->kids[0].get());
                         if (stType != NullType && m_types.isStructPointer(stType)) {
                             char fname[64]; snprintf(fname, sizeof(fname), "arr_%X[%s]", (unsigned)off, idx.c_str());
                             out += pad(indent) + QString::fromStdString(
-                                base + "->" + fname + " = " + val) + ";\n";
+                                portCastForArrow(base, a->kids[0]->kids[0].get(), stType, std::string(fname)) + "->" + fname + " = " + val) + ";\n";
                         } else {
                             int sc = (int)a->kids[0]->kids[1]->kids[1]->value;
                             out += pad(indent) + QString::fromStdString(
@@ -4199,7 +4228,7 @@ private:
                             std::string field0 = m_types.formatFieldAccess(atInfo->targetType, 0);
                             if (!field0.empty())
                                 out += pad(indent) + QString::fromStdString(
-                                    addrS + "->" + field0 + " = " + val) + ";\n";
+                                    portCastForArrow(addrS, a, at, field0) + "->" + field0 + " = " + val) + ";\n";
                             else
                                 out += pad(indent) + QString::fromStdString(
                                     "*(" + storeCast + " *)(" + addrS + ") = " + val) + ";\n";
@@ -4780,7 +4809,7 @@ private:
                                 if (bracket != std::string::npos &&
                                     fieldAccess.substr(bracket) == "[0]")
                                     fieldAccess = fieldAccess.substr(0, bracket);
-                                result = baseStr + "->" + fieldAccess + "[" + idxStr + "]";
+                                result = portCastForArrow(baseStr, base, baseType, fieldAccess) + "->" + fieldAccess + "[" + idxStr + "]";
                             }
                         } else {
                             // Only use ->arr_XX when base is a struct pointer
@@ -4790,7 +4819,7 @@ private:
                                     snprintf(fname, sizeof(fname), "arr_%X[%s]", (unsigned)off, idxStr.c_str());
                                 else
                                     snprintf(fname, sizeof(fname), "arr_%X_%d[%s]", (unsigned)off, elemSize, idxStr.c_str());
-                                result = baseStr + "->" + fname;
+                                result = portCastForArrow(baseStr, base, baseType, std::string(fname)) + "->" + fname;
                             } else {
                                 // Non-struct base: use raw pointer arithmetic
                                 result = std::string("*(") + loadCastType(e->loadSize) +
@@ -4891,7 +4920,7 @@ private:
                                     snprintf(buf, sizeof(buf), "*(%s *)((char *)%s + 0x%llX)",
                                              loadCastType(e->loadSize), origStr.c_str(),
                                              (unsigned long long)combinedOff);
-                                    result = origStr + "->" + access;
+                                    result = portCastForArrow(origStr, origBase, origType, access) + "->" + access;
                                     break;
                                 }
                             }
@@ -5015,6 +5044,8 @@ private:
                                     result = base + "->" + access;
                                 }
                             } else {
+                                if (!isDirectStruct)
+                                    base = portCastForArrow(base, addr->kids[0].get(), baseType, access);
                                 result = base + (isDirectStruct ? "." : "->") + access;
                             }
                         }
@@ -5063,7 +5094,7 @@ private:
                                 std::string field0 = m_types.formatFieldAccess(at->targetType, 0);
                                 std::string base = emitExpr(addr);
                                 if (!field0.empty())
-                                    result = base + "->" + field0;
+                                    result = portCastForArrow(base, addr, addrType, field0) + "->" + field0;
                                 else
                                     result = "*(" + base + ")";
                             } else
@@ -5441,9 +5472,10 @@ private:
                             }
                         }
                         if (isPtr) {
-                            if (!access.empty())
-                                result = "&" + lhs + "->" + access;
-                            else {
+                            if (!access.empty()) {
+                                std::string castLhs = portCastForArrow(lhs, e->kids[0].get(), baseType, access);
+                                result = "&" + castLhs + "->" + access;
+                            } else {
                                 char fname[32]; snprintf(fname, sizeof(fname), "field_%X", (unsigned)off);
                                 result = "&" + lhs + "->" + fname;
                             }
