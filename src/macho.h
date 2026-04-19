@@ -615,7 +615,19 @@ private:
                     if (!related && sn.size() >= 4) related = (gn.find(sn.substr(0,4)) != std::string::npos);
                     if (!related) useType = NullType;
                 }
-                m_typeTable.addGlobal(parsed.name, sym.n_value, useType, true);
+                {
+                    std::string gname = parsed.name;
+                    // Strip C++ function scope from static locals:
+                    // "FS_ShiftStr(char const*, int)::buf" → "buf"
+                    auto scopePos = gname.rfind("::");
+                    if (scopePos != std::string::npos && scopePos + 2 < gname.size()) {
+                        // Only strip if there's a function-like pattern before ::
+                        auto parenPos = gname.find('(');
+                        if (parenPos != std::string::npos && parenPos < scopePos)
+                            gname = gname.substr(scopePos + 2);
+                    }
+                    m_typeTable.addGlobal(gname, sym.n_value, useType, true);
+                }
                 break;
             }
             case N_RSYM: {
@@ -1011,7 +1023,16 @@ private:
             if (name.find(':') != std::string::npos) continue;
             // Demangle C++ names
             std::string demangled = demangleNameOnly(sym.name);
-            if (!demangled.empty() && demangled != sym.name) name = demangled;
+            if (!demangled.empty() && demangled != sym.name) {
+                name = demangled;
+                // Strip function scope from static locals:
+                // "FS_ShiftStr(char const*, int)::buf" → "buf"
+                auto paren = name.find('(');
+                auto scope = name.rfind("::");
+                if (paren != std::string::npos && scope != std::string::npos &&
+                    paren < scope && scope + 2 < name.size())
+                    name = name.substr(scope + 2);
+            }
             m_dataSymMap[sym.n_value] = name;
         }
         // Also resolve import pointer targets: map import ptr address → target name
