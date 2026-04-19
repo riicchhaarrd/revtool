@@ -402,6 +402,15 @@ private:
         }
         if (e->op == IROp::Field) return e->typeRef;
         if (e->op == IROp::Call) return e->typeRef;
+        // Const address → check if it's a known global variable
+        if (e->op == IROp::Const && e->value > 0x1000 && e->value < 0x20000000 && m_mf) {
+            std::string sym = m_mf->symbolNameAtAddress((uint32_t)e->value);
+            if (!sym.empty()) {
+                if (sym[0] == '_' && sym[1] != '_') sym = sym.substr(1);
+                auto *gv = m_types->globalByName(sym);
+                if (gv && gv->typeRef != NullType) return gv->typeRef;
+            }
+        }
         // &expr → pointer to expr's type (don't propagate struct types through AddrOf)
         if (e->op == IROp::AddrOf) return NullType;
 

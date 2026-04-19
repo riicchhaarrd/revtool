@@ -2493,6 +2493,23 @@ private:
                 } else {
                     decl = "int " + l.name;
                 }
+                // Override generic pointer → struct pointer for locals whose
+                // assigned expression resolves to a struct pointer type
+                if (decl.find("char *") != std::string::npos || decl.find("int ") == 0) {
+                    for (auto &bb2 : m_func.blocks) {
+                        bool found = false;
+                        for (auto &s2 : bb2.stmts) {
+                            if (s2.kind != IRStmtKind::VarSet || s2.destVar != l.name || !s2.expr) continue;
+                            TypeRef et = exprType(s2.expr.get());
+                            if (et != NullType && m_types.isStructPointer(et)) {
+                                decl = m_types.formatDecl(et, l.name);
+                                if (decl.substr(0, 6) == "const ") decl = decl.substr(6);
+                                found = true; break;
+                            }
+                        }
+                        if (found) break;
+                    }
+                }
                 // Override int → char* for locals used as pointers
                 // DISABLED in port mode: cmake's -Wno-int-conversion handles int↔pointer,
                 // and char* causes incompatible-pointer-type errors that are worse
@@ -2624,6 +2641,9 @@ private:
                 TypeRef resolved = exprType(dit->second);
                 if (resolved != NullType && m_types.isStructPointer(resolved))
                     m_tempStructPtr[id] = resolved;
+                // Debug: print for all temps that resolve to struct pointers
+                if (resolved != NullType && m_types.isStructPointer(resolved)) {
+                }
             }
 
             // Force-declare temps used in fallback (goto target) blocks
@@ -2769,9 +2789,19 @@ private:
                     }
                     // Override to struct pointer if temp is used with -> field access
                     if (ttype == "int" || ttype == "int *" || ttype == "char *") {
+                        // Check this temp and all temps in the coalesced group
+                        TypeRef structPtrType = NullType;
                         auto sit = m_tempStructPtr.find(id);
                         if (sit != m_tempStructPtr.end() && sit->second != NullType)
-                            ttype = m_types.formatType(sit->second);
+                            structPtrType = sit->second;
+                        if (structPtrType == NullType && vit != m_func.tempToVar.end()) {
+                            for (auto &[t2, v2] : m_func.tempToVar)
+                                if (v2 == vit->second && m_tempStructPtr.count(t2)) {
+                                    structPtrType = m_tempStructPtr[t2]; break;
+                                }
+                        }
+                        if (structPtrType != NullType)
+                            ttype = m_types.formatType(structPtrType);
                         else {
                             // Check if ANY temp in the coalesced group is a pointer
                             bool anyPointer = m_pointerTemps.count(id) > 0 ||
@@ -6744,6 +6774,17 @@ private:
                 return NullType;
             }
             if (e->op == IROp::Field) return e->typeRef;
+            // Add: propagate pointer type (ptr + int → ptr)
+            if (e->op == IROp::Add && e->kids.size() == 2) {
+                TypeRef lt = exprType(e->kids[0].get());
+                TypeRef rt = exprType(e->kids[1].get());
+                if (lt != NullType && m_types.isStructPointer(lt)) return lt;
+                if (rt != NullType && m_types.isStructPointer(rt)) return rt;
+                auto *lti = lt != NullType ? m_types.resolveType(lt) : nullptr;
+                auto *rti = rt != NullType ? m_types.resolveType(rt) : nullptr;
+                if (lti && lti->kind == StabsTypeKind::Pointer) return lt;
+                if (rti && rti->kind == StabsTypeKind::Pointer) return rt;
+            }
             // Load(Add(base, const)) → dereference base type and look up field
             if (e->op == IROp::Load && !e->kids.empty()) {
                 auto *addr = e->kids[0].get();
