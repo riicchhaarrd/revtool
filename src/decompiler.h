@@ -2508,9 +2508,7 @@ private:
                         if (found) break;
                     }
                 }
-                // Override int → char* for locals used as pointers
-                // DISABLED in port mode: cmake's -Wno-int-conversion handles int↔pointer,
-                // and char* causes incompatible-pointer-type errors that are worse
+                // Override int → char* for locals used as pointers (non-port mode only)
                 if (!s_portMode && m_pointerVars.count(l.name) && decl == "int " + l.name) {
                     bool usedAsSubscript = false;
                     for (auto &bb2 : m_func.blocks)
