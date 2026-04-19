@@ -6770,6 +6770,11 @@ private:
                             if (pt != NullType) return pt;
                         }
                     }
+                    if (def->op == IROp::Call && !def->name.empty()) {
+                        auto *cf = m_mf.stabsFunctionByName(def->name);
+                        if (cf && cf->returnType != NullType)
+                            return cf->returnType;
+                    }
                 }
                 return NullType;
             }
@@ -6834,6 +6839,12 @@ private:
                     if (l.name == e->name && l.typeRef != NullType) return l.typeRef;
                 auto *gv = m_types.globalByName(e->name);
                 if (gv && gv->typeRef != NullType) return gv->typeRef;
+            }
+            // Call: look up callee return type from STABS
+            if (e->op == IROp::Call && !e->name.empty()) {
+                if (e->typeRef != NullType) return e->typeRef;
+                auto *cf = m_mf.stabsFunctionByName(e->name);
+                if (cf && cf->returnType != NullType) return cf->returnType;
             }
             return NullType;
         }
