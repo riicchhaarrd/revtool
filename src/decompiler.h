@@ -2654,6 +2654,27 @@ private:
                     forceDeclareTempRefs(stmt);
             }
 
+            // Emit body FIRST so m_tempStructPtr and m_pointerTemps are
+            // fully populated before we emit local variable declarations.
+            QString bodyOut;
+            emitNode(bodyOut, root, 1);
+            for (int bbId : m_gotoTargets) {
+                if (emittedBlocks.count(bbId)) continue;
+                if (bbId < 0 || bbId >= (int)m_func.blocks.size()) continue;
+                auto &bb = m_func.blocks[bbId];
+                if (!m_emittedLabels.count(bbId)) {
+                    m_emittedLabels.insert(bbId);
+                    bodyOut += QString("bb_%1:\n").arg(bbId);
+                }
+                for (int i = 0; i < (int)bb.stmts.size(); ++i) {
+                    auto &s = bb.stmts[i];
+                    if (i == (int)bb.stmts.size() - 1 &&
+                        (s.kind == IRStmtKind::Branch || s.kind == IRStmtKind::Jump))
+                        continue;
+                    emitStmt(bodyOut, s, 1);
+                }
+            }
+
             // Declare temps that are used more than once (or used in fallback blocks)
             // Use coalesced variable names and inferred types where available
             std::set<int> declaredVarIds; // track which coalesced var IDs we've declared
@@ -2874,29 +2895,6 @@ private:
                     out += "    int " + QString::fromStdString(name) + ";\n";
             }
             if (!declared.empty()) out += "\n";
-
-            // Emit structured body into a temporary buffer, then check for leaked temps
-            QString bodyOut;
-            emitNode(bodyOut, root, 1);
-
-            // Also emit fallback blocks into the body buffer
-            // so leaked temps from gotos are captured too
-            for (int bbId : m_gotoTargets) {
-                if (emittedBlocks.count(bbId)) continue;
-                if (bbId < 0 || bbId >= (int)m_func.blocks.size()) continue;
-                auto &bb = m_func.blocks[bbId];
-                if (!m_emittedLabels.count(bbId)) {
-                    m_emittedLabels.insert(bbId);
-                    bodyOut += QString("bb_%1:\n").arg(bbId);
-                }
-                for (int i = 0; i < (int)bb.stmts.size(); ++i) {
-                    auto &s = bb.stmts[i];
-                    if (i == (int)bb.stmts.size() - 1 &&
-                        (s.kind == IRStmtKind::Branch || s.kind == IRStmtKind::Jump))
-                        continue;
-                    emitStmt(bodyOut, s, 1);
-                }
-            }
 
             // Declare any temps that leaked during emission (phi temps, raw tN names)
             for (int id : m_forceDeclareTemps) {
@@ -5016,8 +5014,8 @@ private:
                         // Try to resolve a struct pointer type from the temp definition.
                         // Handles patterns like: temp = Load(Add(ConstAddr, ConstOff))
                         // where ConstAddr+ConstOff is a struct field that is a pointer.
-                        std::function<TypeRef(IRExpr*)> resolveStructPtrFromDef = [&](IRExpr *def) -> TypeRef {
-                            if (!def) return NullType;
+                        std::function<TypeRef(IRExpr*, int)> resolveStructPtrFromDef = [&](IRExpr *def, int depth) -> TypeRef {
+                            if (!def || depth > 5) return NullType;
                             // Load(Add(Const(addr), Const(off))) → field of global struct
                             if (def->op == IROp::Load && !def->kids.empty()) {
                                 auto *la = def->kids[0].get();
@@ -5057,7 +5055,7 @@ private:
                                             child = dit2->second;
                                         else break;
                                     }
-                                    TypeRef ct = resolveStructPtrFromDef(child);
+                                    TypeRef ct = resolveStructPtrFromDef(child, depth + 1);
                                     if (ct != NullType) return ct;
                                 }
                             }
@@ -5087,7 +5085,7 @@ private:
                         }
                         // If name-based lookup failed, try address-based struct field resolution
                         if (gname.empty() && baseType == NullType) {
-                            TypeRef resolved = resolveStructPtrFromDef(src);
+                            TypeRef resolved = resolveStructPtrFromDef(src, 0);
                             if (resolved != NullType)
                                 baseType = resolved;
                         }
