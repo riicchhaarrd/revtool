@@ -2619,7 +2619,9 @@ private:
                                         btype = m_func.tempType(base->tempId());
                                     if (btype != NullType) {
                                         auto *bt = m_types.resolveType(btype);
-                                        if (bt && bt->kind == StabsTypeKind::Pointer)
+                                        if (bt && (bt->kind == StabsTypeKind::Pointer ||
+                                                   bt->kind == StabsTypeKind::Struct ||
+                                                   bt->kind == StabsTypeKind::Union))
                                             m_tempStructPtr[base->tempId()] = btype;
                                     }
                                 }
@@ -2821,8 +2823,16 @@ private:
                                     structPtrType = m_tempStructPtr[t2]; break;
                                 }
                         }
-                        if (structPtrType != NullType)
+                        if (structPtrType != NullType) {
                             ttype = m_types.formatType(structPtrType);
+                            // If the type is a struct/union (not already a pointer),
+                            // the temp holds a pointer to it, so append " *"
+                            if (ttype.find('*') == std::string::npos) {
+                                auto *spt = m_types.resolveType(structPtrType);
+                                if (spt && (spt->kind == StabsTypeKind::Struct || spt->kind == StabsTypeKind::Union))
+                                    ttype += " *";
+                            }
+                        }
                         else {
                             // Check if ANY temp in the coalesced group is a pointer
                             bool anyPointer = m_pointerTemps.count(id) > 0 ||
@@ -5114,8 +5124,24 @@ private:
                     } else if (baseType != NullType && !isInterior) {
                         auto *bt = m_types.resolveType(baseType);
                         if (bt && (bt->kind == StabsTypeKind::Struct || bt->kind == StabsTypeKind::Union)) {
-                            structRef = baseType;
-                            isDirectStruct = true;
+                            // Check if the base temp actually holds a pointer (e.g. from AddrOf).
+                            // If so, treat as pointer-to-struct, not struct-by-value.
+                            bool isActuallyPointer = false;
+                            if (addr->kids[0]->op == IROp::Temp) {
+                                auto dit = m_tempDef.find(addr->kids[0]->tempId());
+                                if (dit != m_tempDef.end() && dit->second) {
+                                    auto *d = dit->second;
+                                    if (d->op == IROp::AddrOf ||
+                                        (d->op == IROp::Add && d->kids.size() == 2))
+                                        isActuallyPointer = true;
+                                }
+                            }
+                            if (isActuallyPointer) {
+                                structRef = baseType;
+                            } else {
+                                structRef = baseType;
+                                isDirectStruct = true;
+                            }
                         }
                     }
                     if (structRef != NullType) {
@@ -5155,8 +5181,14 @@ private:
                         if (!access.empty()) {
                             // Record struct pointer type for the base temp's declaration
                             if (!isDirectStruct && addr->kids[0]->op == IROp::Temp &&
-                                baseType != NullType && m_types.isStructPointer(baseType)) {
-                                m_tempStructPtr[addr->kids[0]->tempId()] = baseType;
+                                baseType != NullType) {
+                                if (m_types.isStructPointer(baseType))
+                                    m_tempStructPtr[addr->kids[0]->tempId()] = baseType;
+                                else {
+                                    auto *bt2 = m_types.resolveType(baseType);
+                                    if (bt2 && (bt2->kind == StabsTypeKind::Struct || bt2->kind == StabsTypeKind::Union))
+                                        m_tempStructPtr[addr->kids[0]->tempId()] = baseType;
+                                }
                             }
                             if (isDirectStruct && addr->kids[0]->op == IROp::Load &&
                                 !addr->kids[0]->kids.empty()) {
@@ -5410,8 +5442,19 @@ private:
                     bool useArrow = true;
                     if (baseType != NullType) {
                         auto *bt = m_types.resolveType(baseType);
-                        if (bt && (bt->kind == StabsTypeKind::Struct || bt->kind == StabsTypeKind::Union))
-                            useArrow = false;  // struct-by-value: use dot
+                        if (bt && (bt->kind == StabsTypeKind::Struct || bt->kind == StabsTypeKind::Union)) {
+                            useArrow = false;
+                            // Check if the base temp actually holds a pointer
+                            if (e->kids[0] && e->kids[0]->op == IROp::Temp) {
+                                auto dit = m_tempDef.find(e->kids[0]->tempId());
+                                if (dit != m_tempDef.end() && dit->second) {
+                                    auto *d = dit->second;
+                                    if (d->op == IROp::AddrOf ||
+                                        (d->op == IROp::Add && d->kids.size() == 2))
+                                        useArrow = true;
+                                }
+                            }
+                        }
                     }
                     result = base + (useArrow ? "->" : ".") + e->name;
                 }
