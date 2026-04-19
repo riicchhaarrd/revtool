@@ -127,7 +127,7 @@ int main(int argc, char *argv[]) {
         else if (strcmp(argv[i], "--ssa") == 0) Decompiler::s_useSSA = true;
         else if (strcmp(argv[i], "--flat") == 0) Decompiler::s_flatMode = true;
         else if (strcmp(argv[i], "--cosmetic") == 0) { Decompiler::s_cosmeticMode = true; g_cosmeticMode = true; }
-        else if (strcmp(argv[i], "--port") == 0) { Decompiler::s_cosmeticMode = true; Decompiler::s_portMode = true; g_cosmeticMode = true; }
+        else if (strcmp(argv[i], "--port") == 0) { Decompiler::s_portMode = true; }
         else if (strcmp(argv[i], "--types") == 0) doTypes = true;
         else if (strcmp(argv[i], "--srcof") == 0 && i + 1 < argc)
             srcOfAddr = strtoul(argv[++i], nullptr, 16);
