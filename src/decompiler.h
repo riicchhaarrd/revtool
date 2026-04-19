@@ -2586,6 +2586,7 @@ private:
 
             // Collect struct pointer types from Field expressions
             // If temp->field_X and the temp's Field has a base with typeRef, record it
+            // Also check tempTypes from type inference for the base temp
             for (auto &bb : m_func.blocks)
                 for (auto &stmt : bb.stmts) {
                     auto scanFieldTypes = [&](const IRExpr *e) {
@@ -2595,8 +2596,15 @@ private:
                             auto *n = stack.back(); stack.pop_back();
                             if (n->op == IROp::Field && !n->kids.empty() && n->kids[0]) {
                                 auto *base = n->kids[0].get();
-                                if (base->op == IROp::Temp && base->typeRef != NullType) {
-                                    m_tempStructPtr[base->tempId()] = base->typeRef;
+                                if (base->op == IROp::Temp) {
+                                    TypeRef btype = base->typeRef;
+                                    if (btype == NullType)
+                                        btype = m_func.tempType(base->tempId());
+                                    if (btype != NullType) {
+                                        auto *bt = m_types.resolveType(btype);
+                                        if (bt && bt->kind == StabsTypeKind::Pointer)
+                                            m_tempStructPtr[base->tempId()] = btype;
+                                    }
                                 }
                             }
                             for (auto &k : n->kids) if (k) stack.push_back(k.get());
@@ -2606,6 +2614,17 @@ private:
                     scanFieldTypes(stmt.addr.get());
                     for (auto &a : stmt.args) scanFieldTypes(a.get());
                 }
+
+            // Second pass: resolve struct pointer types for temps whose definitions
+            // involve global struct field loads (e.g. temp = globalStruct.pointerField + offset)
+            for (auto &[id, type] : m_func.tempTypes) {
+                if (m_tempStructPtr.count(id)) continue;
+                auto dit = m_tempDef.find(id);
+                if (dit == m_tempDef.end() || !dit->second) continue;
+                TypeRef resolved = exprType(dit->second);
+                if (resolved != NullType && m_types.isStructPointer(resolved))
+                    m_tempStructPtr[id] = resolved;
+            }
 
             // Force-declare temps used in fallback (goto target) blocks
             for (int bbId : m_gotoTargets) {
@@ -2749,7 +2768,7 @@ private:
                         }
                     }
                     // Override to struct pointer if temp is used with -> field access
-                    if (ttype == "int" || ttype == "int *") {
+                    if (ttype == "int" || ttype == "int *" || ttype == "char *") {
                         auto sit = m_tempStructPtr.find(id);
                         if (sit != m_tempStructPtr.end() && sit->second != NullType)
                             ttype = m_types.formatType(sit->second);
@@ -4946,21 +4965,101 @@ private:
                                 else break;
                             } else break;
                         }
-                        // Extract global name
-                        std::string gname;
-                        if (src && src->op == IROp::Var && !src->name.empty())
-                            gname = src->name;
-                        else if (src && src->op == IROp::Load && !src->kids.empty()) {
-                            // Load(Var) = dereference of a global pointer
-                            IRExpr *inner = src->kids[0].get();
-                            for (int d = 0; d < 3 && inner && inner->op == IROp::Temp; ++d) {
-                                auto dit = m_tempDef.find(inner->tempId());
-                                if (dit != m_tempDef.end() && dit->second)
-                                    inner = dit->second;
-                                else break;
+                        // Extract global name from expression tree
+                        auto extractGlobalName = [&](IRExpr *node) -> std::string {
+                            if (!node) return "";
+                            if (node->op == IROp::Var && !node->name.empty())
+                                return node->name;
+                            if (node->op == IROp::Load && !node->kids.empty()) {
+                                IRExpr *inner = node->kids[0].get();
+                                for (int d = 0; d < 3 && inner && inner->op == IROp::Temp; ++d) {
+                                    auto dit = m_tempDef.find(inner->tempId());
+                                    if (dit != m_tempDef.end() && dit->second)
+                                        inner = dit->second;
+                                    else break;
+                                }
+                                if (inner && inner->op == IROp::Var && !inner->name.empty())
+                                    return inner->name;
                             }
-                            if (inner && inner->op == IROp::Var && !inner->name.empty())
-                                gname = inner->name;
+                            return "";
+                        };
+                        // Try to resolve a struct pointer type from the temp definition.
+                        // Handles patterns like: temp = Load(Add(ConstAddr, ConstOff))
+                        // where ConstAddr+ConstOff is a struct field that is a pointer.
+                        std::function<TypeRef(IRExpr*)> resolveStructPtrFromDef = [&](IRExpr *def) -> TypeRef {
+                            if (!def) return NullType;
+                            // Load(Add(Const(addr), Const(off))) → field of global struct
+                            if (def->op == IROp::Load && !def->kids.empty()) {
+                                auto *la = def->kids[0].get();
+                                if (la && la->op == IROp::Add && la->kids.size() == 2) {
+                                    uint64_t baseAddr = 0, fieldOff = 0;
+                                    bool hasBase = false, hasOff = false;
+                                    for (int s = 0; s < 2; ++s) {
+                                        auto *k = la->kids[s].get();
+                                        if (k && k->isConst()) {
+                                            if (!hasBase) { baseAddr = k->value; hasBase = true; }
+                                            else { fieldOff = k->value; hasOff = true; }
+                                        }
+                                    }
+                                    if (hasBase && hasOff) {
+                                        auto *gv = m_types.globalByAddress((uint32_t)baseAddr);
+                                        if (gv && gv->typeRef != NullType) {
+                                            auto *gt = m_types.resolveType(gv->typeRef);
+                                            if (gt && (gt->kind == StabsTypeKind::Struct || gt->kind == StabsTypeKind::Union)) {
+                                                auto *field = m_types.findFieldAtOffset(gv->typeRef, (int)fieldOff);
+                                                if (field && field->typeRef != NullType) {
+                                                    auto *ft = m_types.resolveType(field->typeRef);
+                                                    if (ft && ft->kind == StabsTypeKind::Pointer)
+                                                        return field->typeRef;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            // Also handle Add(X, Load(Add(Const, Const))) — pointer arithmetic
+                            if (def->op == IROp::Add && def->kids.size() == 2) {
+                                for (int s = 0; s < 2; ++s) {
+                                    IRExpr *child = def->kids[s].get();
+                                    for (int d = 0; d < 3 && child && child->op == IROp::Temp; ++d) {
+                                        auto dit2 = m_tempDef.find(child->tempId());
+                                        if (dit2 != m_tempDef.end() && dit2->second)
+                                            child = dit2->second;
+                                        else break;
+                                    }
+                                    TypeRef ct = resolveStructPtrFromDef(child);
+                                    if (ct != NullType) return ct;
+                                }
+                            }
+                            return NullType;
+                        };
+                        std::string gname = extractGlobalName(src);
+                        if (gname.empty() && src && src->op == IROp::Add && src->kids.size() == 2) {
+                            for (int side = 0; side < 2 && gname.empty(); ++side) {
+                                IRExpr *child = src->kids[side].get();
+                                if (!child) continue;
+                                for (int d = 0; d < 3 && child && child->op == IROp::Temp; ++d) {
+                                    auto dit = m_tempDef.find(child->tempId());
+                                    if (dit != m_tempDef.end() && dit->second)
+                                        child = dit->second;
+                                    else break;
+                                }
+                                std::string cname = extractGlobalName(child);
+                                if (!cname.empty()) {
+                                    auto *gn = m_types.globalByName(cname);
+                                    if (gn && gn->typeRef != NullType) {
+                                        auto *gt = m_types.resolveType(gn->typeRef);
+                                        if (gt && gt->kind == StabsTypeKind::Pointer)
+                                            gname = cname;
+                                    }
+                                }
+                            }
+                        }
+                        // If name-based lookup failed, try address-based struct field resolution
+                        if (gname.empty() && baseType == NullType) {
+                            TypeRef resolved = resolveStructPtrFromDef(src);
+                            if (resolved != NullType)
+                                baseType = resolved;
                         }
                         if (!gname.empty()) {
                             auto *gn = m_types.globalByName(gname);
@@ -5026,6 +5125,11 @@ private:
                             }
                         }
                         if (!access.empty()) {
+                            // Record struct pointer type for the base temp's declaration
+                            if (!isDirectStruct && addr->kids[0]->op == IROp::Temp &&
+                                baseType != NullType && m_types.isStructPointer(baseType)) {
+                                m_tempStructPtr[addr->kids[0]->tempId()] = baseType;
+                            }
                             if (isDirectStruct && addr->kids[0]->op == IROp::Load &&
                                 !addr->kids[0]->kids.empty()) {
                                 // Base is Load(expr) giving a struct — use expr->field directly
@@ -6616,14 +6720,79 @@ private:
         TypeRef exprType(IRExpr *e) const {
             if (!e) return NullType;
             if (e->typeRef != NullType) return e->typeRef;
-            if (e->op == IROp::Temp) return m_func.tempType(e->tempId());
+            if (e->op == IROp::Temp) {
+                TypeRef t = m_func.tempType(e->tempId());
+                if (t != NullType) return t;
+                // Follow temp definition for pointer arithmetic patterns
+                auto dit = m_tempDef.find(e->tempId());
+                if (dit != m_tempDef.end() && dit->second) {
+                    auto *def = dit->second;
+                    if (def->op == IROp::Add && def->kids.size() == 2) {
+                        TypeRef lt = exprType(def->kids[0].get());
+                        TypeRef rt = exprType(def->kids[1].get());
+                        if (lt != NullType && m_types.isStructPointer(lt)) return lt;
+                        if (rt != NullType && m_types.isStructPointer(rt)) return rt;
+                    }
+                    if (def->op == IROp::Load && !def->kids.empty()) {
+                        TypeRef at = exprType(def->kids[0].get());
+                        if (at != NullType) {
+                            TypeRef pt = m_types.derefPointer(at);
+                            if (pt != NullType) return pt;
+                        }
+                    }
+                }
+                return NullType;
+            }
             if (e->op == IROp::Field) return e->typeRef;
-            // For Var: look up type from function params/locals
+            // Load(Add(base, const)) → dereference base type and look up field
+            if (e->op == IROp::Load && !e->kids.empty()) {
+                auto *addr = e->kids[0].get();
+                if (addr && addr->op == IROp::Add && addr->kids.size() == 2 &&
+                    addr->kids[1] && addr->kids[1]->isConst()) {
+                    TypeRef btype = exprType(addr->kids[0].get());
+                    if (btype != NullType) {
+                        // Try as pointer-to-struct
+                        TypeRef structType = NullType;
+                        TypeRef pointee = m_types.derefPointer(btype);
+                        if (pointee != NullType) {
+                            auto *pt = m_types.resolveType(pointee);
+                            if (pt && (pt->kind == StabsTypeKind::Struct || pt->kind == StabsTypeKind::Union))
+                                structType = pointee;
+                        }
+                        // Try as direct struct (by-value globals)
+                        if (structType == NullType) {
+                            auto *bt = m_types.resolveType(btype);
+                            if (bt && (bt->kind == StabsTypeKind::Struct || bt->kind == StabsTypeKind::Union))
+                                structType = btype;
+                        }
+                        if (structType != NullType) {
+                            int off = (int)addr->kids[1]->value;
+                            auto *field = m_types.findFieldAtOffset(structType, off);
+                            if (field && field->typeRef != NullType)
+                                return field->typeRef;
+                        }
+                    }
+                }
+                // Simple Load: dereference pointer type
+                TypeRef addrT = exprType(e->kids[0].get());
+                if (addrT != NullType) {
+                    TypeRef pt = m_types.derefPointer(addrT);
+                    if (pt != NullType) return pt;
+                }
+            }
+            // Const address → check if it's a known global variable
+            if (e->op == IROp::Const && e->value > 0x1000 && e->value < 0x20000000) {
+                auto *gv = m_types.globalByAddress((uint32_t)e->value);
+                if (gv && gv->typeRef != NullType) return gv->typeRef;
+            }
+            // For Var: look up type from function params/locals, then globals
             if (e->op == IROp::Var && !e->name.empty()) {
                 for (auto &p : m_func.params)
                     if (p.name == e->name && p.typeRef != NullType) return p.typeRef;
                 for (auto &l : m_func.locals)
                     if (l.name == e->name && l.typeRef != NullType) return l.typeRef;
+                auto *gv = m_types.globalByName(e->name);
+                if (gv && gv->typeRef != NullType) return gv->typeRef;
             }
             return NullType;
         }

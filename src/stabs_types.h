@@ -786,6 +786,12 @@ public:
         return best;
     }
 
+    const StabsGlobalVar* globalByAddress(uint32_t address) const {
+        for (auto &g : m_globals)
+            if (g.address == address && g.typeRef != NullType) return &g;
+        return nullptr;
+    }
+
     // Include files
     const std::vector<std::string>& includes() const { return m_includes; }
 

@@ -394,6 +394,11 @@ private:
                 if (p.name == e->name && p.typeRef != NullType) return p.typeRef;
             for (auto &l : m_func->locals)
                 if (l.name == e->name && l.typeRef != NullType) return l.typeRef;
+            // Look up global variable types (e.g. cm.brushes → cbrush_t *)
+            if (!e->name.empty()) {
+                auto *gv = m_types->globalByName(e->name);
+                if (gv && gv->typeRef != NullType) return gv->typeRef;
+            }
         }
         if (e->op == IROp::Field) return e->typeRef;
         if (e->op == IROp::Call) return e->typeRef;
@@ -402,31 +407,39 @@ private:
 
         // Load(addr) -> type is the pointee type of addr
         if (e->op == IROp::Load && !e->kids.empty()) {
-            // Special case: Load(Add(structPtr, const)) → field type
+            // Special case: Load(Add(base, const)) → field type
+            // Handles both pointer-to-struct and by-value struct globals
             auto *addr = e->kids[0].get();
             if (addr && addr->op == IROp::Add && addr->kids.size() == 2 &&
                 addr->kids[1] && addr->kids[1]->isConst()) {
                 TypeRef baseType = inferExprType(addr->kids[0].get());
                 if (baseType != NullType) {
+                    TypeRef structType = NullType;
+                    // Try as pointer-to-struct first
                     TypeRef pointee = m_types->derefPointer(baseType);
                     if (pointee != NullType) {
                         auto *pt = m_types->resolveType(pointee);
-                        if (pt && (pt->kind == StabsTypeKind::Struct || pt->kind == StabsTypeKind::Union)) {
-                            // Look up the actual field type at this offset
-                            int offset = (int)addr->kids[1]->value;
-                            auto *field = m_types->findFieldAtOffset(pointee, offset);
-                            if (field && field->typeRef != NullType) {
-                                auto *ft = m_types->resolveType(field->typeRef);
-                                // Return the field type if it's a pointer or scalar
-                                if (ft && ft->kind == StabsTypeKind::Pointer)
-                                    return field->typeRef;
-                                if (ft && ft->kind != StabsTypeKind::Struct &&
-                                    ft->kind != StabsTypeKind::Union)
-                                    return field->typeRef;
-                            }
-                            // Fall through to NullType for struct/union fields
-                            return NullType;
+                        if (pt && (pt->kind == StabsTypeKind::Struct || pt->kind == StabsTypeKind::Union))
+                            structType = pointee;
+                    }
+                    // Also try as direct struct (by-value globals like `cm`)
+                    if (structType == NullType) {
+                        auto *bt = m_types->resolveType(baseType);
+                        if (bt && (bt->kind == StabsTypeKind::Struct || bt->kind == StabsTypeKind::Union))
+                            structType = baseType;
+                    }
+                    if (structType != NullType) {
+                        int offset = (int)addr->kids[1]->value;
+                        auto *field = m_types->findFieldAtOffset(structType, offset);
+                        if (field && field->typeRef != NullType) {
+                            auto *ft = m_types->resolveType(field->typeRef);
+                            if (ft && ft->kind == StabsTypeKind::Pointer)
+                                return field->typeRef;
+                            if (ft && ft->kind != StabsTypeKind::Struct &&
+                                ft->kind != StabsTypeKind::Union)
+                                return field->typeRef;
                         }
+                        return NullType;
                     }
                 }
             }
