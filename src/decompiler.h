@@ -4477,8 +4477,31 @@ private:
                             out += pad(indent) + QString::fromStdString(
                                 cNameOrKeep(dest) + " = " + val) + ";\n";
                         } else {
-                            out += pad(indent) + QString::fromStdString(
-                                "*(int *)(&" + cNameOrKeep(dest) + ") = (int)" + val) + ";\n";
+                            // Check if value is also an aggregate — can't use (int)val
+                            bool valIsAggregate = false;
+                            if (stmt.expr && (stmt.expr->op == IROp::Var || stmt.expr->op == IROp::Temp)) {
+                                TypeRef vt = stmt.expr->typeRef;
+                                if (vt == NullType && stmt.expr->op == IROp::Var) {
+                                    for (auto &p : m_func.params)
+                                        if (p.name == stmt.expr->name && p.typeRef != NullType)
+                                            { vt = p.typeRef; break; }
+                                    if (vt == NullType)
+                                        for (auto &l : m_func.locals)
+                                            if (l.name == stmt.expr->name && l.typeRef != NullType)
+                                                { vt = l.typeRef; break; }
+                                }
+                                if (vt != NullType) {
+                                    auto *vti = m_types.resolveType(vt);
+                                    if (vti && (vti->kind == StabsTypeKind::Struct || vti->kind == StabsTypeKind::Union))
+                                        valIsAggregate = true;
+                                }
+                            }
+                            if (valIsAggregate)
+                                out += pad(indent) + QString::fromStdString(
+                                    "*(int *)(&" + cNameOrKeep(dest) + ") = *(int *)(&" + val + ")") + ";\n";
+                            else
+                                out += pad(indent) + QString::fromStdString(
+                                    "*(int *)(&" + cNameOrKeep(dest) + ") = (int)" + val) + ";\n";
                         }
                         break;
                     }
@@ -5963,7 +5986,8 @@ private:
                     // cast to (char*) to prevent pointer arithmetic scaling.
                     // Returns 0=no cast, 1=has & already, 2=struct/union/array (needs &)
                     auto needsCast = [&](const std::string &s, IRExpr *kid) -> int {
-                        if (s.find("&") != std::string::npos) return 1;
+                        if (!s.empty() && s[0] == '&') return 1;
+                        if (!s.empty() && s[0] == '(' && s.size() > 1 && s[1] == '&') return 1;
                         // Check if the operand's emitted string refers to a known
                         // struct-valued global/local.  We check by *name* whether
                         // the IR op is Var or Temp, because coalesced temps can
