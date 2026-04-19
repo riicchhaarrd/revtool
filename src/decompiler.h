@@ -3992,7 +3992,44 @@ private:
                         }
                     }
                     if (!folded) {
-                        out += pad(indent) + QString::fromStdString(emitExpr(a) + " = " + val) + ";\n";
+                        // Check if the field type is a large struct/union — if so,
+                        // a 4-byte store to it is wrong. Fall back to pointer arithmetic.
+                        bool fieldIsLargeStruct = false;
+                        if (!a->name.empty() && !a->kids.empty()) {
+                            TypeRef bt = exprType(a->kids[0].get());
+                            if (bt == NullType && a->kids[0]->op == IROp::Var) {
+                                for (auto &p : m_func.params)
+                                    if (p.name == a->kids[0]->name && p.typeRef != NullType)
+                                        { bt = p.typeRef; break; }
+                            }
+                            if (bt != NullType) {
+                                TypeRef structRef = NullType;
+                                if (m_types.isStructPointer(bt))
+                                    structRef = m_types.getPointedStruct(bt);
+                                else {
+                                    auto *bti = m_types.resolveType(bt);
+                                    if (bti && (bti->kind == StabsTypeKind::Struct || bti->kind == StabsTypeKind::Union))
+                                        structRef = bt;
+                                }
+                                if (structRef != NullType) {
+                                    auto *field = m_types.findFieldAtOffset(structRef, (int)a->value);
+                                    if (field && field->typeRef != NullType) {
+                                        auto *ft = m_types.resolveType(field->typeRef);
+                                        if (ft && (ft->kind == StabsTypeKind::Struct || ft->kind == StabsTypeKind::Union) && ft->sizeBytes > 4)
+                                            fieldIsLargeStruct = true;
+                                    }
+                                }
+                            }
+                        }
+                        if (fieldIsLargeStruct) {
+                            std::string baseStr = emitExpr(a->kids[0].get());
+                            char buf[512];
+                            snprintf(buf, sizeof(buf), "*(%s *)((char *)%s + 0x%X) = %s",
+                                     storeCast.c_str(), baseStr.c_str(), (unsigned)(int)a->value, val.c_str());
+                            out += pad(indent) + QString::fromStdString(buf) + ";\n";
+                        } else {
+                            out += pad(indent) + QString::fromStdString(emitExpr(a) + " = " + val) + ";\n";
+                        }
                     }
                 }
                 // Add(base, const) → base->field_XX = val or base[N] = val for scalar ptrs
@@ -4282,8 +4319,18 @@ private:
                         } else if (tgt && (tgt->kind == StabsTypeKind::Struct ||
                                            tgt->kind == StabsTypeKind::Union)) {
                             // Struct pointer at offset 0: use first field name
+                            // But skip if the first field is itself a large struct
                             std::string field0 = m_types.formatFieldAccess(atInfo->targetType, 0);
-                            if (!field0.empty())
+                            bool field0IsLargeStruct = false;
+                            if (!field0.empty()) {
+                                auto *f0 = m_types.findFieldAtOffset(atInfo->targetType, 0);
+                                if (f0 && f0->typeRef != NullType) {
+                                    auto *f0t = m_types.resolveType(f0->typeRef);
+                                    if (f0t && (f0t->kind == StabsTypeKind::Struct || f0t->kind == StabsTypeKind::Union) && f0t->sizeBytes > 4)
+                                        field0IsLargeStruct = true;
+                                }
+                            }
+                            if (!field0.empty() && !field0IsLargeStruct)
                                 out += pad(indent) + QString::fromStdString(
                                     portCastForArrow(addrS, a, at, field0) + "->" + field0 + " = " + val) + ";\n";
                             else
@@ -4335,6 +4382,38 @@ private:
                 auto cNameOrKeep = [&](const std::string &s) -> std::string {
                     return destIsCompound ? s : cName(s);
                 };
+                // Compound dest with -> field: check if the field is a large struct.
+                // e.g., ent->s where s is entityState_t — use *(int*)(ent) = val instead
+                if (destIsCompound && dest.find("->") != std::string::npos) {
+                    auto arrowPos = dest.rfind("->");
+                    std::string baseVar = dest.substr(0, arrowPos);
+                    std::string fieldName = dest.substr(arrowPos + 2);
+                    TypeRef baseType = NullType;
+                    for (auto &p : m_func.params)
+                        if (p.name == baseVar && p.typeRef != NullType)
+                            { baseType = p.typeRef; break; }
+                    if (baseType != NullType && m_types.isStructPointer(baseType)) {
+                        TypeRef structRef = m_types.getPointedStruct(baseType);
+                        auto *st = structRef != NullType ? m_types.resolveType(structRef) : nullptr;
+                        if (st) {
+                            for (auto &f : st->fields) {
+                                if (f.name == fieldName && f.typeRef != NullType) {
+                                    auto *ft = m_types.resolveType(f.typeRef);
+                                    if (ft && (ft->kind == StabsTypeKind::Struct || ft->kind == StabsTypeKind::Union) && ft->sizeBytes > 4) {
+                                        std::string sc = "int";
+                                        if (stmt.storeSize == 1) sc = "char";
+                                        else if (stmt.storeSize == 2) sc = "short";
+                                        out += pad(indent) + QString::fromStdString(
+                                            "*(" + sc + " *)(" + baseVar + ") = " + val) + ";\n";
+                                        destIsCompound = false; // signal we handled it
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    if (!destIsCompound) break; // large struct field was handled
+                }
                 // Suppress parameter slot reuse when assigning a string literal to a param
                 // (clear indicator of Com_Error/Com_Printf call argument setup)
                 {
@@ -5456,7 +5535,38 @@ private:
                             }
                         }
                     }
-                    result = base + (useArrow ? "->" : ".") + e->name;
+                    // Check if the named field is a large struct/union — if so,
+                    // a scalar access to it is wrong. Fall back to pointer arithmetic.
+                    bool fieldIsLargeStruct = false;
+                    if (baseType == NullType && e->kids[0] && e->kids[0]->op == IROp::Var) {
+                        for (auto &p : m_func.params)
+                            if (p.name == e->kids[0]->name && p.typeRef != NullType)
+                                { baseType = p.typeRef; break; }
+                    }
+                    if (baseType != NullType) {
+                        TypeRef structRef = NullType;
+                        if (m_types.isStructPointer(baseType))
+                            structRef = m_types.getPointedStruct(baseType);
+                        else {
+                            auto *bti = m_types.resolveType(baseType);
+                            if (bti && (bti->kind == StabsTypeKind::Struct || bti->kind == StabsTypeKind::Union))
+                                structRef = baseType;
+                        }
+                        if (structRef != NullType) {
+                            auto *field = m_types.findFieldAtOffset(structRef, (int)e->value);
+                            if (field && field->typeRef != NullType) {
+                                auto *ft = m_types.resolveType(field->typeRef);
+                                if (ft && (ft->kind == StabsTypeKind::Struct || ft->kind == StabsTypeKind::Union) && ft->sizeBytes > 4)
+                                    fieldIsLargeStruct = true;
+                            }
+                        }
+                    }
+                    if (fieldIsLargeStruct) {
+                        int off = (int)e->value;
+                        result = std::string("*(") + loadCastType(e->loadSize) + " *)((char *)(" + base + ") + " + std::to_string(off) + ")";
+                    } else {
+                        result = base + (useArrow ? "->" : ".") + e->name;
+                    }
                 }
                 break;
             }
