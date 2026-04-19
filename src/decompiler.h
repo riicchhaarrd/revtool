@@ -4390,8 +4390,31 @@ private:
                     for (auto &p : m_func.params)
                         if (p.name == baseVar && p.typeRef != NullType)
                             { baseType = p.typeRef; break; }
-                    if (baseType != NullType && m_types.isStructPointer(baseType)) {
-                        TypeRef structRef = m_types.getPointedStruct(baseType);
+                    if (baseType == NullType) {
+                        for (auto &l : m_func.locals)
+                            if (l.name == baseVar && l.typeRef != NullType)
+                                { baseType = l.typeRef; break; }
+                    }
+                    if (baseType == NullType) {
+                        // Check temp struct pointer types (from m_tempStructPtr)
+                        for (auto &[tid, stype] : m_tempStructPtr) {
+                            auto vit = m_func.tempToVar.find(tid);
+                            if (vit != m_func.tempToVar.end()) {
+                                auto nit = m_func.varNames.find(vit->second);
+                                if (nit != m_func.varNames.end() && nit->second == baseVar)
+                                    { baseType = stype; break; }
+                            }
+                        }
+                    }
+                    if (baseType != NullType) {
+                        TypeRef structRef = NullType;
+                        if (m_types.isStructPointer(baseType))
+                            structRef = m_types.getPointedStruct(baseType);
+                        else {
+                            auto *bt = m_types.resolveType(baseType);
+                            if (bt && (bt->kind == StabsTypeKind::Struct || bt->kind == StabsTypeKind::Union))
+                                structRef = baseType;
+                        }
                         auto *st = structRef != NullType ? m_types.resolveType(structRef) : nullptr;
                         if (st) {
                             for (auto &f : st->fields) {

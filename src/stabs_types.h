@@ -455,13 +455,27 @@ public:
                 // where the typedef chain resolves to a struct with sizeBytes
                 // set but no fields parsed.
                 if (ft && (ft->kind == StabsTypeKind::Struct ||
-                           ft->kind == StabsTypeKind::Union) &&
-                    ft->fields.empty() && ft->sizeBytes > 0) {
-                    int elemSize = 4;
-                    int idx = offsetInField / elemSize;
-                    int subOff = offsetInField % elemSize;
-                    if (subOff == 0)
-                        return f.name + "[" + std::to_string(idx) + "]";
+                           ft->kind == StabsTypeKind::Union)) {
+                    if (ft->fields.empty() && ft->sizeBytes > 0) {
+                        int elemSize = 4;
+                        int idx = offsetInField / elemSize;
+                        int subOff = offsetInField % elemSize;
+                        if (subOff == 0)
+                            return f.name + "[" + std::to_string(idx) + "]";
+                    } else if (!ft->fields.empty()) {
+                        // Only drill into sub-struct fields that are scalar (not
+                        // nested structs), to avoid accessing opaque char[N] fields
+                        // in port headers
+                        auto *subField = findFieldAtOffset(f.typeRef, offsetInField);
+                        if (subField && subField->typeRef != NullType) {
+                            auto *sft = resolveType(subField->typeRef);
+                            if (sft && sft->kind != StabsTypeKind::Struct &&
+                                sft->kind != StabsTypeKind::Union &&
+                                sft->kind != StabsTypeKind::Array) {
+                                return f.name + "." + subField->name;
+                            }
+                        }
+                    }
                 }
                 if (ft && ft->kind == StabsTypeKind::Array) {
                     auto *elemT = resolveType(ft->targetType);
