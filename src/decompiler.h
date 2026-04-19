@@ -5834,6 +5834,27 @@ private:
                     if (rb && rf > 1)
                         rhs = "(" + emitExpr(rb) + " * " + std::to_string(rf) + ")";
                 }
+                // Wrap struct/union operands — can't use aggregates in arithmetic
+                {
+                    auto wrapAggregate = [&](std::string &s, IRExpr *kid) {
+                        if (!kid) return;
+                        TypeRef kt = NullType;
+                        if (kid->op == IROp::Var) {
+                            kt = kid->typeRef;
+                            if (kt == NullType)
+                                for (auto &p : m_func.params)
+                                    if (p.name == kid->name && p.typeRef != NullType)
+                                        { kt = p.typeRef; break; }
+                        }
+                        if (kt != NullType) {
+                            auto *t = m_types.resolveType(kt);
+                            if (t && (t->kind == StabsTypeKind::Struct || t->kind == StabsTypeKind::Union))
+                                s = "*(int *)(&" + s + ")";
+                        }
+                    };
+                    wrapAggregate(lhs, e->kids[0].get());
+                    wrapAggregate(rhs, e->kids[1].get());
+                }
                 // String-level dead-code simplifications
                 if (lhs == "0" && rhs == "0" && e->op == IROp::Sub) { result = "0"; break; }
                 if (rhs == "0" && (e->op == IROp::Add || e->op == IROp::Sub ||
@@ -6204,6 +6225,26 @@ private:
                 };
                 fixArrayVar(lhs, e->kids[0].get());
                 fixArrayVar(rhs, e->kids[1].get());
+                // Struct/union values can't be compared directly — cast to int
+                auto fixAggregateVar = [&](std::string &s, IRExpr *kid) {
+                    if (!kid) return;
+                    TypeRef kt = NullType;
+                    if (kid->op == IROp::Var) {
+                        kt = kid->typeRef;
+                        if (kt == NullType) {
+                            for (auto &p : m_func.params)
+                                if (p.name == kid->name && p.typeRef != NullType)
+                                    { kt = p.typeRef; break; }
+                        }
+                    }
+                    if (kt != NullType) {
+                        auto *t = m_types.resolveType(kt);
+                        if (t && (t->kind == StabsTypeKind::Struct || t->kind == StabsTypeKind::Union))
+                            s = "*(int *)(&" + s + ")";
+                    }
+                };
+                fixAggregateVar(lhs, e->kids[0].get());
+                fixAggregateVar(rhs, e->kids[1].get());
                 std::string op;
                 IROp cmp = negate ? negateOp(e->op) : e->op;
                 switch (cmp) {
@@ -6814,6 +6855,20 @@ private:
             if (inner.empty()) return "0";
             // Casting 0 to any type is still 0
             if (inner == "0") return "0";
+            // Wrap struct/union values — can't cast aggregates directly
+            if (inner_e->op == IROp::Var) {
+                TypeRef kt = inner_e->typeRef;
+                if (kt == NullType) {
+                    for (auto &p : m_func.params)
+                        if (p.name == inner_e->name && p.typeRef != NullType)
+                            { kt = p.typeRef; break; }
+                }
+                if (kt != NullType) {
+                    auto *t = m_types.resolveType(kt);
+                    if (t && (t->kind == StabsTypeKind::Struct || t->kind == StabsTypeKind::Union))
+                        inner = "*(int *)(&" + inner + ")";
+                }
+            }
             // Elide identity casts: Cast(A, Cast(A, x)) → Cast(A, x)
             // and Cast(A, Cast(B, x)) where both narrow to same target
             if (inner_e->op == IROp::Cast) {
