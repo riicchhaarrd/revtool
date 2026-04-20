@@ -6086,9 +6086,9 @@ private:
                     int lhsCast = needsCast(lhs, e->kids[0].get());
                     int rhsCast = needsCast(rhs, e->kids[1].get());
                     if (lhsCast)
-                        result = "(" + rhs + " + (char*)" + (lhsCast == 2 ? "&" : "") + lhs + ")";
+                        result = "((int)" + (lhsCast == 2 ? "&" : "") + lhs + " + " + rhs + ")";
                     else if (rhsCast)
-                        result = "(" + lhs + " + (char*)" + (rhsCast == 2 ? "&" : "") + rhs + ")";
+                        result = "(" + lhs + " + (int)" + (rhsCast == 2 ? "&" : "") + rhs + ")";
                     else {
                         // Check if both operands are pointers (ptr + ptr is invalid C)
                         auto isPtrExpr = [&](IRExpr *kid) -> bool {
