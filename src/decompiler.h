@@ -4935,6 +4935,8 @@ private:
                 std::string vn = e->name;
                 if (!vn.empty() && (isdigit(vn[0]) || vn[0] == '-' || vn[0] == '"' || vn[0] == '('))
                     result = vn;
+                else if (vn.find('[') != std::string::npos || vn.find('.') != std::string::npos)
+                    result = vn;
                 else
                     result = cName(vn);
                 break;
