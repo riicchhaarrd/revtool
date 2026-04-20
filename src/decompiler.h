@@ -6406,17 +6406,34 @@ private:
                         if (!variadics.count(e->name))
                             argCount = calledFn2->params.size();
                     }
+                    // In port mode, pad missing args with 0 when prototype
+                    // specifies more params than the lifter detected
+                    size_t protoArgCount = argCount;
+                    if (s_portMode && calledFn2 && !calledFn2->params.empty() &&
+                        calledFn2->params.size() > argCount) {
+                        static const std::set<std::string> variadics2 = {
+                            "Com_Printf", "Com_Error", "Com_DPrintf", "Com_sprintf",
+                            "va", "Sys_Error", "CG_Printf", "G_Printf",
+                            "Scr_Error", "Scr_ParamError"
+                        };
+                        if (!variadics2.count(e->name))
+                            protoArgCount = calledFn2->params.size();
+                    }
                     result = funcName + "(";
-                    for (size_t i = 0; i < argCount; ++i) {
+                    for (size_t i = 0; i < protoArgCount; ++i) {
                         if (i) result += ", ";
-                        std::string arg = emitExpr(e->kids[i].get());
+                        std::string arg;
+                        if (i < argCount)
+                            arg = emitExpr(e->kids[i].get());
+                        else
+                            arg = "0";
                         // Prepend `&` when passing a struct-by-value global/var as
                         // a pointer argument.  The binary takes the address
                         // (via `lea`) but the lifter currently emits the symbol
                         // name alone, so the C call `Field_Clear(g_consoleField)`
                         // is rejected when g_consoleField is declared as
                         // `struct field_t` (not a pointer) in the header.
-                        if (calledFn2 && i < calledFn2->params.size()) {
+                        if (calledFn2 && i < calledFn2->params.size() && i < argCount) {
                             auto &par2 = calledFn2->params[i];
                             if (par2.typeRef != NullType) {
                                 auto *ptInfo = m_types.resolveType(par2.typeRef);
