@@ -3224,6 +3224,16 @@ private:
                 castType = castType.substr(6);
             return "((" + castType + ")" + base + ")";
         }
+        // Cast base expression to (char*) for pointer arithmetic.
+        // For struct-valued globals, use &base to get address first.
+        std::string charPtrCast(const std::string &base, IRExpr *baseExpr = nullptr) {
+            if (s_portMode && baseExpr && baseExpr->op == IROp::Var && baseExpr->typeRef != NullType) {
+                auto *t = m_types.resolveType(baseExpr->typeRef);
+                if (t && (t->kind == StabsTypeKind::Struct || t->kind == StabsTypeKind::Union))
+                    return "(char *)(&" + base + ")";
+            }
+            return "(char *)(" + base + ")";
+        }
         std::set<int>         m_inliningTemps;    // cycle guard for temp inlining in emitExpr
         bool                  m_emittedRetVoid = true; // true if function signature says void
         int                   m_addrDepth = 0;     // >0 when emitting Load/Store address sub-exprs
@@ -5562,7 +5572,7 @@ private:
                 if (isSynthField) {
                     // Synthetic field: always use cast-based pointer arithmetic
                     int off = (int)e->value;
-                    result = std::string("*(") + loadCastType(e->loadSize) + " *)((char *)(" + base + ") + " + std::to_string(off) + ")";
+                    result = std::string("*(") + loadCastType(e->loadSize) + " *)(" + charPtrCast(base, e->kids.empty() ? nullptr : e->kids[0].get()) + " + " + std::to_string(off) + ")";
                 } else {
                     // Use -> for pointer-to-struct, . for struct-by-value
                     TypeRef baseType = e->kids[0] ? exprType(e->kids[0].get()) : NullType;
@@ -5611,7 +5621,7 @@ private:
                     }
                     if (fieldIsLargeStruct) {
                         int off = (int)e->value;
-                        result = std::string("*(") + loadCastType(e->loadSize) + " *)((char *)(" + base + ") + " + std::to_string(off) + ")";
+                        result = std::string("*(") + loadCastType(e->loadSize) + " *)(" + charPtrCast(base, e->kids.empty() ? nullptr : e->kids[0].get()) + " + " + std::to_string(off) + ")";
                     } else {
                         result = base + (useArrow ? "->" : ".") + e->name;
                     }
