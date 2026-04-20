@@ -4401,6 +4401,26 @@ private:
                 auto cNameOrKeep = [&](const std::string &s) -> std::string {
                     return destIsCompound ? s : cName(s);
                 };
+                // Fix dot-to-arrow: if compound dest has "base.field" but base is a
+                // pointer type, replace . with ->
+                if (s_portMode && destIsCompound && dest.find('.') != std::string::npos &&
+                    dest.find("->") == std::string::npos) {
+                    auto dotPos = dest.find('.');
+                    std::string baseName = dest.substr(0, dotPos);
+                    TypeRef baseType = NullType;
+                    for (auto &p : m_func.params)
+                        if (p.name == baseName && p.typeRef != NullType)
+                            { baseType = p.typeRef; break; }
+                    if (baseType == NullType)
+                        for (auto &l : m_func.locals)
+                            if (l.name == baseName && l.typeRef != NullType)
+                                { baseType = l.typeRef; break; }
+                    if (baseType != NullType) {
+                        auto *bt = m_types.resolveType(baseType);
+                        if (bt && bt->kind == StabsTypeKind::Pointer)
+                            dest = baseName + "->" + dest.substr(dotPos + 1);
+                    }
+                }
                 // Compound dest with -> field: check if the field is a large struct.
                 // e.g., ent->s where s is entityState_t — use *(int*)(ent) = val instead
                 if (destIsCompound && dest.find("->") != std::string::npos) {
@@ -4956,9 +4976,26 @@ private:
                 std::string vn = e->name;
                 if (!vn.empty() && (isdigit(vn[0]) || vn[0] == '-' || vn[0] == '"' || vn[0] == '('))
                     result = vn;
-                else if (vn.find('[') != std::string::npos || vn.find('.') != std::string::npos)
+                else if (vn.find('[') != std::string::npos || vn.find('.') != std::string::npos) {
                     result = vn;
-                else
+                    // Fix dot-to-arrow for "base.field" when base is a pointer
+                    if (s_portMode && vn.find('.') != std::string::npos &&
+                        vn.find("->") == std::string::npos) {
+                        auto dp = vn.find('.');
+                        std::string bn = vn.substr(0, dp);
+                        TypeRef bt = NullType;
+                        for (auto &p : m_func.params)
+                            if (p.name == bn && p.typeRef != NullType) { bt = p.typeRef; break; }
+                        if (bt == NullType)
+                            for (auto &l : m_func.locals)
+                                if (l.name == bn && l.typeRef != NullType) { bt = l.typeRef; break; }
+                        if (bt != NullType) {
+                            auto *bti = m_types.resolveType(bt);
+                            if (bti && bti->kind == StabsTypeKind::Pointer)
+                                result = bn + "->" + vn.substr(dp + 1);
+                        }
+                    }
+                } else
                     result = cName(vn);
                 break;
             }
