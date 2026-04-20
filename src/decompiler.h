@@ -4407,19 +4407,36 @@ private:
                     dest.find("->") == std::string::npos) {
                     auto dotPos = dest.find('.');
                     std::string baseName = dest.substr(0, dotPos);
-                    TypeRef baseType = NullType;
+                    bool baseIsPtr = false;
                     for (auto &p : m_func.params)
-                        if (p.name == baseName && p.typeRef != NullType)
-                            { baseType = p.typeRef; break; }
-                    if (baseType == NullType)
+                        if (p.name == baseName && p.typeRef != NullType) {
+                            auto *t = m_types.resolveType(p.typeRef);
+                            if (t && t->kind == StabsTypeKind::Pointer) baseIsPtr = true;
+                            break;
+                        }
+                    if (!baseIsPtr)
                         for (auto &l : m_func.locals)
-                            if (l.name == baseName && l.typeRef != NullType)
-                                { baseType = l.typeRef; break; }
-                    if (baseType != NullType) {
-                        auto *bt = m_types.resolveType(baseType);
-                        if (bt && bt->kind == StabsTypeKind::Pointer)
-                            dest = baseName + "->" + dest.substr(dotPos + 1);
+                            if (l.name == baseName && l.typeRef != NullType) {
+                                auto *t = m_types.resolveType(l.typeRef);
+                                if (t && t->kind == StabsTypeKind::Pointer) baseIsPtr = true;
+                                break;
+                            }
+                    if (!baseIsPtr) {
+                        for (auto &[tid, vid] : m_func.tempToVar) {
+                            auto nit = m_func.varNames.find(vid);
+                            if (nit != m_func.varNames.end() && nit->second == baseName) {
+                                if (m_tempStructPtr.count(tid)) { baseIsPtr = true; break; }
+                                auto vtit = m_func.varTypes.find(vid);
+                                if (vtit != m_func.varTypes.end() && vtit->second != NullType) {
+                                    auto *t = m_types.resolveType(vtit->second);
+                                    if (t && t->kind == StabsTypeKind::Pointer) baseIsPtr = true;
+                                }
+                                break;
+                            }
+                        }
                     }
+                    if (baseIsPtr)
+                        dest = baseName + "->" + dest.substr(dotPos + 1);
                 }
                 // Compound dest with -> field: check if the field is a large struct.
                 // e.g., ent->s where s is entityState_t — use *(int*)(ent) = val instead
@@ -4983,17 +5000,43 @@ private:
                         vn.find("->") == std::string::npos) {
                         auto dp = vn.find('.');
                         std::string bn = vn.substr(0, dp);
-                        TypeRef bt = NullType;
+                        bool baseIsPtr = false;
+                        // Check params/locals
                         for (auto &p : m_func.params)
-                            if (p.name == bn && p.typeRef != NullType) { bt = p.typeRef; break; }
-                        if (bt == NullType)
+                            if (p.name == bn && p.typeRef != NullType) {
+                                auto *t = m_types.resolveType(p.typeRef);
+                                if (t && t->kind == StabsTypeKind::Pointer) baseIsPtr = true;
+                                break;
+                            }
+                        if (!baseIsPtr)
                             for (auto &l : m_func.locals)
-                                if (l.name == bn && l.typeRef != NullType) { bt = l.typeRef; break; }
-                        if (bt != NullType) {
-                            auto *bti = m_types.resolveType(bt);
-                            if (bti && bti->kind == StabsTypeKind::Pointer)
-                                result = bn + "->" + vn.substr(dp + 1);
+                                if (l.name == bn && l.typeRef != NullType) {
+                                    auto *t = m_types.resolveType(l.typeRef);
+                                    if (t && t->kind == StabsTypeKind::Pointer) baseIsPtr = true;
+                                    break;
+                                }
+                        // Check ALL coalesced temps for this variable name
+                        if (!baseIsPtr) {
+                            int targetVid = -1;
+                            for (auto &[vid, name] : m_func.varNames)
+                                if (name == bn) { targetVid = vid; break; }
+                            if (targetVid >= 0) {
+                                // Check varTypes
+                                auto vtit = m_func.varTypes.find(targetVid);
+                                if (vtit != m_func.varTypes.end() && vtit->second != NullType) {
+                                    auto *t = m_types.resolveType(vtit->second);
+                                    if (t && t->kind == StabsTypeKind::Pointer) baseIsPtr = true;
+                                }
+                                // Check all temps in this group for m_tempStructPtr
+                                if (!baseIsPtr) {
+                                    for (auto &[tid, vid] : m_func.tempToVar)
+                                        if (vid == targetVid && m_tempStructPtr.count(tid))
+                                            { baseIsPtr = true; break; }
+                                }
+                            }
                         }
+                        if (baseIsPtr)
+                            result = bn + "->" + vn.substr(dp + 1);
                     }
                 } else
                     result = cName(vn);
@@ -6144,7 +6187,7 @@ private:
                     int lhsCast = needsCast(lhs, e->kids[0].get());
                     int rhsCast = needsCast(rhs, e->kids[1].get());
                     if (lhsCast)
-                        result = "((int)" + (lhsCast == 2 ? "&" : "") + lhs + " + " + rhs + ")";
+                        result = std::string("((int)") + (lhsCast == 2 ? "&" : "") + lhs + " + " + rhs + ")";
                     else if (rhsCast)
                         result = "(" + lhs + " + (int)" + (rhsCast == 2 ? "&" : "") + rhs + ")";
                     else {
