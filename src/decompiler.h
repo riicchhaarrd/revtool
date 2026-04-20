@@ -4888,8 +4888,10 @@ private:
                         auto vit = m_func.tempToVar.find(id);
                         if (vit != m_func.tempToVar.end()) {
                             auto nit = m_func.varNames.find(vit->second);
-                            if (nit != m_func.varNames.end())
+                            if (nit != m_func.varNames.end()) {
+                                m_forceDeclareTemps.insert(id);
                                 return nit->second;
+                            }
                         }
                     }
                     return "0";
