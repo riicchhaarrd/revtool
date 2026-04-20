@@ -3227,10 +3227,21 @@ private:
         // Cast base expression to (char*) for pointer arithmetic.
         // For struct-valued globals, use &base to get address first.
         std::string charPtrCast(const std::string &base, IRExpr *baseExpr = nullptr) {
-            if (s_portMode && baseExpr && baseExpr->op == IROp::Var && baseExpr->typeRef != NullType) {
+            if (!s_portMode) return "(char *)(" + base + ")";
+            // Check IR annotation first
+            if (baseExpr && baseExpr->op == IROp::Var && baseExpr->typeRef != NullType) {
                 auto *t = m_types.resolveType(baseExpr->typeRef);
                 if (t && (t->kind == StabsTypeKind::Struct || t->kind == StabsTypeKind::Union))
                     return "(char *)(&" + base + ")";
+            }
+            // Fallback: check if base string is a known struct-valued global
+            if (base.find_first_of("()+-*/&[] ") == std::string::npos && !base.empty()) {
+                auto *g = m_types.globalByName(base);
+                if (g && g->typeRef != NullType) {
+                    auto *t = m_types.resolveType(g->typeRef);
+                    if (t && (t->kind == StabsTypeKind::Struct || t->kind == StabsTypeKind::Union))
+                        return "(char *)(&" + base + ")";
+                }
             }
             return "(char *)(" + base + ")";
         }
@@ -4217,7 +4228,7 @@ private:
                     } else {
                         // No Mul pattern found — emit general pointer store
                         out += pad(indent) + QString::fromStdString(
-                            "*(" + storeCast + " *)((char *)(" + emitExpr(a) + ")) = " + val) + ";\n";
+                            "*(" + storeCast + " *)(" + charPtrCast(emitExpr(a), a) + ") = " + val) + ";\n";
                     }
                 }
                 // Add(Add(base, Mul(idx, scale)), const) → base->arr_NN[idx] = val
@@ -4254,7 +4265,7 @@ private:
                         } else {
                             int sc = (int)a->kids[0]->kids[1]->kids[1]->value;
                             out += pad(indent) + QString::fromStdString(
-                                "*(" + storeCast + " *)((char *)(" + base + ") + " + idx +
+                                "*(" + storeCast + " *)(" + charPtrCast(base, a->kids[0]->kids[0].get()) + " + " + idx +
                                 " * " + std::to_string(sc) + " + " + std::to_string(off) +
                                 ") = " + val) + ";\n";
                         }
@@ -4307,7 +4318,7 @@ private:
                     }
                     if (!resolved)
                         out += pad(indent) + QString::fromStdString(
-                            "*(" + storeCast + " *)((char *)(" + emitExpr(a) + ")) = " + val) + ";\n";
+                            "*(" + storeCast + " *)(" + charPtrCast(emitExpr(a), a) + ") = " + val) + ";\n";
                 }
                 else if (a->op == IROp::Var || a->op == IROp::Temp) {
                     std::string addrS = emitExpr(a);
@@ -4364,12 +4375,12 @@ private:
                                 "*(" + storeCast + " *)(&" + addrS + ") = " + val) + ";\n";
                     } else {
                         out += pad(indent) + QString::fromStdString(
-                            "*(" + storeCast + " *)((char *)(" + addrS + ")) = " + val) + ";\n";
+                            "*(" + storeCast + " *)(" + charPtrCast(addrS, a) + ") = " + val) + ";\n";
                     }
                 } else {
                     std::string addrS = emitExpr(a);
                     out += pad(indent) + QString::fromStdString(
-                        "*(" + storeCast + " *)((char *)(" + addrS + ")) = " + val) + ";\n";
+                        "*(" + storeCast + " *)(" + charPtrCast(addrS, a) + ") = " + val) + ";\n";
                 }
                 break;
             }
@@ -5017,7 +5028,7 @@ private:
                             } else {
                                 // Non-struct base: use raw pointer arithmetic
                                 result = std::string("*(") + loadCastType(e->loadSize) +
-                                    " *)((char *)(" + baseStr + ") + " + idxStr + " * " +
+                                    " *)(" + charPtrCast(baseStr, base) + " + " + idxStr + " * " +
                                     std::to_string(elemSize) + " + " + std::to_string(off) + ")";
                             }
                         }
@@ -5372,7 +5383,7 @@ private:
                 // General Add/Sub expression → *(int *)((char *)(expr))
                 else if (addr && (addr->op == IROp::Add || addr->op == IROp::Sub) &&
                          addr->kids.size() == 2) {
-                    result = std::string("*(") + loadCastType(e->loadSize) + " *)((char *)(" + emitExpr(addr) + "))";
+                    result = std::string("*(") + loadCastType(e->loadSize) + " *)(" + charPtrCast(emitExpr(addr), addr) + ")";
                 }
                 // bare pointer dereference of a simple var/temp: Load(Var) = *var
                 // For pointer types, this just reads the pointer value — no field access.
@@ -5437,7 +5448,7 @@ private:
                     else if (isAggregate)
                         result = std::string("*(") + lct + " *)(&" + addrStr + ")";
                     else
-                        result = std::string("*(") + lct + " *)((char *)(" + addrStr + "))";
+                        result = std::string("*(") + lct + " *)(" + charPtrCast(addrStr, addr) + ")";
                 }
                 // m_addrDepth decremented by LoadDepthGuard RAII
                 break;
