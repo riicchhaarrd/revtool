@@ -1783,8 +1783,17 @@ private:
             std::string symName = m_mf.symbolNameAtAddress(addr);
             if (!symName.empty()) {
                 auto *gn = m_types.globalByName(symName, m_curSourceFileIdx);
-                if (gn && gn->typeRef != NullType)
-                    return IRExpr::mkVar(symName, gn->typeRef);
+                if (gn && gn->typeRef != NullType) {
+                    auto *gt = m_types.resolveType(gn->typeRef);
+                    if (gt && gt->kind == StabsTypeKind::Pointer)
+                        return IRExpr::mkVar(symName, gn->typeRef);
+                    if (gt && (gt->kind == StabsTypeKind::Struct ||
+                               gt->kind == StabsTypeKind::Union)) {
+                        const Section *sec = m_mf.sectionForAddress(addr);
+                        if (sec && sec->segname == "__IMPORT")
+                            return IRExpr::mkVar(symName, gn->typeRef);
+                    }
+                }
                 return IRExpr::mkVar(symName);
             }
             // Try nearest symbol for base+offset access
@@ -1816,7 +1825,8 @@ private:
                     }
                 }
                 // Non-cosmetic: emit Add(Var(globalName, type), Const(off))
-                // so the decompiler's needsCast adds (char*)& for struct globals
+                // ONLY when the offset resolves to a struct field — avoids emitting
+                // (int)&struct + unresolved_offset which produces "cannot convert" errors
                 if (!g_cosmeticMode) {
                     size_t plus = nearest.find(" + 0x");
                     if (plus != std::string::npos && nearest.front() == '(' && nearest.back() == ')') {
@@ -1825,8 +1835,16 @@ private:
                         sscanf(nearest.c_str() + plus + 3, "%x", &goff);
                         auto *gn = m_types.globalByName(gname, m_curSourceFileIdx);
                         if (gn && gn->typeRef != NullType) {
-                            auto base = IRExpr::mkVar(gname, gn->typeRef);
-                            return IRExpr::mkBinary(IROp::Add, std::move(base), IRExpr::mkConst(goff));
+                            auto *gt = m_types.resolveType(gn->typeRef);
+                            bool hasField = false;
+                            if (gt && (gt->kind == StabsTypeKind::Struct || gt->kind == StabsTypeKind::Union)) {
+                                std::string fa = m_types.formatFieldAccess(gn->typeRef, (int)goff);
+                                hasField = !fa.empty();
+                            }
+                            if (hasField) {
+                                auto base = IRExpr::mkVar(gname, gn->typeRef);
+                                return IRExpr::mkBinary(IROp::Add, std::move(base), IRExpr::mkConst(goff));
+                            }
                         }
                     }
                 }
