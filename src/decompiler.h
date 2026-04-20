@@ -2449,9 +2449,11 @@ private:
                     // Replace void (non-pointer) with int — can't have void locals
                     if (decl.substr(0, 5) == "void " && decl.find('*') == std::string::npos)
                         decl = "int " + l.name;
-                    // Replace void* with char* — void* can't be subscripted or used in arithmetic
-                    if (false)
-                        decl = "char *" + l.name;
+                    // In port mode, replace void* with int* — void* can't be
+                    // subscripted or used in pointer arithmetic in C
+                    if (s_portMode && decl.find("void *") == 0 &&
+                        decl.find('*', 6) == std::string::npos)
+                        decl = "int *" + l.name;
                     // In port mode, replace struct/union by-value locals with int
                     // (decompiler uses int for all scalar values; struct types leak from inference)
                     if (s_portMode) {
@@ -2711,9 +2713,9 @@ private:
                             // Also check formatted name for cross-CU conflicts
                             if (ttype.find("union ") == 0 || ttype.find("struct ") == 0)
                                 ttype = "int";
-                            // void* can't be subscripted — use char*
-                            if (false && ttype == "void *")
-                                ttype = "char *";
+                            // void* can't be subscripted — use int* in port mode
+                            if (s_portMode && ttype == "void *")
+                                ttype = "int *";
                         }
                     }
                     if (ttype.empty())
