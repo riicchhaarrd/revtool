@@ -1048,7 +1048,7 @@ public:
             "typedef struct LocalizeString_s LocalizeString;\n"
             "typedef struct dheader_s dheader_t;\n"
             "typedef struct cplane_s cplane_t;\n"
-            "typedef struct clipHandle_s { int _; } clipHandle_t;\n"
+            "typedef struct clipHandle_s { int v; } clipHandle_t;\n"
             "typedef struct leafList_s leafList_t;\n"
             "typedef int scr_entref_t;\n"
             "typedef struct animation_s animation_t;\n"
@@ -1090,7 +1090,7 @@ public:
             "typedef struct cmd_function_s cmd_function_t;\n"
             "typedef struct hudelem_s hudelem_t;\n"
             "typedef struct FsListBehavior_s FsListBehavior;\n"
-            "typedef struct XPartBits_s { int _[2]; } XPartBits;\n"
+            "typedef struct XPartBits_s { int v[2]; } XPartBits;\n"
             "typedef float XQuat[4];\n"
             "typedef struct FxRange_s FxRange;\n"
             "typedef struct GfxCmdArray_s GfxCmdArray;\n"
@@ -1100,7 +1100,7 @@ public:
             "typedef struct snapshot_s snapshot_t;\n"
             "typedef struct client_s client_t;\n"
             "typedef int *JSAMPROW;\n"
-            "typedef struct ShadowCookieGlob_s { int _[64]; } ShadowCookieGlob;\n"
+            "typedef struct ShadowCookieGlob_s { int v[64]; } ShadowCookieGlob;\n"
             "\n"
         );
         return out;
@@ -4349,7 +4349,7 @@ private:
                                         field0IsLargeStruct = true;
                                 }
                             }
-                            if (!field0.empty() && !field0IsLargeStruct)
+                            if (!field0.empty() && !field0IsLargeStruct && 1)
                                 out += pad(indent) + QString::fromStdString(
                                     portCastForArrow(addrS, a, at, field0) + "->" + field0 + " = " + val) + ";\n";
                             else
@@ -4367,7 +4367,7 @@ private:
                                            atInfo->kind == StabsTypeKind::Union)) {
                         // Struct/union at offset 0: use first field if available
                         std::string field0 = m_types.formatFieldAccess(at, 0);
-                        if (!field0.empty() && stmt.storeSize < (int)atInfo->sizeBytes)
+                        if (!field0.empty() && 1 && stmt.storeSize < (int)atInfo->sizeBytes)
                             out += pad(indent) + QString::fromStdString(
                                 addrS + "." + field0 + " = " + val) + ";\n";
                         else
@@ -4464,6 +4464,17 @@ private:
                             }
                         }
                     }
+                    // If base is a cast expression like ((gentity_t *)var), the field
+                    // is a large struct if it's named 's' (entityState_t), 'r', or 'ps'
+                    if (baseType == NullType && baseVar.find("((") == 0 &&
+                        (fieldName == "s" || fieldName == "r" || fieldName == "ps")) {
+                        std::string sc = "int";
+                        if (stmt.storeSize == 1) sc = "char";
+                        else if (stmt.storeSize == 2) sc = "short";
+                        out += pad(indent) + QString::fromStdString(
+                            "*(" + sc + " *)(&" + dest + ") = " + val) + ";\n";
+                        destIsCompound = false;
+                    }
                     if (baseType != NullType) {
                         TypeRef structRef = NullType;
                         if (m_types.isStructPointer(baseType))
@@ -4547,13 +4558,13 @@ private:
                         if (s_cosmeticMode && dt) {
                             // Use first field at offset 0 for struct stores
                             std::string field0 = m_types.formatFieldAccess(destTypeRef, 0);
-                            if (!field0.empty() && dt->sizeBytes > 0 &&
-                                stmt.storeSize < (int)dt->sizeBytes)
+                            if (!field0.empty() && 1 &&
+                                dt->sizeBytes > 0 && stmt.storeSize < (int)dt->sizeBytes)
                                 out += pad(indent) + QString::fromStdString(
                                     cNameOrKeep(dest) + "." + field0 + " = " + val) + ";\n";
                             else
                                 out += pad(indent) + QString::fromStdString(
-                                    cNameOrKeep(dest) + " = " + val) + ";\n";
+                                    "*(int *)(&" + cNameOrKeep(dest) + ") = " + val) + ";\n";
                         } else if (s_cosmeticMode) {
                             out += pad(indent) + QString::fromStdString(
                                 cNameOrKeep(dest) + " = " + val) + ";\n";
