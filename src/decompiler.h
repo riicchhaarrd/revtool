@@ -6124,8 +6124,22 @@ private:
                                 }
                         }
                     }
+                    bool lhsPtr = false;
+                    if (s_portMode && !lhsFloat) {
+                        for (auto &p : m_func.params)
+                            if (p.typeRef != NullType && !p.name.empty() &&
+                                m_types.formatType(p.typeRef).find('*') != std::string::npos &&
+                                lhs.find(cName(p.name)) != std::string::npos) { lhsPtr = true; break; }
+                        if (!lhsPtr)
+                            for (auto &l : m_func.locals)
+                                if (l.typeRef != NullType && !l.name.empty() &&
+                                    m_types.formatType(l.typeRef).find('*') != std::string::npos &&
+                                    lhs.find(cName(l.name)) != std::string::npos) { lhsPtr = true; break; }
+                    }
                     if (lhsFloat)
                         result = "((unsigned)(int)(" + lhs + ") >> " + rhs + ")";
+                    else if (lhsPtr)
+                        result = "((int)(" + lhs + ") >> " + rhs + ")";
                     else if (e->op == IROp::Shr)
                         result = "((unsigned)(" + lhs + ") >> " + rhs + ")";
                     else
@@ -6259,8 +6273,8 @@ private:
                         // Float bitwise/shift: cast operands to int (SSE bit manipulation)
                         result = "((int)(" + lhs + ")" + op + "(int)(" + rhs + "))";
                     } else if (s_portMode) {
-                        auto isPtrBit = [&](IRExpr *kid) -> bool {
-                            if (!kid) return false;
+                        std::function<bool(IRExpr*, int)> isPtrBit = [&](IRExpr *kid, int depth) -> bool {
+                            if (!kid || depth > 3) return false;
                             if (kid->op == IROp::Var && m_pointerVars.count(kid->name)) return true;
                             if (kid->op == IROp::Temp && (m_pointerTemps.count(kid->tempId()) ||
                                 m_func.pointerTemps.count(kid->tempId()))) return true;
@@ -6269,10 +6283,20 @@ private:
                                 auto *rt = m_types.resolveType(t);
                                 if (rt && rt->kind == StabsTypeKind::Pointer) return true;
                             }
+                            if (kid->op == IROp::Var && !kid->name.empty()) {
+                                for (auto &p : m_func.params)
+                                    if (p.name == kid->name && p.typeRef != NullType &&
+                                        m_types.formatType(p.typeRef).find('*') != std::string::npos) return true;
+                                for (auto &l : m_func.locals)
+                                    if (l.name == kid->name && l.typeRef != NullType &&
+                                        m_types.formatType(l.typeRef).find('*') != std::string::npos) return true;
+                            }
+                            if ((kid->op == IROp::Add || kid->op == IROp::Sub) && !kid->kids.empty())
+                                return isPtrBit(kid->kids[0].get(), depth + 1);
                             return false;
                         };
-                        bool lhsP = isPtrBit(e->kids[0].get());
-                        bool rhsP = isPtrBit(e->kids[1].get());
+                        bool lhsP = isPtrBit(e->kids[0].get(), 0);
+                        bool rhsP = isPtrBit(e->kids[1].get(), 0);
                         if (lhsP || rhsP) {
                             std::string l2 = lhsP ? "(int)" + lhs : lhs;
                             std::string r2 = rhsP ? "(int)" + rhs : rhs;
