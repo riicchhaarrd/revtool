@@ -6258,9 +6258,68 @@ private:
                     if (anyFloat) {
                         // Float bitwise/shift: cast operands to int (SSE bit manipulation)
                         result = "((int)(" + lhs + ")" + op + "(int)(" + rhs + "))";
+                    } else if (s_portMode) {
+                        auto isPtrBit = [&](IRExpr *kid) -> bool {
+                            if (!kid) return false;
+                            if (kid->op == IROp::Var && m_pointerVars.count(kid->name)) return true;
+                            if (kid->op == IROp::Temp && (m_pointerTemps.count(kid->tempId()) ||
+                                m_func.pointerTemps.count(kid->tempId()))) return true;
+                            TypeRef t = exprType(kid);
+                            if (t != NullType) {
+                                auto *rt = m_types.resolveType(t);
+                                if (rt && rt->kind == StabsTypeKind::Pointer) return true;
+                            }
+                            return false;
+                        };
+                        bool lhsP = isPtrBit(e->kids[0].get());
+                        bool rhsP = isPtrBit(e->kids[1].get());
+                        if (lhsP || rhsP) {
+                            std::string l2 = lhsP ? "(int)" + lhs : lhs;
+                            std::string r2 = rhsP ? "(int)" + rhs : rhs;
+                            result = "(" + l2 + op + r2 + ")";
+                        } else
+                            result = "(" + lhs + op + rhs + ")";
                     } else {
                         result = "(" + lhs + op + rhs + ")";
                     }
+                } else if (s_portMode && e->kids.size() == 2 && e->kids[0] && e->kids[1] &&
+                           (e->op == IROp::Sub || e->op == IROp::Mul ||
+                            e->op == IROp::SDiv || e->op == IROp::UDiv ||
+                            e->op == IROp::SMod || e->op == IROp::UMod)) {
+                    auto isPtrOp = [&](IRExpr *kid) -> bool {
+                        if (!kid) return false;
+                        if (kid->op == IROp::Var && !kid->name.empty()) {
+                            if (m_pointerVars.count(kid->name)) return true;
+                            for (auto &p : m_func.params)
+                                if (p.name == kid->name && p.typeRef != NullType &&
+                                    m_types.formatType(p.typeRef).find('*') != std::string::npos) return true;
+                            for (auto &l : m_func.locals)
+                                if (l.name == kid->name && l.typeRef != NullType &&
+                                    m_types.formatType(l.typeRef).find('*') != std::string::npos) return true;
+                        }
+                        if (kid->op == IROp::Temp) {
+                            if (m_pointerTemps.count(kid->tempId())) return true;
+                            if (m_func.pointerTemps.count(kid->tempId())) return true;
+                        }
+                        TypeRef t = exprType(kid);
+                        if (t != NullType) {
+                            auto *rt = m_types.resolveType(t);
+                            if (rt && rt->kind == StabsTypeKind::Pointer) return true;
+                        }
+                        return false;
+                    };
+                    bool lhsP = isPtrOp(e->kids[0].get());
+                    bool rhsP = isPtrOp(e->kids[1].get());
+                    if (e->op == IROp::Sub && !lhsP && rhsP)
+                        result = "(" + lhs + " - (int)" + rhs + ")";
+                    else if (e->op == IROp::Sub && lhsP && rhsP)
+                        result = "((int)" + lhs + " - (int)" + rhs + ")";
+                    else if (e->op != IROp::Sub && (lhsP || rhsP)) {
+                        std::string l2 = lhsP ? "(int)" + lhs : lhs;
+                        std::string r2 = rhsP ? "(int)" + rhs : rhs;
+                        result = "(" + l2 + op + r2 + ")";
+                    } else
+                        result = "(" + lhs + op + rhs + ")";
                 } else if (e->op == IROp::Add && e->kids[0] && e->kids[1]) {
                     // When both operands are pointers, cast RHS to int
                     // (ptr + ptr is invalid C; one should be an offset)
