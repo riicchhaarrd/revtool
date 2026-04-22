@@ -566,8 +566,9 @@ public:
         QString out;
         out += "/* Auto-generated type definitions from STABS debug info */\n";
         out += "#pragma once\n\n";
-        out += platformTypedefs(true); // self-contained, no system headers
-        out += "\n";
+        if (!s_portMode)
+            out += platformTypedefs(true) + "\n";
+        // Port mode: platform types come from cod2_types.h → platform_types.h
 
         // Collect ALL type refs used across all functions
         std::set<TypeRef> allTypes;
@@ -664,6 +665,7 @@ public:
             if (globalDeclared.count(g.name)) continue;
             // Use the best type for this global name
             if (g.name.find('<') != std::string::npos) continue;
+            if (g.name.find("_Z") == 0) continue; // C++ mangled names
             globalDeclared.insert(g.name);
             std::string decl;
             TypeRef useType = g.typeRef;
@@ -674,6 +676,12 @@ public:
                 decl = types.formatDecl(useType, g.name);
             else
                 decl = "int " + g.name;
+            // Skip declarations with C++ syntax or anonymous struct arrays
+            if (decl.find("$_") != std::string::npos ||
+                decl.find("vector<") != std::string::npos ||
+                decl.find("(*)()") != std::string::npos ||
+                decl.find("this") != std::string::npos)
+                continue;
             out += "extern " + QString::fromStdString(decl) + ";\n";
         }
 
@@ -716,21 +724,41 @@ public:
             if (cname.find('<') != std::string::npos) continue;
             // Skip names with spaces (C++ constructor/destructor stubs)
             if (cname.find(' ') != std::string::npos) continue;
-            protoDeclared.insert(cname);
+            // Skip C++ methods (have 'this' parameter)
+            bool hasCppParam = false;
+            for (auto &p : fn.params) {
+                if (p.name == "this") { hasCppParam = true; break; }
+                std::string pt = p.typeRef != NullType ? types.formatType(p.typeRef) : "";
+                if (pt.find("$_") != std::string::npos || pt.find("string") == 0 ||
+                    pt.find("deque<") != std::string::npos)
+                    { hasCppParam = true; break; }
+            }
+            if (hasCppParam) continue;
+            // Skip if return type has C++ artifacts
             std::string retStr = fn.returnType != NullType ?
                 types.formatType(fn.returnType) : "int";
+            if (retStr.find("$_") != std::string::npos || retStr.find("operator") == 0)
+                continue;
+            protoDeclared.insert(cname);
             out += QString::fromStdString(retStr + " " + cname + "(");
             if (fn.params.empty()) {
                 out += "void";
             } else {
+                bool paramOk = true;
+                QString params;
                 for (size_t i = 0; i < fn.params.size(); ++i) {
-                    if (i) out += ", ";
+                    if (i) params += ", ";
                     auto &p = fn.params[i];
+                    std::string pdecl;
                     if (p.typeRef != NullType)
-                        out += QString::fromStdString(types.formatDecl(p.typeRef, p.name));
+                        pdecl = types.formatDecl(p.typeRef, p.name);
                     else
-                        out += "int " + QString::fromStdString(p.name);
+                        pdecl = "int " + p.name;
+                    if (pdecl.find("$_") != std::string::npos) { paramOk = false; break; }
+                    params += QString::fromStdString(pdecl);
                 }
+                if (!paramOk) continue;
+                out += params;
             }
             // Add variadic markers for known variadic functions
             static const std::set<std::string> variadicProtos = {
@@ -2176,6 +2204,8 @@ private:
         }
         if (t->kind == StabsTypeKind::Struct || t->kind == StabsTypeKind::Union) {
             if (t->name.empty()) return;
+            // Skip anonymous CU-local types (inlined into parent structs)
+            if (t->name.find("$_") == 0) return;
             // Skip C++ template types (not valid C)
             if (t->name.find('<') != std::string::npos) return;
             // Skip if already emitted a struct/union with this name (cross-CU dedup)
@@ -2335,6 +2365,7 @@ private:
         }
         if (t->kind == StabsTypeKind::Enum) {
             if (t->name.empty() || t->enumValues.empty()) return;
+            if (t->name.find("$_") == 0) return; // skip anonymous enums (CU duplicates)
             if (emittedNames.count(t->name)) return;
             emittedNames.insert(t->name);
             out += QString::fromStdString(types.formatEnumDef(ref)) + ";\n\n";
