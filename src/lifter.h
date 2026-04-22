@@ -1799,52 +1799,35 @@ private:
             // Try nearest symbol for base+offset access
             { std::string nearest = m_mf.nearestSymbolName(addr);
               if (!nearest.empty()) {
-                // Cosmetic mode: resolve (global + offset) to global.field for struct globals
-                extern bool g_cosmeticMode;
-                if (g_cosmeticMode) {
-                    size_t plus = nearest.find(" + 0x");
-                    if (plus != std::string::npos && nearest.front() == '(' && nearest.back() == ')') {
-                        std::string gname = nearest.substr(1, plus - 1);
-                        unsigned goff = 0;
-                        sscanf(nearest.c_str() + plus + 3, "%x", &goff);
-                        auto *gn = m_types.globalByName(gname, m_curSourceFileIdx);
-                        if (gn && gn->typeRef != NullType) {
-                            auto *gt = m_types.resolveType(gn->typeRef);
-                            if (gt && (gt->kind == StabsTypeKind::Struct || gt->kind == StabsTypeKind::Union)) {
-                                std::string access = m_types.formatFieldAccess(gn->typeRef, (int)goff);
-                                if (!access.empty()) {
-                                    auto base = IRExpr::mkVar(gname, gn->typeRef);
-                                    auto *field = m_types.findFieldAtOffset(gn->typeRef, (int)goff);
-                                    TypeRef ft = field ? field->typeRef : NullType;
-                                    return IRExpr::mkField(std::move(base), access, (int)goff, ft);
-                                }
+                // Resolve (global + offset) to global.field for struct/array-of-struct globals
+                size_t plus = nearest.find(" + 0x");
+                if (plus != std::string::npos && nearest.front() == '(' && nearest.back() == ')') {
+                    std::string gname = nearest.substr(1, plus - 1);
+                    unsigned goff = 0;
+                    sscanf(nearest.c_str() + plus + 3, "%x", &goff);
+                    auto *gn = m_types.globalByName(gname, m_curSourceFileIdx);
+                    if (gn && gn->typeRef != NullType) {
+                        auto *gt = m_types.resolveType(gn->typeRef);
+                        TypeRef structType = NullType;
+                        if (gt && (gt->kind == StabsTypeKind::Struct || gt->kind == StabsTypeKind::Union))
+                            structType = gn->typeRef;
+                        else if (gt && gt->kind == StabsTypeKind::Array) {
+                            auto *et = m_types.resolveType(gt->targetType);
+                            if (et && (et->kind == StabsTypeKind::Struct || et->kind == StabsTypeKind::Union)) {
+                                int elemSz = et->sizeBytes;
+                                if (elemSz > 0 && (int)goff < elemSz)
+                                    structType = gt->targetType;
                             }
-                            // Array types: keep the (globalName + offset) form
-                            // The nearest symbol name is already readable
                         }
-                    }
-                }
-                // Non-cosmetic: emit Add(Var(globalName, type), Const(off))
-                // ONLY when the offset resolves to a struct field — avoids emitting
-                // (int)&struct + unresolved_offset which produces "cannot convert" errors
-                if (!g_cosmeticMode) {
-                    size_t plus = nearest.find(" + 0x");
-                    if (plus != std::string::npos && nearest.front() == '(' && nearest.back() == ')') {
-                        std::string gname = nearest.substr(1, plus - 1);
-                        unsigned goff = 0;
-                        sscanf(nearest.c_str() + plus + 3, "%x", &goff);
-                        auto *gn = m_types.globalByName(gname, m_curSourceFileIdx);
-                        if (gn && gn->typeRef != NullType) {
-                            auto *gt = m_types.resolveType(gn->typeRef);
-                            bool hasField = false;
-                            if (gt && (gt->kind == StabsTypeKind::Struct || gt->kind == StabsTypeKind::Union)) {
-                                std::string fa = m_types.formatFieldAccess(gn->typeRef, (int)goff);
-                                hasField = !fa.empty();
-                            }
-                            if (hasField) {
+                        if (structType != NullType) {
+                            std::string access = m_types.formatFieldAccess(structType, (int)goff);
+                            if (!access.empty()) {
                                 auto base = IRExpr::mkVar(gname, gn->typeRef);
-                                return IRExpr::mkBinary(IROp::Add, std::move(base), IRExpr::mkConst(goff));
+                                auto *field = m_types.findFieldAtOffset(structType, (int)goff);
+                                TypeRef ft = field ? field->typeRef : NullType;
+                                return IRExpr::mkField(std::move(base), access, (int)goff, ft);
                             }
+                            return IRExpr::mkLoad(IRExpr::mkConst(addr));
                         }
                     }
                 }
@@ -1988,9 +1971,8 @@ private:
                 bb.stmts.push_back(IRStmt::mkVarSet(symName, std::move(val), NullType, storeSize));
                 return;
             }
-            // Cosmetic mode: resolve (global + offset) to global.field for struct globals
-            extern bool g_cosmeticMode;
-            if (g_cosmeticMode) {
+            // Resolve (global + offset) to global.field for struct/array-of-struct globals
+            {
                 std::string nearest = m_mf.nearestSymbolName(addr);
                 if (!nearest.empty()) {
                     size_t plus = nearest.find(" + 0x");
@@ -2001,11 +1983,22 @@ private:
                         auto *gn = m_types.globalByName(gname, m_curSourceFileIdx);
                         if (gn && gn->typeRef != NullType) {
                             auto *gt = m_types.resolveType(gn->typeRef);
-                            if (gt && (gt->kind == StabsTypeKind::Struct || gt->kind == StabsTypeKind::Union)) {
-                                std::string access = m_types.formatFieldAccess(gn->typeRef, (int)goff);
+                            TypeRef structType = NullType;
+                            if (gt && (gt->kind == StabsTypeKind::Struct || gt->kind == StabsTypeKind::Union))
+                                structType = gn->typeRef;
+                            else if (gt && gt->kind == StabsTypeKind::Array) {
+                                auto *et = m_types.resolveType(gt->targetType);
+                                if (et && (et->kind == StabsTypeKind::Struct || et->kind == StabsTypeKind::Union)) {
+                                    int elemSz = et->sizeBytes;
+                                    if (elemSz > 0 && (int)goff < elemSz)
+                                        structType = gt->targetType;
+                                }
+                            }
+                            if (structType != NullType) {
+                                std::string access = m_types.formatFieldAccess(structType, (int)goff);
                                 if (!access.empty()) {
                                     auto base = IRExpr::mkVar(gname, gn->typeRef);
-                                    auto *field = m_types.findFieldAtOffset(gn->typeRef, (int)goff);
+                                    auto *field = m_types.findFieldAtOffset(structType, (int)goff);
                                     TypeRef ft = field ? field->typeRef : NullType;
                                     auto fld = IRExpr::mkField(std::move(base), access, (int)goff, ft);
                                     bb.stmts.push_back(IRStmt::mkStore(std::move(fld), std::move(val), storeSize));
