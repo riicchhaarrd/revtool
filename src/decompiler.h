@@ -2299,6 +2299,7 @@ private:
                         if (f.name.find("<") != std::string::npos) continue;
                         if (f.name.find("=") != std::string::npos) continue;
                         if (f.name[0] == '!' || f.name[0] == '#' || f.name[0] == '$') continue;
+                        if (f.name.find("_vptr$") != std::string::npos) continue;
                         if (f.name.find("operator") == 0) continue;
                         if (f.name.find("&") != std::string::npos) continue;
                         if (f.name.find(">") != std::string::npos) continue;
