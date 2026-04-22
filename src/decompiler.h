@@ -4413,10 +4413,22 @@ private:
                                            atInfo->kind == StabsTypeKind::Union)) {
                         // Struct/union at offset 0: use first field if available
                         std::string field0 = m_types.formatFieldAccess(at, 0);
-                        if (!field0.empty() && field0 != "_" && stmt.storeSize < (int)atInfo->sizeBytes)
-                            out += pad(indent) + QString::fromStdString(
-                                addrS + "." + field0 + " = " + val) + ";\n";
-                        else
+                        // Port mode: check if temp is actually declared as pointer
+                        bool useArrOp = false;
+                        if (s_portMode && a->op == IROp::Temp) {
+                            int tid = a->tempId();
+                            if (m_func.pointerTemps.count(tid) || m_pointerTemps.count(tid) ||
+                                m_tempStructPtr.count(tid))
+                                useArrOp = true;
+                        }
+                        if (!field0.empty() && field0 != "_" && stmt.storeSize < (int)atInfo->sizeBytes) {
+                            if (useArrOp)
+                                out += pad(indent) + QString::fromStdString(
+                                    addrS + "->" + field0 + " = " + val) + ";\n";
+                            else
+                                out += pad(indent) + QString::fromStdString(
+                                    addrS + "." + field0 + " = " + val) + ";\n";
+                        } else
                             out += pad(indent) + QString::fromStdString(
                                 "*(" + storeCast + " *)(&" + addrS + ") = " + val) + ";\n";
                     } else {
@@ -5759,8 +5771,14 @@ private:
                     TypeRef declType = baseType;
                     if (s_portMode && e->kids[0]) {
                         declType = NullType;
-                        if (e->kids[0]->op == IROp::Temp)
-                            declType = m_func.tempType(e->kids[0]->tempId());
+                        if (e->kids[0]->op == IROp::Temp) {
+                            int tid = e->kids[0]->tempId();
+                            auto spit = m_tempStructPtr.find(tid);
+                            if (spit != m_tempStructPtr.end() && spit->second != NullType)
+                                declType = spit->second;
+                            else
+                                declType = m_func.tempType(tid);
+                        }
                         else if (e->kids[0]->op == IROp::Var) {
                             for (auto &p : m_func.params)
                                 if (p.name == e->kids[0]->name) { declType = p.typeRef; break; }
@@ -5787,6 +5805,21 @@ private:
                                         useArrow = true;
                                 }
                             }
+                        }
+                    }
+                    // Port mode: force arrow when base is a pointer temp
+                    if (s_portMode && !useArrow && e->kids[0]) {
+                        if (declType != NullType) {
+                            auto *dt = m_types.resolveType(declType);
+                            if (dt && dt->kind == StabsTypeKind::Pointer)
+                                useArrow = true;
+                        }
+                        // Also check pointer detection from type inference
+                        if (!useArrow && e->kids[0]->op == IROp::Temp) {
+                            int tid = e->kids[0]->tempId();
+                            if (m_func.pointerTemps.count(tid) ||
+                                m_pointerTemps.count(tid))
+                                useArrow = true;
                         }
                     }
                     // Check if the named field is a large struct/union — if so,
