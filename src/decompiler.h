@@ -5745,12 +5745,27 @@ private:
                         result = std::string("*(") + loadCastType(e->loadSize) + " *)((char *)(&" + base + ") + " + hx + ")";
                     } else if (s_portMode && e->kids[0] &&
                                (e->kids[0]->op == IROp::Temp || e->kids[0]->op == IROp::Var) &&
-                               (baseType == NullType || [&]{
+                               [&]{
+                                   if (baseType == NullType) return true;
                                    auto *bt = m_types.resolveType(baseType);
-                                   return !bt || (bt->kind != StabsTypeKind::Struct &&
-                                                  bt->kind != StabsTypeKind::Union &&
-                                                  bt->kind != StabsTypeKind::Pointer);
-                               }())) {
+                                   if (!bt) return true;
+                                   if (bt->kind != StabsTypeKind::Struct &&
+                                       bt->kind != StabsTypeKind::Union &&
+                                       bt->kind != StabsTypeKind::Pointer)
+                                       return true;
+                                   // Base resolves to struct but temp might be declared as int.
+                                   if (e->kids[0]->op == IROp::Temp) {
+                                       int tid = e->kids[0]->tempId();
+                                       TypeRef tt = m_func.tempType(tid);
+                                       if (tt == NullType) return true;
+                                       auto *tti = m_types.resolveType(tt);
+                                       if (!tti || (tti->kind != StabsTypeKind::Struct &&
+                                                    tti->kind != StabsTypeKind::Union &&
+                                                    tti->kind != StabsTypeKind::Pointer))
+                                           return true;
+                                   }
+                                   return false;
+                               }()) {
                         int off = (int)e->value;
                         if (off == 0)
                             result = std::string("*(") + loadCastType(e->loadSize) + " *)(" + base + ")";
@@ -5933,7 +5948,37 @@ private:
                         std::string access;
                         bool isPtr = false;
                         bool isStruct = false;
-                        if (baseType != NullType) {
+                        // In port mode, skip struct field resolution for temps
+                        // that will be declared as int (no struct type in tempTypes).
+                        bool skipStructField = false;
+                        if (s_portMode && (e->kids[0]->op == IROp::Temp || e->kids[0]->op == IROp::Var)) {
+                            TypeRef declType = NullType;
+                            if (e->kids[0]->op == IROp::Temp)
+                                declType = m_func.tempType(e->kids[0]->tempId());
+                            else {
+                                // Look up declared type from params/locals
+                                for (auto &p : m_func.params)
+                                    if (p.name == e->kids[0]->name) { declType = p.typeRef; break; }
+                                if (declType == NullType)
+                                    for (auto &l : m_func.locals)
+                                        if (l.name == e->kids[0]->name) { declType = l.typeRef; break; }
+                                // Globals keep their real type
+                                if (declType == NullType && !e->kids[0]->name.empty()) {
+                                    auto *g = m_types.globalByName(e->kids[0]->name);
+                                    if (g) declType = g->typeRef;
+                                }
+                            }
+                            if (declType == NullType)
+                                skipStructField = true;
+                            else {
+                                auto *dti = m_types.resolveType(declType);
+                                if (!dti || (dti->kind != StabsTypeKind::Struct &&
+                                             dti->kind != StabsTypeKind::Union &&
+                                             dti->kind != StabsTypeKind::Pointer))
+                                    skipStructField = true;
+                            }
+                        }
+                        if (baseType != NullType && !skipStructField) {
                             if (m_types.isStructPointer(baseType)) {
                                 isPtr = true;
                                 TypeRef structRef = m_types.getPointedStruct(baseType);
@@ -5950,7 +5995,7 @@ private:
                                 }
                             }
                         }
-                        if (isPtr) {
+                        if (isPtr && !skipStructField) {
                             if (!access.empty()) {
                                 std::string castLhs = portCastForArrow(lhs, e->kids[0].get(), baseType, access);
                                 result = "&" + castLhs + "->" + access;
@@ -5959,7 +6004,7 @@ private:
                                 result = "&" + lhs + "->" + fname;
                             }
                             break;
-                        } else if (isStruct) {
+                        } else if (isStruct && !skipStructField) {
                             if (!access.empty())
                                 result = "&" + lhs + "." + access;
                             else
