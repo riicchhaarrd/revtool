@@ -607,6 +607,8 @@ public:
                            ft->kind == StabsTypeKind::Union) &&
                     ft->fields.empty() && ft->sizeBytes >= 4)
                     return f.name + "[0]";
+                if (f.name == "_")
+                    return "";
                 return f.name;
             }
         }

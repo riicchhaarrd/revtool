@@ -4367,7 +4367,7 @@ private:
                                            atInfo->kind == StabsTypeKind::Union)) {
                         // Struct/union at offset 0: use first field if available
                         std::string field0 = m_types.formatFieldAccess(at, 0);
-                        if (!field0.empty() && 1 && stmt.storeSize < (int)atInfo->sizeBytes)
+                        if (!field0.empty() && field0 != "_" && stmt.storeSize < (int)atInfo->sizeBytes)
                             out += pad(indent) + QString::fromStdString(
                                 addrS + "." + field0 + " = " + val) + ";\n";
                         else
@@ -4558,7 +4558,7 @@ private:
                         if (s_cosmeticMode && dt) {
                             // Use first field at offset 0 for struct stores
                             std::string field0 = m_types.formatFieldAccess(destTypeRef, 0);
-                            if (!field0.empty() && 1 &&
+                            if (!field0.empty() && field0 != "_" &&
                                 dt->sizeBytes > 0 && stmt.storeSize < (int)dt->sizeBytes)
                                 out += pad(indent) + QString::fromStdString(
                                     cNameOrKeep(dest) + "." + field0 + " = " + val) + ";\n";
