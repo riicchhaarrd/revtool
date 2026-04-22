@@ -1109,6 +1109,21 @@ public:
     // Remove empty if blocks from output text
     static QString cleanupOutput(const QString &code) {
         QString cleaned = code;
+        // Port mode: replace ._ (underscore/padding field on scalar) with + 1.
+        if (s_portMode) {
+            int p = 0;
+            while ((p = cleaned.indexOf("._", p)) != -1) {
+                if (p > 0 && cleaned[p-1].isLetterOrNumber()) {
+                    int after = p + 2;
+                    if (after >= cleaned.size() || !cleaned[after].isLetterOrNumber()) {
+                        cleaned.replace(p, 2, " + 1");
+                        p += 4;
+                        continue;
+                    }
+                }
+                ++p;
+            }
+        }
         // Pre-pass: fix &EXPR->field_X patterns → (EXPR + 0xX)
         // &0->field_X → 0xX
         cleaned.replace("&0->field_", "0x__F");
@@ -5724,6 +5739,25 @@ private:
                     if (fieldIsLargeStruct) {
                         int off = (int)e->value;
                         result = std::string("*(") + loadCastType(e->loadSize) + " *)(" + charPtrCast(base, e->kids.empty() ? nullptr : e->kids[0].get()) + " + " + std::to_string(off) + ")";
+                    } else if (e->name == "_") {
+                        int off = (int)e->value;
+                        char hx[16]; snprintf(hx, sizeof(hx), "0x%X", (unsigned)off);
+                        result = std::string("*(") + loadCastType(e->loadSize) + " *)((char *)(&" + base + ") + " + hx + ")";
+                    } else if (s_portMode && e->kids[0] &&
+                               (e->kids[0]->op == IROp::Temp || e->kids[0]->op == IROp::Var) &&
+                               (baseType == NullType || [&]{
+                                   auto *bt = m_types.resolveType(baseType);
+                                   return !bt || (bt->kind != StabsTypeKind::Struct &&
+                                                  bt->kind != StabsTypeKind::Union &&
+                                                  bt->kind != StabsTypeKind::Pointer);
+                               }())) {
+                        int off = (int)e->value;
+                        if (off == 0)
+                            result = std::string("*(") + loadCastType(e->loadSize) + " *)(" + base + ")";
+                        else {
+                            char hx[16]; snprintf(hx, sizeof(hx), "0x%X", (unsigned)off);
+                            result = std::string("*(") + loadCastType(e->loadSize) + " *)((char *)(" + base + ") + " + hx + ")";
+                        }
                     } else {
                         result = base + (useArrow ? "->" : ".") + e->name;
                     }
