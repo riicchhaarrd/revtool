@@ -4172,8 +4172,39 @@ private:
                                 }
                             }
                         }
+                        // Port mode: suppress field resolution for temps/vars
+                        // whose C declaration is not a struct pointer type.
+                        bool stSkipField = false;
+                        if (s_portMode && (a->kids[0]->op == IROp::Temp || a->kids[0]->op == IROp::Var)) {
+                            TypeRef declT = NullType;
+                            if (a->kids[0]->op == IROp::Temp)
+                                declT = m_func.tempType(a->kids[0]->tempId());
+                            else {
+                                for (auto &p : m_func.params)
+                                    if (p.name == a->kids[0]->name) { declT = p.typeRef; break; }
+                                if (declT == NullType)
+                                    for (auto &l : m_func.locals)
+                                        if (l.name == a->kids[0]->name) { declT = l.typeRef; break; }
+                                if (declT == NullType) {
+                                    auto *g = m_types.globalByName(a->kids[0]->name);
+                                    if (g) declT = g->typeRef;
+                                }
+                            }
+                            if (declT == NullType) stSkipField = true;
+                            else {
+                                auto *dti = m_types.resolveType(declT);
+                                bool isTemp = (a->kids[0]->op == IROp::Temp);
+                                if (!dti) stSkipField = true;
+                                else if (isTemp && dti->kind != StabsTypeKind::Pointer)
+                                    stSkipField = true;
+                                else if (!isTemp && dti->kind != StabsTypeKind::Pointer &&
+                                         dti->kind != StabsTypeKind::Struct &&
+                                         dti->kind != StabsTypeKind::Union)
+                                    stSkipField = true;
+                            }
+                        }
                         std::string access;
-                        if (!stIsInterior && stBaseType != NullType && m_types.isStructPointer(stBaseType)) {
+                        if (!stIsInterior && !stSkipField && stBaseType != NullType && m_types.isStructPointer(stBaseType)) {
                             TypeRef structRef = m_types.getPointedStruct(stBaseType);
                             if (structRef != NullType)
                                 access = m_types.formatFieldAccess(structRef, off);
@@ -5398,10 +5429,41 @@ private:
                             }
                         }
                     }
+                    // Port mode: suppress field resolution for temps/vars whose
+                    // C declaration won't have a struct type (avoids base->field on int)
+                    if (s_portMode && structRef != NullType &&
+                        (addr->kids[0]->op == IROp::Temp || addr->kids[0]->op == IROp::Var)) {
+                        TypeRef declType = NullType;
+                        if (addr->kids[0]->op == IROp::Temp)
+                            declType = m_func.tempType(addr->kids[0]->tempId());
+                        else {
+                            for (auto &p : m_func.params)
+                                if (p.name == addr->kids[0]->name) { declType = p.typeRef; break; }
+                            if (declType == NullType)
+                                for (auto &l : m_func.locals)
+                                    if (l.name == addr->kids[0]->name) { declType = l.typeRef; break; }
+                            if (declType == NullType) {
+                                auto *g = m_types.globalByName(addr->kids[0]->name);
+                                if (g) declType = g->typeRef;
+                            }
+                        }
+                        if (declType == NullType) {
+                            structRef = NullType;
+                        } else {
+                            auto *dti = m_types.resolveType(declType);
+                            bool isTemp = (addr->kids[0]->op == IROp::Temp);
+                            if (!dti) structRef = NullType;
+                            else if (isTemp && dti->kind != StabsTypeKind::Pointer)
+                                structRef = NullType;
+                            else if (!isTemp && dti->kind != StabsTypeKind::Pointer &&
+                                     dti->kind != StabsTypeKind::Struct &&
+                                     dti->kind != StabsTypeKind::Union)
+                                structRef = NullType;
+                        }
+                    }
                     if (structRef != NullType) {
                         std::string access =
                             m_types.formatFieldAccess(structRef, (int)off);
-                        // Debug: trace incorrect field resolution
                         if (!access.empty()) {
                             // Check if the resolved field makes sense for this access:
                             // 1. Subscript on non-array field is wrong
@@ -5691,14 +5753,31 @@ private:
                     int off = (int)e->value;
                     result = std::string("*(") + loadCastType(e->loadSize) + " *)(" + charPtrCast(base, e->kids.empty() ? nullptr : e->kids[0].get()) + " + " + std::to_string(off) + ")";
                 } else {
-                    // Use -> for pointer-to-struct, . for struct-by-value
                     TypeRef baseType = e->kids[0] ? exprType(e->kids[0].get()) : NullType;
+                    // Port mode: use the DECLARED type (not the IR annotation)
+                    // to decide whether field access is valid in the C output.
+                    TypeRef declType = baseType;
+                    if (s_portMode && e->kids[0]) {
+                        declType = NullType;
+                        if (e->kids[0]->op == IROp::Temp)
+                            declType = m_func.tempType(e->kids[0]->tempId());
+                        else if (e->kids[0]->op == IROp::Var) {
+                            for (auto &p : m_func.params)
+                                if (p.name == e->kids[0]->name) { declType = p.typeRef; break; }
+                            if (declType == NullType)
+                                for (auto &l : m_func.locals)
+                                    if (l.name == e->kids[0]->name) { declType = l.typeRef; break; }
+                            if (declType == NullType) {
+                                auto *g = m_types.globalByName(e->kids[0]->name);
+                                if (g) declType = g->typeRef;
+                            }
+                        }
+                    }
                     bool useArrow = true;
                     if (baseType != NullType) {
                         auto *bt = m_types.resolveType(baseType);
                         if (bt && (bt->kind == StabsTypeKind::Struct || bt->kind == StabsTypeKind::Union)) {
                             useArrow = false;
-                            // Check if the base temp actually holds a pointer
                             if (e->kids[0] && e->kids[0]->op == IROp::Temp) {
                                 auto dit = m_tempDef.find(e->kids[0]->tempId());
                                 if (dit != m_tempDef.end() && dit->second) {
@@ -5746,25 +5825,14 @@ private:
                     } else if (s_portMode && e->kids[0] &&
                                (e->kids[0]->op == IROp::Temp || e->kids[0]->op == IROp::Var) &&
                                [&]{
-                                   if (baseType == NullType) return true;
-                                   auto *bt = m_types.resolveType(baseType);
-                                   if (!bt) return true;
-                                   if (bt->kind != StabsTypeKind::Struct &&
-                                       bt->kind != StabsTypeKind::Union &&
-                                       bt->kind != StabsTypeKind::Pointer)
-                                       return true;
-                                   // Base resolves to struct but temp might be declared as int.
-                                   if (e->kids[0]->op == IROp::Temp) {
-                                       int tid = e->kids[0]->tempId();
-                                       TypeRef tt = m_func.tempType(tid);
-                                       if (tt == NullType) return true;
-                                       auto *tti = m_types.resolveType(tt);
-                                       if (!tti || (tti->kind != StabsTypeKind::Struct &&
-                                                    tti->kind != StabsTypeKind::Union &&
-                                                    tti->kind != StabsTypeKind::Pointer))
-                                           return true;
-                                   }
-                                   return false;
+                                   if (declType == NullType) return true;
+                                   auto *dt = m_types.resolveType(declType);
+                                   if (!dt) return true;
+                                   bool isTemp = e->kids[0]->op == IROp::Temp;
+                                   if (isTemp) return dt->kind != StabsTypeKind::Pointer;
+                                   return dt->kind != StabsTypeKind::Pointer &&
+                                          dt->kind != StabsTypeKind::Struct &&
+                                          dt->kind != StabsTypeKind::Union;
                                }()) {
                         int off = (int)e->value;
                         if (off == 0)
@@ -5972,9 +6040,13 @@ private:
                                 skipStructField = true;
                             else {
                                 auto *dti = m_types.resolveType(declType);
-                                if (!dti || (dti->kind != StabsTypeKind::Struct &&
-                                             dti->kind != StabsTypeKind::Union &&
-                                             dti->kind != StabsTypeKind::Pointer))
+                                bool isTemp = (e->kids[0]->op == IROp::Temp);
+                                if (!dti) skipStructField = true;
+                                else if (isTemp && dti->kind != StabsTypeKind::Pointer)
+                                    skipStructField = true;
+                                else if (!isTemp && dti->kind != StabsTypeKind::Pointer &&
+                                         dti->kind != StabsTypeKind::Struct &&
+                                         dti->kind != StabsTypeKind::Union)
                                     skipStructField = true;
                             }
                         }
@@ -5995,6 +6067,7 @@ private:
                                 }
                             }
                         }
+                        if (skipStructField) { isPtr = false; isStruct = false; access.clear(); }
                         if (isPtr && !skipStructField) {
                             if (!access.empty()) {
                                 std::string castLhs = portCastForArrow(lhs, e->kids[0].get(), baseType, access);
