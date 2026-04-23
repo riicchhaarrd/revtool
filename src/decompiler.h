@@ -4099,6 +4099,40 @@ private:
                     if (vti && vti->kind == StabsTypeKind::Array)
                         val += "[0]";
                 }
+                // Cast small (≤4 byte) struct/union RHS to int when storing
+                // to a generic pointer / int slot.  The x86 ABI passes these
+                // as 4-byte values; without the cast C rejects the assignment.
+                // Skip when the val text is already a member access or
+                // dereference (those produce the right type via the inner expr).
+                if (s_portMode && stmt.expr && stmt.storeSize == 4 &&
+                    val.find('.') == std::string::npos &&
+                    val.find('[') == std::string::npos &&
+                    val.find('*') == std::string::npos &&
+                    val.find('(') == std::string::npos) {
+                    TypeRef rhsType = NullType;
+                    if (stmt.expr->op == IROp::Var && !stmt.expr->name.empty()) {
+                        rhsType = stmt.expr->typeRef;
+                        if (rhsType == NullType) {
+                            for (auto &p : m_func.params)
+                                if (p.name == stmt.expr->name && p.typeRef != NullType)
+                                    { rhsType = p.typeRef; break; }
+                            if (rhsType == NullType)
+                                for (auto &l : m_func.locals)
+                                    if (l.name == stmt.expr->name && l.typeRef != NullType)
+                                        { rhsType = l.typeRef; break; }
+                        }
+                    } else if (stmt.expr->op == IROp::Temp) {
+                        rhsType = m_func.tempType((int)stmt.expr->value);
+                    }
+                    if (rhsType != NullType) {
+                        auto *rt = m_types.resolveType(rhsType);
+                        if (rt && (rt->kind == StabsTypeKind::Struct ||
+                                   rt->kind == StabsTypeKind::Union) &&
+                            rt->sizeBytes > 0 && rt->sizeBytes <= 4) {
+                            val = "*(int *)(&" + val + ")";
+                        }
+                    }
+                }
                 if (!stmt.addr) break;
                 auto *a = stmt.addr.get();
                 struct AddrGuard { int &d; AddrGuard(int &d):d(d){d++;} ~AddrGuard(){d--;} } _ag(m_addrDepth);
