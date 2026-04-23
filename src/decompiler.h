@@ -11,6 +11,7 @@
 #include "macho.h"
 #include <QString>
 #include <QProcess>
+#include <QRegularExpression>
 #include <string>
 #include <map>
 #include <set>
@@ -2735,6 +2736,11 @@ private:
                     }
                     if (ttype.empty())
                         ttype = inferTempType(id);
+                    // Fallback: after inferTempType too, reject void* which can't be
+                    // subscripted or used in pointer arithmetic.  Type tag only —
+                    // the pointer value is unchanged.
+                    if (s_portMode && ttype == "void *")
+                        ttype = "int *";
                     // If type is a pointer but the temp is used in multiplication,
                     // it's actually a scalar value (not a pointer)
                     if (ttype.find("*") != std::string::npos && ttype.find("const") == std::string::npos) {
@@ -2864,6 +2870,9 @@ private:
                     if (ttype.substr(0, 6) == "const ") ttype = ttype.substr(6);
                     // Replace void (non-pointer) with int — can't have void locals
                     if (ttype == "void") ttype = "int";
+                    // Final safety: void* can't be subscripted — force to int* in port mode
+                    if (s_portMode && ttype == "void *")
+                        ttype = "int *";
                     out += "    " + QString::fromStdString(ttype + " " + tname) + ";\n";
                     declared.insert(tname);
                 }
@@ -2943,6 +2952,9 @@ private:
                 if ((itype == "float" || itype == "vec_t") && vit != m_func.tempToVar.end() &&
                     m_func.noFloatVars.count(vit->second))
                     itype = "int";
+                // void* can't be subscripted/arithmetic in C — type-tag only change
+                if (s_portMode && itype == "void *")
+                    itype = "int *";
                 out += "    " + QString::fromStdString(itype + " " + tname) + ";\n";
             }
             if (!m_forceDeclareTemps.empty()) out += "\n";
@@ -6926,19 +6938,15 @@ private:
                                         arg.find(ptype) == std::string::npos &&
                                         arg.find("union ") != 0 && arg.find("struct ") != 0)
                                         arg = "*(" + ptype + " *)&(int){" + arg + "}";
-                                } else if (pt && pt->kind == StabsTypeKind::Struct &&
-                                           pt->sizeBytes > 4 &&
-                                           e->kids[i] && e->kids[i]->op == IROp::Temp &&
-                                           arg.find('&') == std::string::npos &&
-                                           arg.find('*') == std::string::npos) {
-                                    // Larger struct by value passed via a scalar temp:
-                                    // the temp holds an address-of / first scalar word,
-                                    // cast through its address to the struct type.
-                                    std::string ptype = m_types.formatType(par.typeRef);
-                                    if (ptype.find('<') == std::string::npos &&
-                                        ptype.find("std::") == std::string::npos)
-                                        arg = "*(" + ptype + " *)&" + arg;
                                 }
+                                // Larger structs-by-value (>4 bytes) cannot be
+                                // reconstructed from a single int temp.  The asm pushes
+                                // N bytes onto the stack; the decompiler only modelled
+                                // the first word in that int.  Emitting
+                                // `*(struct X *)&temp` reads past the int → UB.  The
+                                // correct fix is in the lifter (capture the full
+                                // struct as a stack-located value); leave the call
+                                // wrong rather than introduce UB at the port layer.
                             }
                         }
                         result += arg;
