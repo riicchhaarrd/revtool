@@ -2279,23 +2279,32 @@ private:
                         if (nit != m_func->varNames.end()) varName = nit->second;
                     }
                 }
+                // Find the candidate type: from named-var lookup, or from the
+                // temp's tempType if no name found.
+                TypeRef vtRef = NullType;
                 if (!varName.empty()) {
-                    TypeRef vtRef = NullType;
                     for (auto &fp : m_func->params)
                         if (fp.name == varName && fp.typeRef != NullType)
                             { vtRef = fp.typeRef; break; }
-                    if (vtRef != NullType) {
-                        auto *vt = m_types.resolveType(vtRef);
-                        auto *pt = m_types.resolveType(p.typeRef);
-                        if (vt && pt &&
-                            (vt->kind == StabsTypeKind::Struct ||
-                             vt->kind == StabsTypeKind::Union) &&
-                            vt->kind == pt->kind &&
-                            !vt->name.empty() && vt->name == pt->name) {
-                            out.push_back(std::move(args[argIdx]));
-                            argIdx += (size_t)words;
-                            continue;
-                        }
+                    if (vtRef == NullType)
+                        for (auto &fl : m_func->locals)
+                            if (fl.name == varName && fl.typeRef != NullType)
+                                { vtRef = fl.typeRef; break; }
+                }
+                if (vtRef == NullType && first && first->op == IROp::Temp) {
+                    vtRef = m_func->tempType((int)first->value);
+                }
+                if (vtRef != NullType) {
+                    auto *vt = m_types.resolveType(vtRef);
+                    auto *pt = m_types.resolveType(p.typeRef);
+                    if (vt && pt &&
+                        (vt->kind == StabsTypeKind::Struct ||
+                         vt->kind == StabsTypeKind::Union) &&
+                        vt->kind == pt->kind &&
+                        !vt->name.empty() && vt->name == pt->name) {
+                        out.push_back(std::move(args[argIdx]));
+                        argIdx += (size_t)words;
+                        continue;
                     }
                 }
             }

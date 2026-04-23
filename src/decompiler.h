@@ -2471,12 +2471,88 @@ private:
                         decl.find('*', 6) == std::string::npos)
                         decl = "int *" + l.name;
                     // In port mode, replace struct/union by-value locals with int
-                    // (decompiler uses int for all scalar values; struct types leak from inference)
+                    // unless dataflow analysis says the local is genuinely used as
+                    // a struct (`.field` or `&local.field` access, no scalar
+                    // assignment, no scalar function-arg use).  This preserves
+                    // the original semantics when the STABS type is real, but
+                    // downgrades when the IR uses the local as a scratch int.
                     if (s_portMode) {
                         auto *lt = m_types.resolveType(l.typeRef);
                         if (lt && (lt->kind == StabsTypeKind::Struct || lt->kind == StabsTypeKind::Union) &&
-                            decl.find('*') == std::string::npos)
-                            decl = "int " + l.name;
+                            decl.find('*') == std::string::npos) {
+                            bool hasMemberAccess = false;
+                            bool hasAddrTaken = false;
+                            bool hasScalarAssign = false;
+                            bool hasScalarUse = false;
+                            std::function<bool(const IRExpr*)> findMember =
+                                [&](const IRExpr *e) -> bool {
+                                    if (!e) return false;
+                                    if (e->op == IROp::Field && !e->kids.empty() &&
+                                        e->kids[0] && e->kids[0]->op == IROp::Var &&
+                                        e->kids[0]->name == l.name)
+                                        return true;
+                                    for (auto &k : e->kids)
+                                        if (findMember(k.get())) return true;
+                                    return false;
+                                };
+                            std::function<bool(const IRExpr*)> findAddrOf =
+                                [&](const IRExpr *e) -> bool {
+                                    if (!e) return false;
+                                    if (e->op == IROp::AddrOf && !e->kids.empty() &&
+                                        e->kids[0] && e->kids[0]->op == IROp::Var &&
+                                        e->kids[0]->name == l.name)
+                                        return true;
+                                    for (auto &k : e->kids)
+                                        if (findAddrOf(k.get())) return true;
+                                    return false;
+                                };
+                            std::function<bool(const IRExpr*)> findArith =
+                                [&](const IRExpr *e) -> bool {
+                                    if (!e) return false;
+                                    if ((e->op == IROp::Mul || e->op == IROp::SDiv ||
+                                         e->op == IROp::Shl || e->op == IROp::Shr ||
+                                         e->op == IROp::Sar) &&
+                                        !e->kids.empty()) {
+                                        for (auto &k : e->kids)
+                                            if (k && k->op == IROp::Var && k->name == l.name)
+                                                return true;
+                                    }
+                                    for (auto &k : e->kids)
+                                        if (findArith(k.get())) return true;
+                                    return false;
+                                };
+                            for (auto &bb2 : m_func.blocks) {
+                                for (auto &s2 : bb2.stmts) {
+                                    if (findMember(s2.expr.get()) || findMember(s2.addr.get()))
+                                        hasMemberAccess = true;
+                                    if (findAddrOf(s2.expr.get()) || findAddrOf(s2.addr.get()))
+                                        hasAddrTaken = true;
+                                    for (auto &a : s2.args) {
+                                        if (findMember(a.get())) hasMemberAccess = true;
+                                        if (findAddrOf(a.get())) hasAddrTaken = true;
+                                    }
+                                    if (s2.kind == IRStmtKind::VarSet && s2.destVar == l.name &&
+                                        s2.expr && s2.expr->op != IROp::Var &&
+                                        s2.expr->op != IROp::Load &&
+                                        s2.expr->op != IROp::AddrOf &&
+                                        s2.expr->op != IROp::Field &&
+                                        s2.expr->op != IROp::Call)
+                                        hasScalarAssign = true;
+                                    if (findArith(s2.expr.get()) || findArith(s2.addr.get()))
+                                        hasScalarUse = true;
+                                    for (auto &a : s2.args)
+                                        if (findArith(a.get())) hasScalarUse = true;
+                                }
+                            }
+                            // Keep struct if either member access or address-taken
+                            // (the latter means the local is a memory buffer that
+                            // a callee fills in, e.g. `PC_ReadTokenHandle(handle, &token)`).
+                            // Downgrade if scalar assignment or scalar arithmetic exists.
+                            bool keep = (hasMemberAccess || hasAddrTaken) &&
+                                        !hasScalarAssign && !hasScalarUse;
+                            if (!keep)
+                                decl = "int " + l.name;
+                        }
                         // Decay array local to pointer if it's *assigned* a pointer-arith
                         // expression (a walking pointer, not a real stack buffer).
                         // Pattern: `vec2_t v3; v3 = (hull + idx*8);` — v3 is used as a
@@ -4128,7 +4204,11 @@ private:
                         auto *rt = m_types.resolveType(rhsType);
                         if (rt && (rt->kind == StabsTypeKind::Struct ||
                                    rt->kind == StabsTypeKind::Union) &&
-                            rt->sizeBytes > 0 && rt->sizeBytes <= 4) {
+                            rt->sizeBytes > 0) {
+                            // 4-byte store: the original asm stored the first
+                            // word of the struct.  `*(int *)&val` reads the
+                            // first int from the struct's storage — same bytes
+                            // regardless of struct size.
                             val = "*(int *)(&" + val + ")";
                         }
                     }
