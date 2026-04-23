@@ -4045,6 +4045,38 @@ private:
                 std::string lhs = tempName(stmt.destTemp);
                 // Skip self-assignment (v = v) and trivial alias (v = param)
                 if (lhs == rhs) return;
+                // If RHS is a Var/Temp whose type is a struct/union but the LHS
+                // temp is treated as a scalar int, cast the RHS via *(int *)&val.
+                // The x86 ABI passes small unions in EAX as a 4-byte value; the
+                // C statement `int v = union_val` is rejected without a cast.
+                if (s_portMode && stmt.expr) {
+                    TypeRef rhsType = NullType;
+                    if (stmt.expr->op == IROp::Var && !stmt.expr->name.empty()) {
+                        rhsType = stmt.expr->typeRef;
+                        if (rhsType == NullType) {
+                            for (auto &p : m_func.params)
+                                if (p.name == stmt.expr->name && p.typeRef != NullType)
+                                    { rhsType = p.typeRef; break; }
+                            if (rhsType == NullType)
+                                for (auto &l : m_func.locals)
+                                    if (l.name == stmt.expr->name && l.typeRef != NullType)
+                                        { rhsType = l.typeRef; break; }
+                        }
+                    } else if (stmt.expr->op == IROp::Temp) {
+                        rhsType = m_func.tempType((int)stmt.expr->value);
+                    }
+                    if (rhsType != NullType) {
+                        auto *rt = m_types.resolveType(rhsType);
+                        if (rt && (rt->kind == StabsTypeKind::Struct ||
+                                   rt->kind == StabsTypeKind::Union) &&
+                            rt->sizeBytes > 0 && rt->sizeBytes <= 4 &&
+                            rhs.find('.') == std::string::npos &&
+                            rhs.find('[') == std::string::npos &&
+                            rhs.find('*') == std::string::npos) {
+                            rhs = "*(int *)(&" + rhs + ")";
+                        }
+                    }
+                }
                 out += pad(indent) + QString::fromStdString(lhs + " = " + rhs) + ";\n";
                 break;
             }

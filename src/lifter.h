@@ -2259,44 +2259,43 @@ private:
                     matched = false; break;
                 }
             }
-            // Special case: word 0 is a Var (or a Temp pointing to a Var)
-            // whose type matches the struct param.  This happens when a
-            // local struct (e.g. `struct netadr_t from`) is passed by
-            // name — the lifter captured "from" as the first word but
-            // the value really is the whole struct.  Pass the var directly.
+            // Special case: word 0 is a Var (or Temp coalesced to a param)
+            // whose type matches the struct param.  This handles forwarding
+            // a struct-by-value parameter (`from`) to another function
+            // expecting that struct.  Restricted to function PARAMETERS
+            // (not locals) because the emitter downgrades local
+            // by-value structs to `int` — passing the local would then
+            // fail with the same "int where struct expected" error.
             if (!matched && words >= 1 && m_func) {
                 auto *first = args[argIdx].get();
                 std::string varName;
-                TypeRef vtRef = NullType;
                 if (first && first->op == IROp::Var && !first->name.empty()) {
                     varName = first->name;
-                    vtRef = first->typeRef;
-                }
-                // Temp: look up its type from func.tempType(id).
-                else if (first && first->op == IROp::Temp) {
+                } else if (first && first->op == IROp::Temp) {
                     int tid = (int)first->value;
-                    vtRef = m_func->tempType(tid);
+                    auto vit = m_func->tempToVar.find(tid);
+                    if (vit != m_func->tempToVar.end()) {
+                        auto nit = m_func->varNames.find(vit->second);
+                        if (nit != m_func->varNames.end()) varName = nit->second;
+                    }
                 }
-                if (!varName.empty() && vtRef == NullType) {
+                if (!varName.empty()) {
+                    TypeRef vtRef = NullType;
                     for (auto &fp : m_func->params)
                         if (fp.name == varName && fp.typeRef != NullType)
                             { vtRef = fp.typeRef; break; }
-                    if (vtRef == NullType)
-                        for (auto &fl : m_func->locals)
-                            if (fl.name == varName && fl.typeRef != NullType)
-                                { vtRef = fl.typeRef; break; }
-                }
-                if (vtRef != NullType) {
-                    auto *vt = m_types.resolveType(vtRef);
-                    auto *pt = m_types.resolveType(p.typeRef);
-                    if (vt && pt &&
-                        (vt->kind == StabsTypeKind::Struct ||
-                         vt->kind == StabsTypeKind::Union) &&
-                        vt->kind == pt->kind &&
-                        !vt->name.empty() && vt->name == pt->name) {
-                        out.push_back(std::move(args[argIdx]));
-                        argIdx += (size_t)words;
-                        continue;
+                    if (vtRef != NullType) {
+                        auto *vt = m_types.resolveType(vtRef);
+                        auto *pt = m_types.resolveType(p.typeRef);
+                        if (vt && pt &&
+                            (vt->kind == StabsTypeKind::Struct ||
+                             vt->kind == StabsTypeKind::Union) &&
+                            vt->kind == pt->kind &&
+                            !vt->name.empty() && vt->name == pt->name) {
+                            out.push_back(std::move(args[argIdx]));
+                            argIdx += (size_t)words;
+                            continue;
+                        }
                     }
                 }
             }
