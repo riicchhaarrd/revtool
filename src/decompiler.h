@@ -2506,19 +2506,26 @@ private:
                                         if (findAddrOf(k.get())) return true;
                                     return false;
                                 };
-                            std::function<bool(const IRExpr*)> findArith =
-                                [&](const IRExpr *e) -> bool {
+                            // findArith: does any arith op (+,-,*,/,<<,>>) have
+                            // this local as a direct or transitive operand?
+                            // We're conservative — any usage in an arith
+                            // context means the local is being treated as a
+                            // scalar value, not a struct.
+                            std::function<bool(const IRExpr*, bool)> findArith =
+                                [&](const IRExpr *e, bool inArith) -> bool {
                                     if (!e) return false;
-                                    if ((e->op == IROp::Mul || e->op == IROp::SDiv ||
-                                         e->op == IROp::Shl || e->op == IROp::Shr ||
-                                         e->op == IROp::Sar) &&
-                                        !e->kids.empty()) {
-                                        for (auto &k : e->kids)
-                                            if (k && k->op == IROp::Var && k->name == l.name)
-                                                return true;
-                                    }
+                                    if (inArith && e->op == IROp::Var && e->name == l.name)
+                                        return true;
+                                    bool nowArith = inArith ||
+                                        e->op == IROp::Mul || e->op == IROp::SDiv ||
+                                        e->op == IROp::UDiv || e->op == IROp::SMod ||
+                                        e->op == IROp::UMod ||
+                                        e->op == IROp::Shl || e->op == IROp::Shr ||
+                                        e->op == IROp::Sar ||
+                                        e->op == IROp::And || e->op == IROp::Or ||
+                                        e->op == IROp::Xor;
                                     for (auto &k : e->kids)
-                                        if (findArith(k.get())) return true;
+                                        if (findArith(k.get(), nowArith)) return true;
                                     return false;
                                 };
                             for (auto &bb2 : m_func.blocks) {
@@ -2538,10 +2545,10 @@ private:
                                         s2.expr->op != IROp::Field &&
                                         s2.expr->op != IROp::Call)
                                         hasScalarAssign = true;
-                                    if (findArith(s2.expr.get()) || findArith(s2.addr.get()))
+                                    if (findArith(s2.expr.get(), false) || findArith(s2.addr.get(), false))
                                         hasScalarUse = true;
                                     for (auto &a : s2.args)
-                                        if (findArith(a.get())) hasScalarUse = true;
+                                        if (findArith(a.get(), false)) hasScalarUse = true;
                                 }
                             }
                             // Keep struct if either member access or address-taken
