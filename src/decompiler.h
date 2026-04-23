@@ -3106,7 +3106,28 @@ private:
                                     out += "    " + QString::fromStdString(emitExpr(stmt.expr.get())) + ";\n";
                                     out += "    return;\n";
                                 } else {
-                                    out += "    return " + QString::fromStdString(emitExpr(stmt.expr.get())) + ";\n";
+                                    std::string val = emitExpr(stmt.expr.get());
+                                    // Cast scalar return value to small struct/union return type
+                                    if (s_portMode && m_func.returnType != NullType &&
+                                        stmt.expr && (stmt.expr->op == IROp::Temp ||
+                                                      stmt.expr->op == IROp::Var ||
+                                                      stmt.expr->op == IROp::Const ||
+                                                      stmt.expr->op == IROp::Add ||
+                                                      stmt.expr->op == IROp::Sub ||
+                                                      stmt.expr->op == IROp::And ||
+                                                      stmt.expr->op == IROp::Or ||
+                                                      stmt.expr->op == IROp::Shl ||
+                                                      stmt.expr->op == IROp::Shr) &&
+                                        val.find('<') == std::string::npos) {
+                                        auto *rt = m_types.resolveType(m_func.returnType);
+                                        if (rt && (rt->kind == StabsTypeKind::Struct ||
+                                                   rt->kind == StabsTypeKind::Union) &&
+                                            rt->sizeBytes > 0 && rt->sizeBytes <= 4) {
+                                            std::string rtype = m_types.formatType(m_func.returnType);
+                                            val = "(*(" + rtype + " *)&(int){" + val + "})";
+                                        }
+                                    }
+                                    out += "    return " + QString::fromStdString(val) + ";\n";
                                 }
                             } else {
                                 out += "    return;\n";
@@ -4796,6 +4817,26 @@ private:
                         else
                             out += pad(indent) + "return;\n";
                     } else {
+                        // If the function returns a small (≤4 byte) struct/union
+                        // by value and the expression is a scalar primitive
+                        // (Temp/Var/Const), cast via a compound literal.  Skip
+                        // for Load/Field/Call results — if those are already
+                        // the right type, no cast is needed; if they're the
+                        // wrong type, the inner conversion would fail anyway.
+                        if (s_portMode && m_func.returnType != NullType &&
+                            stmt.expr && (stmt.expr->op == IROp::Temp ||
+                                          stmt.expr->op == IROp::Const) &&
+                            val.find('<') == std::string::npos &&
+                            val.find('.') == std::string::npos &&
+                            val.find('[') == std::string::npos) {
+                            auto *rt = m_types.resolveType(m_func.returnType);
+                            if (rt && (rt->kind == StabsTypeKind::Struct ||
+                                       rt->kind == StabsTypeKind::Union) &&
+                                rt->sizeBytes > 0 && rt->sizeBytes <= 4) {
+                                std::string rtype = m_types.formatType(m_func.returnType);
+                                val = "(*(" + rtype + " *)&(int){" + val + "})";
+                            }
+                        }
                         out += pad(indent) + "return " + QString::fromStdString(val) + ";\n";
                     }
                 } else {
