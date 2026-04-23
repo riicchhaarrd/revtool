@@ -6759,6 +6759,24 @@ private:
             }
 
             case IROp::Call: {
+                // Struct-by-value arg synthesized by the lifter: each kid is
+                // one 4-byte word of the struct.  Emit as a compound literal
+                // that packs the words into an int array and reinterprets it
+                // as the struct type.  The union variant is well-defined for
+                // type-punning; the cast variant is simpler and accepted by
+                // GCC with -fno-strict-aliasing (which the port uses).  Using
+                // the cast form keeps the output short.
+                if (e->name == "__pack_struct" && e->typeRef != NullType) {
+                    std::string typeStr = m_types.formatType(e->typeRef);
+                    std::string inner = "*(" + typeStr + " *)(int[]){";
+                    for (size_t i = 0; i < e->kids.size(); ++i) {
+                        if (i) inner += ", ";
+                        inner += emitExpr(e->kids[i].get());
+                    }
+                    inner += "}";
+                    result = "(" + inner + ")";
+                    break;
+                }
                 std::string funcName = cName(e->name);
                 // Function pointer table calls: fptable_ADDR_SCALE(index, args...)
                 // Emits: ((int(*)(void*))(((void**)TABLE)[index]))(args...)

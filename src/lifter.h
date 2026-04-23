@@ -2177,6 +2177,127 @@ private:
         return IRExpr::mkBinary(cmpOp, std::move(lhs), std::move(rhs));
     }
 
+    // ── Struct-by-value arg consolidation ───────────────────────────
+    // The lifter captures each pushed/copied word as one call arg.  For a
+    // callee whose prototype expects a struct-by-value >4 bytes, those
+    // N words need to collapse to a single arg.  When the ABI setup was
+    // a memcpy-from-pointer (each word is a Load from base + i*4 off the
+    // same base register), we can recover the source pointer and emit
+    // `*(struct X *)base` — byte-for-byte equivalent to the original
+    // sequence of pushes.  When the pattern isn't recognized (struct
+    // assembled from scratch), we leave the arg list alone; the call
+    // won't compile, but that's honest — we don't know the struct body.
+    static bool irExprEqual(const IRExpr *a, const IRExpr *b) {
+        if (!a && !b) return true;
+        if (!a || !b) return false;
+        if (a->op != b->op || a->value != b->value ||
+            a->name != b->name || a->castKind != b->castKind ||
+            a->kids.size() != b->kids.size())
+            return false;
+        for (size_t i = 0; i < a->kids.size(); ++i)
+            if (!irExprEqual(a->kids[i].get(), b->kids[i].get())) return false;
+        return true;
+    }
+
+    std::vector<std::unique_ptr<IRExpr>>
+    consolidateStructByValueArgs(const std::string &target,
+                                 std::vector<std::unique_ptr<IRExpr>> args) {
+        if (target.empty()) return args;
+        const StabsFunction *callee = m_mf.stabsFunctionByName(target);
+        if (!callee || callee->params.empty()) return args;
+
+        std::vector<std::unique_ptr<IRExpr>> out;
+        size_t argIdx = 0;
+        for (auto &p : callee->params) {
+            if (argIdx >= args.size()) break;
+            int pSize = 4;
+            bool isLargeStruct = false;
+            if (p.typeRef != NullType) {
+                auto *pt = m_types.resolveType(p.typeRef);
+                if (pt && pt->sizeBytes > 0) {
+                    pSize = pt->sizeBytes;
+                    isLargeStruct =
+                        (pt->kind == StabsTypeKind::Struct ||
+                         pt->kind == StabsTypeKind::Union) &&
+                        pSize > 4;
+                }
+            }
+            if (!isLargeStruct) {
+                out.push_back(std::move(args[argIdx++]));
+                continue;
+            }
+            int words = (pSize + 3) / 4;
+            if (argIdx + (size_t)words > args.size()) {
+                // Not enough words captured — leave remaining args alone.
+                while (argIdx < args.size()) out.push_back(std::move(args[argIdx++]));
+                break;
+            }
+            // Try to match the memcpy-from-pointer pattern: every word is
+            // Load(Add(base, startOff + i*4)) for the same base IRExpr.
+            IRExpr *base = nullptr;
+            int startOff = 0;
+            bool matched = true;
+            for (int i = 0; i < words; ++i) {
+                auto *w = args[argIdx + (size_t)i].get();
+                if (!w || w->op != IROp::Load || w->kids.empty() || !w->kids[0]) {
+                    matched = false; break;
+                }
+                auto *addr = w->kids[0].get();
+                IRExpr *thisBase = nullptr;
+                int thisOff = 0;
+                if (addr->op == IROp::Add && addr->kids.size() == 2 &&
+                    addr->kids[0] && addr->kids[1] && addr->kids[1]->isConst()) {
+                    thisBase = addr->kids[0].get();
+                    thisOff = (int)addr->kids[1]->value;
+                } else {
+                    thisBase = addr;
+                    thisOff = 0;
+                }
+                if (i == 0) { base = thisBase; startOff = thisOff; }
+                else if (!irExprEqual(base, thisBase) ||
+                         thisOff != startOff + i * 4) {
+                    matched = false; break;
+                }
+            }
+            if (matched && base) {
+                auto baseClone = base->clone();
+                std::unique_ptr<IRExpr> addr;
+                if (startOff != 0) {
+                    addr = IRExpr::mkBinary(IROp::Add,
+                                            std::move(baseClone),
+                                            IRExpr::mkConst((uint64_t)startOff));
+                } else {
+                    addr = std::move(baseClone);
+                }
+                auto structLoad = std::make_unique<IRExpr>();
+                structLoad->op = IROp::Load;
+                structLoad->typeRef = p.typeRef;
+                structLoad->loadSize = pSize;
+                structLoad->kids.push_back(std::move(addr));
+                out.push_back(std::move(structLoad));
+            } else {
+                // Pattern didn't match: the caller assembled the struct from
+                // individual word values (stack-materialized locals, register
+                // spills, etc.).  Synthesize an IR node that the emitter will
+                // expand into a compound-literal cast so all N words land in
+                // the call arg's stack slot byte-for-byte.  This is modelled
+                // as a Call to the synthetic name `__pack_struct` with the
+                // captured words as kids — the emitter recognizes it.
+                auto packExpr = std::make_unique<IRExpr>();
+                packExpr->op = IROp::Call;
+                packExpr->name = "__pack_struct";
+                packExpr->typeRef = p.typeRef;
+                packExpr->loadSize = pSize;
+                for (int i = 0; i < words; ++i)
+                    packExpr->kids.push_back(std::move(args[argIdx + (size_t)i]));
+                out.push_back(std::move(packExpr));
+            }
+            argIdx += (size_t)words;
+        }
+        while (argIdx < args.size()) out.push_back(std::move(args[argIdx++]));
+        return out;
+    }
+
     // ── Main instruction lifter ─────────────────────────────────────
     void liftInsn(cs_insn &in, BasicBlock &bb, IRFunc &func,
                   const std::map<uint32_t, int> &addrToBlock) {
@@ -2898,6 +3019,12 @@ private:
                 args.insert(args.begin(), std::move(m_fpTableIndex));
                 m_fpTableIndex.reset();
             }
+
+            // Collapse struct-by-value args that were captured word-by-word
+            // back into a single argument when the memcpy-from-pointer
+            // pattern is present.  Preserves semantics; otherwise leaves
+            // args untouched (compile fails honestly).
+            args = consolidateStructByValueArgs(target, std::move(args));
 
             auto callExpr = IRExpr::mkCall(target, std::move(args), retType);
 
