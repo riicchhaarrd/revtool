@@ -242,19 +242,33 @@ public:
             }
             if (fallback) return fallback;
         }
-        // Incomplete struct/union (name set but empty fields) — try to find
-        // a fully-defined sibling with the same name, analogous to ForwardRef.
-        // This matters when a typedef chain resolves to an "opaque" declaration
-        // (`struct X;`) before its body is parsed; without this, field-offset
-        // resolution (formatFieldAccess etc.) sees no fields and emits bare
-        // base names for what should be `field[i]` or `.subfield` access.
-        // NOTE: an earlier attempt fell back from an empty struct to a
-        // fully-defined sibling here (analogous to ForwardRef resolution).
-        // That over-matched in practice: unrelated structs sharing a CU-local
-        // name got swapped in and formatFieldAccess emitted wrong field
-        // names.  Kept out intentionally — any cross-CU completion should
-        // route through the ForwardRef path or require stronger identity
-        // evidence (sizeBytes + first-field match).
+        // CU type unification: when this is a complete Struct/Union with a
+        // real (non-anonymous) name, look across all CUs for a sibling with
+        // the SAME name AND the SAME size-in-bytes that has MORE fields.
+        // CU collisions cause the same struct to be parsed with truncated
+        // field lists in some CUs; the size-match check filters out
+        // accidental name overlaps from unrelated structs.
+        if ((t->kind == StabsTypeKind::Struct || t->kind == StabsTypeKind::Union) &&
+            !t->name.empty() && t->name.find("$_") != 0 &&
+            t->sizeBytes > 0) {
+            // Cache canonical lookups (mutable to keep resolveType const).
+            auto cit = m_canonicalCache.find(ref);
+            if (cit != m_canonicalCache.end()) return cit->second;
+            const StabsTypeInfo *best = t;
+            size_t bestFields = t->fields.size();
+            for (auto &[tref2, ti2] : m_types) {
+                if (tref2 == ref) continue;
+                if (ti2.kind != t->kind) continue;
+                if (ti2.name != t->name) continue;
+                if (ti2.sizeBytes != t->sizeBytes) continue;
+                if (ti2.fields.size() > bestFields) {
+                    best = &ti2;
+                    bestFields = ti2.fields.size();
+                }
+            }
+            m_canonicalCache[ref] = best;
+            return best;
+        }
         return t;
     }
 
@@ -880,6 +894,9 @@ public:
 private:
     std::map<TypeRef, StabsTypeInfo>         m_types;
     std::vector<StabsGlobalVar>              m_globals;
+    // Mutable cache for resolveType's CU-unification: maps a TypeRef to
+    // the fattest sibling-by-name (or itself if no fatter found).
+    mutable std::map<TypeRef, const StabsTypeInfo*> m_canonicalCache;
     std::unordered_map<uint32_t, std::vector<size_t>> m_globalByAddr;
     std::vector<std::string>                 m_includes;
     int                                      m_unit = 0;
