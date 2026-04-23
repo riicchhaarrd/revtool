@@ -430,7 +430,7 @@ public:
 
     // Format a field access with array subscript when the offset falls inside an array field.
     // Returns "fieldName" for exact match, "fieldName[i]" for array, "fieldName.subfield" for nested struct.
-    std::string formatFieldAccess(TypeRef ref, int byteOffset, bool debug = false) const {
+    std::string formatFieldAccess(TypeRef ref, int byteOffset, bool debug = false, bool scalarAccess = false) const {
         auto *t = resolveType(ref);
         if (!t || (t->kind != StabsTypeKind::Struct && t->kind != StabsTypeKind::Union))
             return "";
@@ -600,8 +600,19 @@ public:
                     }
                 }
                 // If field is an array, accessing at its base offset = first element
-                if (ft && ft->kind == StabsTypeKind::Array)
+                if (ft && ft->kind == StabsTypeKind::Array) {
+                    if (scalarAccess) {
+                        auto *elemT2 = resolveType(ft->targetType);
+                        if (elemT2 && (elemT2->kind == StabsTypeKind::Struct ||
+                                       elemT2->kind == StabsTypeKind::Union) &&
+                            elemT2->sizeBytes > 4) {
+                            std::string sub = formatFieldAccess(ft->targetType, 0, false, true);
+                            if (!sub.empty())
+                                return f.name + "[0]." + sub;
+                        }
+                    }
                     return f.name + "[0]";
+                }
                 // Opaque struct with known size — treat as int array [0]
                 if (ft && (ft->kind == StabsTypeKind::Struct ||
                            ft->kind == StabsTypeKind::Union) &&

@@ -5474,8 +5474,9 @@ private:
                         }
                     }
                     if (structRef != NullType) {
+                        bool isScalarLoad = (e->loadSize <= 4 || e->loadSize == 5);
                         std::string access =
-                            m_types.formatFieldAccess(structRef, (int)off);
+                            m_types.formatFieldAccess(structRef, (int)off, false, isScalarLoad);
                         if (!access.empty()) {
                             // Check if the resolved field makes sense for this access:
                             // 1. Subscript on non-array field is wrong
