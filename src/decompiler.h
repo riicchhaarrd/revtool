@@ -4825,10 +4825,12 @@ private:
                         // wrong type, the inner conversion would fail anyway.
                         if (s_portMode && m_func.returnType != NullType &&
                             stmt.expr && (stmt.expr->op == IROp::Temp ||
-                                          stmt.expr->op == IROp::Const) &&
+                                          stmt.expr->op == IROp::Const ||
+                                          stmt.expr->op == IROp::Var) &&
                             val.find('<') == std::string::npos &&
                             val.find('.') == std::string::npos &&
-                            val.find('[') == std::string::npos) {
+                            val.find('[') == std::string::npos &&
+                            val.find('-') == std::string::npos) {
                             auto *rt = m_types.resolveType(m_func.returnType);
                             if (rt && (rt->kind == StabsTypeKind::Struct ||
                                        rt->kind == StabsTypeKind::Union) &&
