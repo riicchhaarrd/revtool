@@ -6598,6 +6598,31 @@ private:
                                 if (l.typeRef != NullType && !l.name.empty() &&
                                     m_types.formatType(l.typeRef).find('*') != std::string::npos &&
                                     lhs.find(cName(l.name)) != std::string::npos) { lhsPtr = true; break; }
+                        // Also check the lhs IR expression: if it (or transitively
+                        // via tempDef) is a Temp whose type is a pointer, treat as
+                        // ptr.  Catches coalesced temps that hold a pointer in some
+                        // basic blocks but are used as a count here.
+                        if (!lhsPtr && e->kids[0]) {
+                            std::function<bool(const IRExpr*, int)> isPtrExpr =
+                                [&](const IRExpr *ex, int depth) -> bool {
+                                    if (!ex || depth > 4) return false;
+                                    if (ex->op == IROp::Temp) {
+                                        TypeRef tt = m_func.tempType((int)ex->value);
+                                        if (tt != NullType) {
+                                            std::string fmt = m_types.formatType(tt);
+                                            if (fmt.find('*') != std::string::npos)
+                                                return true;
+                                        }
+                                        auto dit = m_tempDef.find((int)ex->value);
+                                        if (dit != m_tempDef.end() && dit->second)
+                                            return isPtrExpr(dit->second, depth + 1);
+                                    }
+                                    if (ex->op == IROp::Cast && !ex->kids.empty())
+                                        return isPtrExpr(ex->kids[0].get(), depth + 1);
+                                    return false;
+                                };
+                            if (isPtrExpr(e->kids[0].get(), 0)) lhsPtr = true;
+                        }
                     }
                     if (lhsFloat)
                         result = "((unsigned)(int)(" + lhs + ") >> " + rhs + ")";
