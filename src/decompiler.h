@@ -2883,6 +2883,9 @@ private:
                 if ((itype == "float" || itype == "vec_t") && vit != m_func.tempToVar.end() &&
                     m_func.noFloatVars.count(vit->second))
                     itype = "int";
+                // void* can't be subscripted or used in pointer arithmetic in C
+                if (s_portMode && itype == "void *")
+                    itype = "int *";
                 out += "    " + QString::fromStdString(itype + " " + tname) + ";\n";
                 declared.insert(tname);
             }
@@ -3259,6 +3262,49 @@ private:
                 }
             }
             return "(char *)(" + base + ")";
+        }
+        // If the base is a struct/union-valued global or var, prepend `&` so it can
+        // participate in pointer arithmetic. Used by Store/Load emission paths that
+        // build `*(T *)((char *)BASE + N)` manually. Without this, GCC rejects
+        // `(char *)dxState` when dxState is `struct X` (not a pointer).
+        std::string structAddrOf(const std::string &base, const IRExpr *baseExpr) {
+            if (base.empty() || base[0] == '&' || base.find_first_of("()+-*/[] ") != std::string::npos)
+                return base;
+            // 1) Check IR annotation on Var expressions
+            if (baseExpr && baseExpr->op == IROp::Var && baseExpr->typeRef != NullType) {
+                auto *t = m_types.resolveType(baseExpr->typeRef);
+                if (t && (t->kind == StabsTypeKind::Struct || t->kind == StabsTypeKind::Union ||
+                          t->kind == StabsTypeKind::Array))
+                    return "&" + base;
+            }
+            // 2) Look up the name as a STABS global
+            auto *g = m_types.globalByName(base);
+            if (g && g->typeRef != NullType) {
+                auto *t = m_types.resolveType(g->typeRef);
+                if (t && (t->kind == StabsTypeKind::Struct || t->kind == StabsTypeKind::Union ||
+                          t->kind == StabsTypeKind::Array))
+                    return "&" + base;
+            }
+            // 3) Local variable or parameter that is declared as a by-value struct/array
+            for (auto &p : m_func.params) {
+                if (p.name == base && p.typeRef != NullType) {
+                    auto *t = m_types.resolveType(p.typeRef);
+                    if (t && (t->kind == StabsTypeKind::Struct || t->kind == StabsTypeKind::Union ||
+                              t->kind == StabsTypeKind::Array))
+                        return "&" + base;
+                    break;
+                }
+            }
+            for (auto &l : m_func.locals) {
+                if (l.name == base && l.typeRef != NullType) {
+                    auto *t = m_types.resolveType(l.typeRef);
+                    if (t && (t->kind == StabsTypeKind::Struct || t->kind == StabsTypeKind::Union ||
+                              t->kind == StabsTypeKind::Array))
+                        return "&" + base;
+                    break;
+                }
+            }
+            return base;
         }
         std::set<int>         m_inliningTemps;    // cycle guard for temp inlining in emitExpr
         bool                  m_emittedRetVoid = true; // true if function signature says void
@@ -3970,7 +4016,18 @@ private:
                 break;
             }
             case IRStmtKind::Store: {
-                std::string val = stmt.expr ? emitExpr(stmt.expr.get()) : "0";
+                // If RHS is a call to a void-returning function, emit the call as a
+                // separate statement and use 0 for the store — `*p = void_fn()` is
+                // invalid C.
+                if (stmt.expr && isVoidCallExpr(stmt.expr.get())) {
+                    out += pad(indent) + QString::fromStdString(emitExpr(stmt.expr.get()) + ";\n");
+                    // Fall through, emit the store with 0 instead of the call result.
+                }
+                std::string val;
+                if (stmt.expr && isVoidCallExpr(stmt.expr.get()))
+                    val = "0";
+                else
+                    val = stmt.expr ? emitExpr(stmt.expr.get()) : "0";
                 // When storing from an array variable, use [0] to get first element
                 if (stmt.expr && stmt.expr->op == IROp::Var && stmt.expr->typeRef != NullType) {
                     auto *vti = m_types.resolveType(stmt.expr->typeRef);
@@ -4016,7 +4073,7 @@ private:
                             }
                             if (!folded) {
                                 // Can't resolve field — use raw pointer arithmetic on original base
-                                std::string origStr = emitExpr(origBase);
+                                std::string origStr = structAddrOf(emitExpr(origBase), origBase);
                                 char buf[512];
                                 snprintf(buf, sizeof(buf), "*(%s *)((char *)%s + 0x%X) = %s",
                                          storeCast.c_str(), origStr.c_str(), (unsigned)combinedOff, val.c_str());
@@ -4056,7 +4113,7 @@ private:
                             }
                         }
                         if (fieldIsLargeStruct) {
-                            std::string baseStr = emitExpr(a->kids[0].get());
+                            std::string baseStr = structAddrOf(emitExpr(a->kids[0].get()), a->kids[0].get());
                             char buf[512];
                             snprintf(buf, sizeof(buf), "*(%s *)((char *)%s + 0x%X) = %s",
                                      storeCast.c_str(), baseStr.c_str(), (unsigned)(int)a->value, val.c_str());
@@ -4234,8 +4291,9 @@ private:
                                 portCastForArrow(fieldBase, a->kids[0].get(), stBaseType, access) + "->" + access + " = " + val) + ";\n";
                         } else {
                             char buf[512];
+                            std::string baseForCharPtr = structAddrOf(base, a->kids[0].get());
                             snprintf(buf, sizeof(buf), "*(%s *)((char *)%s + 0x%X) = %s",
-                                     storeCast.c_str(), base.c_str(), (unsigned)off, val.c_str());
+                                     storeCast.c_str(), baseForCharPtr.c_str(), (unsigned)off, val.c_str());
                             out += pad(indent) + QString::fromStdString(buf) + ";\n";
                         }
                     } // else (not foldedInterior)
@@ -6741,7 +6799,15 @@ private:
                     result = buf;
                     for (size_t i = 0; i < e->kids.size(); ++i) {
                         if (i) result += ", ";
-                        result += emitExpr(e->kids[i].get());
+                        std::string argExpr = emitExpr(e->kids[i].get());
+                        // The vtable function pointer is typed (void *, int, int…).
+                        // The decompiler often holds the `this` pointer in an int
+                        // temp; passing an int to `void *` is a GCC 14 error
+                        // (`int-conversion` became default-error), so cast it.
+                        if (i == 0 && argExpr.find("(void *)") == std::string::npos &&
+                            argExpr.find('&') != 0)
+                            argExpr = "(void *)" + argExpr;
+                        result += argExpr;
                     }
                     result += ")";
                 } else {
@@ -6844,7 +6910,8 @@ private:
                             arg = "*(float *)" + arg.substr(8);
                         }
                         // Cast scalar args to union/struct types when prototype expects them
-                        // (small unions/structs passed by value are int-sized on x86)
+                        // Small (≤4 byte) use `(struct X)&(int){arg}`; larger use
+                        // `*(struct X *)&arg` where arg is a dereferenceable address.
                         if (calledFn2 && i < calledFn2->params.size()) {
                             auto &par = calledFn2->params[i];
                             if (par.typeRef != NullType) {
@@ -6859,6 +6926,18 @@ private:
                                         arg.find(ptype) == std::string::npos &&
                                         arg.find("union ") != 0 && arg.find("struct ") != 0)
                                         arg = "*(" + ptype + " *)&(int){" + arg + "}";
+                                } else if (pt && pt->kind == StabsTypeKind::Struct &&
+                                           pt->sizeBytes > 4 &&
+                                           e->kids[i] && e->kids[i]->op == IROp::Temp &&
+                                           arg.find('&') == std::string::npos &&
+                                           arg.find('*') == std::string::npos) {
+                                    // Larger struct by value passed via a scalar temp:
+                                    // the temp holds an address-of / first scalar word,
+                                    // cast through its address to the struct type.
+                                    std::string ptype = m_types.formatType(par.typeRef);
+                                    if (ptype.find('<') == std::string::npos &&
+                                        ptype.find("std::") == std::string::npos)
+                                        arg = "*(" + ptype + " *)&" + arg;
                                 }
                             }
                         }
@@ -7319,7 +7398,10 @@ private:
                 m_addrDepth--;
                 if (addr.find("_p + ") != std::string::npos || addr.find("_p)") != std::string::npos)
                     return std::string("*(") + castType + " *)(" + addr + ")";
-                return std::string("*(") + castType + " *)((char *)" + addr + ")";
+                // For struct-valued global/var at the address, prepend `&` so
+                // `(char *)<struct>` compiles (GCC rejects casting a struct value).
+                std::string addrForCast = structAddrOf(addr, inner_e->kids[0].get());
+                return std::string("*(") + castType + " *)((char *)" + addrForCast + ")";
             }
             switch (e->castKind) {
             case CastKind::ZeroExt8:   return "(unsigned char)(" + inner + ")";
