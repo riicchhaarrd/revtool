@@ -1258,11 +1258,37 @@ public:
                 int eqPos = line.indexOf(" = &");
                 if (eqPos > 0) {
                     QString varName = line.left(eqPos).trimmed();
-                    // varName should be a simple identifier
                     bool ok = !varName.isEmpty();
                     // Skip if this variable is used with -> (struct pointer, not array)
                     if (ok && cleaned.contains(varName + "->")) ok = false;
                     for (auto c : varName) if (!c.isLetterOrNumber() && c != '_') { ok = false; break; }
+                    // Skip if declared as a struct/union pointer — subscripting
+                    // yields a struct, not a scalar element, and the
+                    // `*(float *)((char *)v + N)` form is the correct one.
+                    if (ok) {
+                        QString declPattern1 = "struct ";
+                        QString declPattern2 = "union ";
+                        // Look for lines matching `struct NAME *varName;` or
+                        // `union NAME *varName;` near the function header.
+                        int scanStart = 0;
+                        int bracePos = cleaned.indexOf('{');
+                        if (bracePos > 0) scanStart = bracePos;
+                        QString searchKey1 = "*" + varName + ";";
+                        int declLine = cleaned.indexOf(searchKey1, scanStart);
+                        // cleanupOutput runs before clang-format, so the
+                        // declaration may have a space between `*` and the
+                        // name.  Try both with and without the space.
+                        if (declLine < 0) {
+                            QString alt = "* " + varName + ";";
+                            declLine = cleaned.indexOf(alt, scanStart);
+                        }
+                        if (declLine > 0) {
+                            int lnStart = cleaned.lastIndexOf('\n', declLine) + 1;
+                            QString declStr = cleaned.mid(lnStart, declLine - lnStart);
+                            if (declStr.contains(declPattern1) || declStr.contains(declPattern2))
+                                ok = false;
+                        }
+                    }
                     if (ok) interiorPtrs[varName] = 4;
                 }
                 pos2 += 4;
