@@ -1270,7 +1270,9 @@ public:
             // Replace: *(TYPE *)((char *)NAME + 0xN) → NAME[N/elemSize]
             for (auto &[name, elemSz] : interiorPtrs) {
                 for (auto &castType : {"*(int *)((char *)", "*(unsigned short *)((char *)",
-                                        "*(unsigned char *)((char *)", "*(char *)((char *)"}) {
+                                        "*(unsigned char *)((char *)", "*(char *)((char *)",
+                                        "*(float *)((char *)", "*(short *)((char *)",
+                                        "*(double *)((char *)"}) {
                     QString prefix = QString(castType) + name + " + 0x";
                     int rp = 0;
                     while ((rp = cleaned.indexOf(prefix, rp)) != -1) {
