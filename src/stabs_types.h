@@ -317,11 +317,19 @@ public:
         case StabsTypeKind::LongDouble: return "long double";
 
         case StabsTypeKind::Pointer: {
+            auto *tgt = resolveType(t->targetType);
+            // Pointer to anonymous struct/union → void *
+            if (tgt && (tgt->kind == StabsTypeKind::Struct || tgt->kind == StabsTypeKind::Union) &&
+                tgt->name.find("$_") == 0)
+                return "void *";
             std::string inner = formatType(t->targetType, depth + 1);
             // Check if target is a function pointer
-            auto *tgt = getType(t->targetType);
-            if (tgt && tgt->kind == StabsTypeKind::Function)
+            auto *rawTgt = getType(t->targetType);
+            if (rawTgt && rawTgt->kind == StabsTypeKind::Function)
                 return inner; // already formatted as function pointer
+            // Fix array pointer syntax: "int[N] *" → "int *"
+            if (inner.find('[') != std::string::npos)
+                inner = inner.substr(0, inner.find('['));
             return inner + " *";
         }
         case StabsTypeKind::Reference: return formatType(t->targetType, depth + 1) + " *"; // C++ ref → C ptr
@@ -855,6 +863,7 @@ public:
             if (f.name.find("(") != std::string::npos) continue;
             if (f.name[0] == '!' || f.name[0] == '#' || f.name[0] == '$') continue;
             if (f.name[0] == '~') continue; // destructor
+            if (f.name.find("_vptr$") != std::string::npos) continue;
             if (f.name.find("operator") == 0) continue; // operator overloads
             // Skip names with C++ template or reference artifacts
             if (f.name.find("<") != std::string::npos) continue;
@@ -866,10 +875,48 @@ public:
             if (f.bitSize == 0 && f.bitOffset == 0) continue;
             // Skip C++ vtable pointers (_vptr$ClassName)
             if (f.name.find("_vptr$") != std::string::npos) continue;
-            std::string fdecl = formatDecl(f.typeRef, f.name);
-            // Skip fields with invalid C syntax (function pointer pointers etc.)
-            if (fdecl.find("(*)()") != std::string::npos) continue;
-            out += "    " + fdecl + ";\n";
+            // Handle anonymous struct/union fields (names like $_NNNN)
+            auto *ft = resolveType(f.typeRef);
+            bool isAnon = false;
+            if (ft && (ft->kind == StabsTypeKind::Struct || ft->kind == StabsTypeKind::Union))
+                isAnon = ft->name.find("$_") == 0;
+            // Also check the unresolved type name
+            if (!isAnon) {
+                auto *rawT = getType(f.typeRef);
+                if (rawT && rawT->kind == StabsTypeKind::ForwardRef && rawT->forwardTag.find("$_") == 0)
+                    isAnon = true;
+                if (rawT && (rawT->kind == StabsTypeKind::Struct || rawT->kind == StabsTypeKind::Union) &&
+                    rawT->name.find("$_") == 0)
+                    isAnon = true;
+            }
+            if (isAnon && ft && !ft->fields.empty() && ft->sizeBytes > 0) {
+                // Inline the anonymous struct body
+                std::string kw2 = (ft->kind == StabsTypeKind::Union) ? "union" : "struct";
+                out += "    " + kw2 + " {\n";
+                for (auto &sf : ft->fields) {
+                    if (sf.name.empty() || sf.name[0] == '/' || sf.name[0] == '!') continue;
+                    if (sf.name.find("::") != std::string::npos) continue;
+                    if (sf.bitSize == 0 && sf.bitOffset == 0) continue;
+                    std::string sfdecl = formatDecl(sf.typeRef, sf.name);
+                    if (sfdecl.find("(*)()") != std::string::npos) continue;
+                    out += "        " + sfdecl + ";\n";
+                }
+                out += "    } " + f.name + ";\n";
+            } else if (isAnon) {
+                // Anonymous struct with unknown body — emit as char[size] padding
+                int sz = 4;
+                if (ft && ft->sizeBytes > 0) sz = ft->sizeBytes;
+                else {
+                    int fBitSz = fieldBitSize(f);
+                    if (fBitSz > 0) sz = fBitSz / 8;
+                }
+                out += "    char " + f.name + "[" + std::to_string(sz) + "];\n";
+            } else {
+                std::string fdecl = formatDecl(f.typeRef, f.name);
+                // Skip fields with invalid C syntax (function pointer pointers etc.)
+                if (fdecl.find("(*)()") != std::string::npos) continue;
+                out += "    " + fdecl + ";\n";
+            }
         }
         out += "}";
         return out;
