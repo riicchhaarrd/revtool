@@ -122,23 +122,39 @@ public:
             emitTypeDefs(out, types, usedTypes);
         }
 
-        // Emit global/static variables and extern declarations (skip in port mode)
+        // Emit global/static variables and extern declarations.
         std::set<std::string> emittedGlobals;
         // Emit globals and build cross-file global map
         std::map<std::string, const StabsGlobalVar*> globalByName;
         bool anyGlobals = false;
-        if (!s_portMode) {
-            for (auto &g : types.globals()) {
-                if (g.address == 0) continue;
-                if (g.sourceFileIdx != srcIdx) continue;
-                if (emittedGlobals.count(g.name)) continue;
-                emittedGlobals.insert(g.name);
-                out += QString::fromStdString(
-                    (g.isStatic ? "static " : "") + types.formatDecl(g.typeRef, g.name)) + ";\n";
-                anyGlobals = true;
+        for (auto &g : types.globals()) {
+            if (g.address == 0) continue;
+            if (g.sourceFileIdx != srcIdx) continue;
+            if (emittedGlobals.count(g.name)) continue;
+            if (s_portMode && !g.isStatic) continue;
+            if (s_portMode) {
+                auto *gt = types.resolveType(g.typeRef);
+                if (!gt || (gt->kind != StabsTypeKind::Struct && gt->kind != StabsTypeKind::Union) ||
+                    gt->name.find("$_") != 0)
+                    continue;
             }
-            if (anyGlobals) out += "\n";
+            emittedGlobals.insert(g.name);
+
+            std::string decl = types.formatDecl(g.typeRef, g.name);
+            if (decl.find('<') != std::string::npos ||
+                decl.find("(*)()") != std::string::npos ||
+                decl.find("this") != std::string::npos)
+                continue;
+
+            if (s_portMode) {
+                std::set<TypeRef> emittedAnon;
+                emitAnonymousTypeDefs(out, types, g.typeRef, emittedAnon);
+            }
+            out += QString::fromStdString(
+                (g.isStatic ? "static " : "") + decl) + ";\n";
+            anyGlobals = true;
         }
+        if (anyGlobals) out += "\n";
         // Build cross-file global map (for extern scanning in non-port mode)
         if (!s_portMode) {
             for (auto &g : types.globals()) {
@@ -2249,6 +2265,41 @@ private:
             emitTypeDefsRecursive(out, types, ref, emitted, emittedNames);
         }
         if (!emitted.empty()) out += "\n";
+    }
+
+    static void emitAnonymousTypeDefs(QString &out, const StabsTypeTable &types,
+                                      TypeRef ref, std::set<TypeRef> &emitted) {
+        if (ref == NullType || emitted.count(ref)) return;
+        emitted.insert(ref);
+
+        auto *t = types.getType(ref);
+        if (!t) return;
+        if (t->kind == StabsTypeKind::Typedef || t->kind == StabsTypeKind::Const ||
+            t->kind == StabsTypeKind::Volatile || t->kind == StabsTypeKind::Array ||
+            t->kind == StabsTypeKind::Pointer || t->kind == StabsTypeKind::Reference) {
+            if (t->targetType != NullType)
+                emitAnonymousTypeDefs(out, types, t->targetType, emitted);
+            return;
+        }
+        if ((t->kind != StabsTypeKind::Struct && t->kind != StabsTypeKind::Union) ||
+            t->name.find("$_") != 0 || t->fields.empty())
+            return;
+
+        for (auto &f : t->fields)
+            emitAnonymousTypeDefs(out, types, f.typeRef, emitted);
+
+        std::string kw = (t->kind == StabsTypeKind::Union) ? "union" : "struct";
+        out += QString::fromStdString(kw + " " + t->name + " {\n");
+        for (auto &f : t->fields) {
+            if (f.name.empty()) continue;
+            std::string decl = types.formatDecl(f.typeRef, f.name);
+            if (decl.find('<') != std::string::npos ||
+                decl.find("(*)()") != std::string::npos ||
+                decl.find("this") != std::string::npos)
+                continue;
+            out += "    " + QString::fromStdString(decl) + ";\n";
+        }
+        out += "};\n\n";
     }
 
     static void emitTypeDefsRecursive(QString &out, const StabsTypeTable &types,
