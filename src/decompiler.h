@@ -2465,8 +2465,31 @@ private:
             for (auto &p : m_func.params) paramNames.insert(p.name);
 
             std::set<std::string> declared;
+            // Pre-scan: which locals are actually referenced in the IR?
+            // Remove dead declarations — locals that STABS knows about but
+            // the decompiler's emission never uses (variable got inlined or
+            // optimized away in lifting).  Standard Ghidra-style cleanup.
+            std::set<std::string> usedLocalNames;
+            if (s_portMode) {
+                std::function<void(const IRExpr*)> scanVars = [&](const IRExpr *e) {
+                    if (!e) return;
+                    if (e->op == IROp::Var && !e->name.empty())
+                        usedLocalNames.insert(e->name);
+                    for (auto &k : e->kids) scanVars(k.get());
+                };
+                for (auto &bb : m_func.blocks)
+                    for (auto &stmt : bb.stmts) {
+                        if (stmt.kind == IRStmtKind::VarSet && !stmt.destVar.empty())
+                            usedLocalNames.insert(stmt.destVar);
+                        scanVars(stmt.expr.get());
+                        scanVars(stmt.addr.get());
+                        for (auto &a : stmt.args) scanVars(a.get());
+                    }
+            }
             for (auto &l : m_func.locals) {
                 if (l.name.empty() || declared.count(l.name) || paramNames.count(l.name)) continue;
+                // Skip unused locals in port mode — dead declaration.
+                if (s_portMode && !usedLocalNames.count(l.name)) continue;
                 declared.insert(l.name);
                 std::string decl;
                 if (l.typeRef != NullType) {
