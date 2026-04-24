@@ -6605,7 +6605,7 @@ private:
                         if (!lhsPtr && e->kids[0]) {
                             std::function<bool(const IRExpr*, int)> isPtrExpr =
                                 [&](const IRExpr *ex, int depth) -> bool {
-                                    if (!ex || depth > 4) return false;
+                                    if (!ex || depth > 5) return false;
                                     if (ex->op == IROp::Temp) {
                                         TypeRef tt = m_func.tempType((int)ex->value);
                                         if (tt != NullType) {
@@ -6617,8 +6617,23 @@ private:
                                         if (dit != m_tempDef.end() && dit->second)
                                             return isPtrExpr(dit->second, depth + 1);
                                     }
-                                    if (ex->op == IROp::Cast && !ex->kids.empty())
-                                        return isPtrExpr(ex->kids[0].get(), depth + 1);
+                                    if (ex->op == IROp::Var) {
+                                        for (auto &p : m_func.params)
+                                            if (p.name == ex->name && p.typeRef != NullType &&
+                                                m_types.formatType(p.typeRef).find('*') != std::string::npos)
+                                                return true;
+                                        for (auto &l : m_func.locals)
+                                            if (l.name == ex->name && l.typeRef != NullType &&
+                                                m_types.formatType(l.typeRef).find('*') != std::string::npos)
+                                                return true;
+                                    }
+                                    // Walk transitive: Cast, Add/Sub (any operand may be the ptr).
+                                    if (ex->op == IROp::Cast || ex->op == IROp::Add ||
+                                        ex->op == IROp::Sub || ex->op == IROp::Shr ||
+                                        ex->op == IROp::Shl || ex->op == IROp::Sar) {
+                                        for (auto &k : ex->kids)
+                                            if (k && isPtrExpr(k.get(), depth + 1)) return true;
+                                    }
                                     return false;
                                 };
                             if (isPtrExpr(e->kids[0].get(), 0)) lhsPtr = true;
