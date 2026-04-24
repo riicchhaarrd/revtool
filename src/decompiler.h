@@ -3052,7 +3052,10 @@ private:
                             }
                         }
                         // Skip init when this temp is used as a subscript base
-                        // (Store addr or Load addr = Add(Temp(id), Const)).
+                        // — Load/Store addr containing Add(Temp(id), anything).
+                        // preprocess.py's fix_int_subscripted only matches
+                        // `int vN;` (no initializer), so adding `= 0` would
+                        // break subscript expressions.
                         bool usedAsSubscript = false;
                         auto isTempBase = [&](const IRExpr *e) -> bool {
                             if (!e) return false;
@@ -3061,6 +3064,10 @@ private:
                                     if (e->kids[s] && e->kids[s]->op == IROp::Temp &&
                                         e->kids[s]->value == id) return true;
                             }
+                            // Also direct `Temp[idx]` — Load/Store where the
+                            // addr IS the Add containing the temp.  Already
+                            // covered above, but also catch raw uses like
+                            // `(Temp + something) * scale`.
                             return false;
                         };
                         std::function<bool(const IRExpr*)> findSub =
@@ -3116,17 +3123,52 @@ private:
                 // void* can't be subscripted or used in pointer arithmetic in C
                 if (s_portMode && itype == "void *")
                     itype = "int *";
-                // Init conditionally-assigned temps to 0 (see earlier path).
+                // Init conditionally-assigned temps to 0 — same logic as
+                // path P1 but for temps without tempType entries.  Also skip
+                // subscript-used temps (preprocess.py's fix_int_subscripted
+                // requires the bare `int vN;` shape).
                 std::string suffix2 = ";\n";
                 if (s_portMode && !itype.empty() &&
                     itype.find("struct ") != 0 && itype.find("union ") != 0 &&
-                    itype.find("[") == std::string::npos) {
+                    itype.find("[") == std::string::npos &&
+                    itype.find('*') == std::string::npos) {
                     bool assignedInEntry = false;
                     if (!m_func.blocks.empty())
                         for (auto &stmt : m_func.blocks[0].stmts)
                             if (stmt.kind == IRStmtKind::Assign && stmt.destTemp == id)
                                 { assignedInEntry = true; break; }
-                    if (!assignedInEntry)
+                    bool usedAsSubscript = false;
+                    auto isTempBase2 = [&](const IRExpr *e) -> bool {
+                        if (!e) return false;
+                        if (e->op == IROp::Add && e->kids.size() == 2) {
+                            for (int s = 0; s < 2; ++s)
+                                if (e->kids[s] && e->kids[s]->op == IROp::Temp &&
+                                    e->kids[s]->value == id) return true;
+                        }
+                        return false;
+                    };
+                    std::function<bool(const IRExpr*)> findSub2 =
+                        [&](const IRExpr *e) -> bool {
+                            if (!e) return false;
+                            if (isTempBase2(e)) return true;
+                            if (e->op == IROp::Load && !e->kids.empty() &&
+                                isTempBase2(e->kids[0].get())) return true;
+                            for (auto &k : e->kids)
+                                if (findSub2(k.get())) return true;
+                            return false;
+                        };
+                    for (auto &bb : m_func.blocks) {
+                        if (usedAsSubscript) break;
+                        for (auto &stmt : bb.stmts) {
+                            if (findSub2(stmt.expr.get()) || findSub2(stmt.addr.get()))
+                                { usedAsSubscript = true; break; }
+                            if (stmt.addr && isTempBase2(stmt.addr.get()))
+                                { usedAsSubscript = true; break; }
+                            for (auto &a : stmt.args)
+                                if (findSub2(a.get())) { usedAsSubscript = true; break; }
+                        }
+                    }
+                    if (!assignedInEntry && !usedAsSubscript)
                         suffix2 = (itype == "float" || itype == "double" || itype == "vec_t")
                                   ? " = 0.0f;\n" : " = 0;\n";
                 }
@@ -3195,13 +3237,44 @@ private:
                 std::string sfx3 = ";\n";
                 if (s_portMode && !itype.empty() &&
                     itype.find("struct ") != 0 && itype.find("union ") != 0 &&
-                    itype.find("[") == std::string::npos) {
+                    itype.find("[") == std::string::npos &&
+                    itype.find('*') == std::string::npos) {
                     bool assignedInEntry = false;
                     if (!m_func.blocks.empty())
                         for (auto &stmt : m_func.blocks[0].stmts)
                             if (stmt.kind == IRStmtKind::Assign && stmt.destTemp == id)
                                 { assignedInEntry = true; break; }
-                    if (!assignedInEntry)
+                    bool usedAsSubscript3 = false;
+                    auto isTB3 = [&](const IRExpr *e) -> bool {
+                        if (!e) return false;
+                        if (e->op == IROp::Add && e->kids.size() == 2)
+                            for (int s = 0; s < 2; ++s)
+                                if (e->kids[s] && e->kids[s]->op == IROp::Temp &&
+                                    e->kids[s]->value == id) return true;
+                        return false;
+                    };
+                    std::function<bool(const IRExpr*)> findSub3 =
+                        [&](const IRExpr *e) -> bool {
+                            if (!e) return false;
+                            if (isTB3(e)) return true;
+                            if (e->op == IROp::Load && !e->kids.empty() &&
+                                isTB3(e->kids[0].get())) return true;
+                            for (auto &k : e->kids)
+                                if (findSub3(k.get())) return true;
+                            return false;
+                        };
+                    for (auto &bb : m_func.blocks) {
+                        if (usedAsSubscript3) break;
+                        for (auto &stmt : bb.stmts) {
+                            if (findSub3(stmt.expr.get()) || findSub3(stmt.addr.get()))
+                                { usedAsSubscript3 = true; break; }
+                            if (stmt.addr && isTB3(stmt.addr.get()))
+                                { usedAsSubscript3 = true; break; }
+                            for (auto &a : stmt.args)
+                                if (findSub3(a.get())) { usedAsSubscript3 = true; break; }
+                        }
+                    }
+                    if (!assignedInEntry && !usedAsSubscript3)
                         sfx3 = (itype == "float" || itype == "double" || itype == "vec_t")
                                ? " = 0.0f;\n" : " = 0;\n";
                 }
