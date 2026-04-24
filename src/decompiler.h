@@ -3781,13 +3781,12 @@ private:
                 for (int i = node->stmtStart; i < node->stmtEnd && i < (int)bb.stmts.size(); ++i) {
                     if (m_suppressedStmts.count({node->bbId, i})) continue;
                     auto k = bb.stmts[i].kind;
-                    // Skip terminal branch/jump, phi nodes, and suppressed assigns
                     if (k == IRStmtKind::Branch || k == IRStmtKind::Jump ||
                         k == IRStmtKind::Label || k == IRStmtKind::Phi)
                         continue;
                     if (k == IRStmtKind::Assign && m_tempUseCount[bb.stmts[i].destTemp] <= 1 &&
                         !(bb.stmts[i].expr && bb.stmts[i].expr->op == IROp::Call))
-                        continue; // would be inlined, not emitted
+                        continue;
                     return true;
                 }
                 return false;
@@ -3797,7 +3796,34 @@ private:
                     if (nodeHasContent(c.get())) return true;
                 return false;
             }
-            // All other kinds (If, While, Goto, Return, etc.) produce content
+            if (node->kind == StructKind::If) {
+                // An If is "empty" if both its body and else are empty.
+                bool bodyHas = false;
+                for (auto &c : node->children)
+                    if (nodeHasContent(c.get())) { bodyHas = true; break; }
+                bool elseHas = node->elseNode && nodeHasContent(node->elseNode.get());
+                return bodyHas || elseHas;
+            }
+            if (node->kind == StructKind::Goto) {
+                // Goto to an empty target block emits nothing.  Mirror the
+                // emit-time "skip goto to empty block" check so the parent
+                // If's nodeHasContent doesn't see this Goto as content.
+                int gt = node->gotoTarget;
+                if (gt < 0 || gt >= (int)m_func.blocks.size()) return false;
+                auto &tbb = m_func.blocks[gt];
+                for (auto &s : tbb.stmts) {
+                    if (s.kind == IRStmtKind::Return) return true;
+                    if (s.kind == IRStmtKind::Jump || s.kind == IRStmtKind::Branch ||
+                        s.kind == IRStmtKind::Label || s.kind == IRStmtKind::Phi)
+                        continue;
+                    if (s.kind == IRStmtKind::Assign && m_tempUseCount[s.destTemp] <= 1 &&
+                        !(s.expr && s.expr->op == IROp::Call))
+                        continue;
+                    return true;
+                }
+                return false;
+            }
+            // All other kinds (While, Return, Break, Continue) produce content
             return true;
         }
         bool nodeHasContent(const std::vector<std::unique_ptr<StructNode>> &children) {
