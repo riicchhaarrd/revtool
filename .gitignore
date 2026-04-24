@@ -1,0 +1,23 @@
+# Generated decompiler and port build output
+*.o
+*.o.d
+core.*
+
+build/
+build_decomp/
+
+port/src/
+port/build*/
+port/CMakeCache.txt
+port/CMakeFiles/
+port/Makefile
+port/cmake_install.cmake
+port/.qt/
+port/decomp
+port/dis
+port/decomp_autogen/
+port/dis_autogen/
+port/platform_stubs/auto_stubs.c
+
+__pycache__/
+port/__pycache__/
