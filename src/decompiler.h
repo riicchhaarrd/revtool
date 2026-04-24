@@ -1916,17 +1916,41 @@ public:
             for (int i = 0; i < pass2.size(); ++i) {
                 QString t = pass2[i].trimmed();
                 if (t.contains('{') && bracePos < 0) { bracePos = i; continue; }
-                // Collect declarations (TYPE NAME; lines, not statements)
-                if (bracePos >= 0 && t.endsWith(';') && !t.contains('=') && !t.contains('(') &&
-                    !t.startsWith("goto ") && !t.startsWith("return ") && !t.startsWith("break") &&
-                    !t.startsWith("continue") && !t.startsWith("if ") && !t.startsWith("while ") &&
-                    !t.startsWith("for ") && !t.startsWith("switch ") && !t.startsWith("case ")) {
-                    int semi = t.lastIndexOf(';');
+                // Collect declarations.  `TYPE NAME;` OR `TYPE NAME = 0;` /
+                // `TYPE NAME = 0.0f;` — the uninit-temp initializer adds a
+                // simple numeric = 0 that still represents a declaration.
+                // Exclude statements (goto/return/if/etc.) and function calls.
+                bool looksLikeDecl =
+                    bracePos >= 0 && t.endsWith(';') &&
+                    !t.contains('(') && !t.contains('{') && !t.contains('}') &&
+                    !t.startsWith("goto ") && !t.startsWith("return ") &&
+                    !t.startsWith("break") && !t.startsWith("continue") &&
+                    !t.startsWith("if ") && !t.startsWith("while ") &&
+                    !t.startsWith("for ") && !t.startsWith("switch ") &&
+                    !t.startsWith("case ");
+                // If there's `=`, accept only simple-zero inits: `= 0;`, `= 0.0f;`.
+                if (looksLikeDecl && t.contains('=')) {
+                    QString trimRhs = t.mid(t.indexOf('=') + 1).trimmed();
+                    if (trimRhs.endsWith(';')) trimRhs.chop(1);
+                    trimRhs = trimRhs.trimmed();
+                    if (trimRhs != "0" && trimRhs != "0.0f" && trimRhs != "0.0" &&
+                        trimRhs != "NULL")
+                        looksLikeDecl = false;
+                }
+                if (looksLikeDecl) {
+                    // Strip trailing `= ...;` if present to find the name.
+                    QString stripped = t;
+                    int eq = stripped.indexOf('=');
+                    if (eq >= 0) {
+                        stripped = stripped.left(eq).trimmed();
+                        if (!stripped.endsWith(';')) stripped += ";";
+                    }
+                    int semi = stripped.lastIndexOf(';');
                     int ne = semi;
-                    while (ne > 0 && t[ne-1] == ' ') ne--;
+                    while (ne > 0 && stripped[ne-1] == ' ') ne--;
                     int ns = ne - 1;
-                    while (ns > 0 && (t[ns-1].isLetterOrNumber() || t[ns-1] == '_')) ns--;
-                    QString name = t.mid(ns, ne - ns).trimmed();
+                    while (ns > 0 && (stripped[ns-1].isLetterOrNumber() || stripped[ns-1] == '_')) ns--;
+                    QString name = stripped.mid(ns, ne - ns).trimmed();
                     if (name.startsWith('*')) name = name.mid(1);
                     if (!name.isEmpty()) declared.insert(name);
                 }
@@ -2991,7 +3015,84 @@ private:
                     // Final safety: void* can't be subscripted — force to int* in port mode
                     if (s_portMode && ttype == "void *")
                         ttype = "int *";
-                    out += "    " + QString::fromStdString(ttype + " " + tname) + ";\n";
+                    // Initialize conditionally-assigned temps to 0 to avoid UB
+                    // from uninit reads.  A temp is "conditionally assigned" when
+                    // no Assign to it exists in the function's entry basic block
+                    // (bb 0) — its value depends on which branch taken.  GCC's
+                    // optimizer elides the init store when the temp is assigned
+                    // before first read on all paths.
+                    std::string suffix = ";\n";
+                    // Only init non-struct, non-array temps.  Also skip temps
+                    // used in subscript context (`temp[N]`) — preprocess.py's
+                    // fix_int_subscripted expects the bare `int vN;` shape to
+                    // apply its int*-cast, and an `= 0` initializer breaks
+                    // the regex match.
+                    // Resolve the underlying type through typedefs to detect
+                    // struct/union types that appear as typedef names (dvar_t,
+                    // etc.) — those can't be zero-initialized with `= 0`.
+                    bool ttypeIsAggregate = false;
+                    if (resolvedType != NullType) {
+                        auto *rr = m_types.resolveType(resolvedType);
+                        if (rr && (rr->kind == StabsTypeKind::Struct ||
+                                   rr->kind == StabsTypeKind::Union ||
+                                   rr->kind == StabsTypeKind::Array))
+                            ttypeIsAggregate = true;
+                    }
+                    if (s_portMode && !ttype.empty() && !ttypeIsAggregate &&
+                        ttype.find("struct ") != 0 && ttype.find("union ") != 0 &&
+                        ttype.find("[") == std::string::npos &&
+                        ttype.find('*') == std::string::npos /* skip pointers */) {
+                        bool assignedInEntry = false;
+                        if (!m_func.blocks.empty()) {
+                            for (auto &stmt : m_func.blocks[0].stmts) {
+                                if (stmt.kind == IRStmtKind::Assign &&
+                                    stmt.destTemp == id) { assignedInEntry = true; break; }
+                            }
+                        }
+                        // Skip init when this temp is used as a subscript base
+                        // (Store addr or Load addr = Add(Temp(id), Const)).
+                        bool usedAsSubscript = false;
+                        auto isTempBase = [&](const IRExpr *e) -> bool {
+                            if (!e) return false;
+                            if (e->op == IROp::Add && e->kids.size() == 2) {
+                                for (int s = 0; s < 2; ++s)
+                                    if (e->kids[s] && e->kids[s]->op == IROp::Temp &&
+                                        e->kids[s]->value == id) return true;
+                            }
+                            return false;
+                        };
+                        std::function<bool(const IRExpr*)> findSub =
+                            [&](const IRExpr *e) -> bool {
+                                if (!e) return false;
+                                if (isTempBase(e)) return true;
+                                if (e->op == IROp::Load && !e->kids.empty() &&
+                                    isTempBase(e->kids[0].get())) return true;
+                                for (auto &k : e->kids)
+                                    if (findSub(k.get())) return true;
+                                return false;
+                            };
+                        for (auto &bb : m_func.blocks) {
+                            if (usedAsSubscript) break;
+                            for (auto &stmt : bb.stmts) {
+                                if (findSub(stmt.expr.get()) || findSub(stmt.addr.get()))
+                                    { usedAsSubscript = true; break; }
+                                if (stmt.addr && isTempBase(stmt.addr.get()))
+                                    { usedAsSubscript = true; break; }
+                                for (auto &a : stmt.args)
+                                    if (findSub(a.get())) { usedAsSubscript = true; break; }
+                            }
+                        }
+                        if (!assignedInEntry && !usedAsSubscript) {
+                            // Init expression depends on type.
+                            if (ttype == "float" || ttype == "double" ||
+                                ttype == "vec_t")
+                                suffix = " = 0.0f;\n";
+                            else
+                                suffix = " = 0;\n";
+                        }
+                    }
+                    out += "    " + QString::fromStdString(ttype + " " + tname) +
+                           QString::fromStdString(suffix);
                     declared.insert(tname);
                 }
             }
@@ -3013,7 +3114,22 @@ private:
                 // void* can't be subscripted or used in pointer arithmetic in C
                 if (s_portMode && itype == "void *")
                     itype = "int *";
-                out += "    " + QString::fromStdString(itype + " " + tname) + ";\n";
+                // Init conditionally-assigned temps to 0 (see earlier path).
+                std::string suffix2 = ";\n";
+                if (s_portMode && !itype.empty() &&
+                    itype.find("struct ") != 0 && itype.find("union ") != 0 &&
+                    itype.find("[") == std::string::npos) {
+                    bool assignedInEntry = false;
+                    if (!m_func.blocks.empty())
+                        for (auto &stmt : m_func.blocks[0].stmts)
+                            if (stmt.kind == IRStmtKind::Assign && stmt.destTemp == id)
+                                { assignedInEntry = true; break; }
+                    if (!assignedInEntry)
+                        suffix2 = (itype == "float" || itype == "double" || itype == "vec_t")
+                                  ? " = 0.0f;\n" : " = 0;\n";
+                }
+                out += "    " + QString::fromStdString(itype + " " + tname) +
+                       QString::fromStdString(suffix2);
                 declared.insert(tname);
             }
             // Declare synthetic stack variables (var_XX, arg_XX) not covered by STABS
@@ -3073,7 +3189,22 @@ private:
                 // void* can't be subscripted/arithmetic in C — type-tag only change
                 if (s_portMode && itype == "void *")
                     itype = "int *";
-                out += "    " + QString::fromStdString(itype + " " + tname) + ";\n";
+                // Same init-to-zero treatment as tempTypes and also-scan paths.
+                std::string sfx3 = ";\n";
+                if (s_portMode && !itype.empty() &&
+                    itype.find("struct ") != 0 && itype.find("union ") != 0 &&
+                    itype.find("[") == std::string::npos) {
+                    bool assignedInEntry = false;
+                    if (!m_func.blocks.empty())
+                        for (auto &stmt : m_func.blocks[0].stmts)
+                            if (stmt.kind == IRStmtKind::Assign && stmt.destTemp == id)
+                                { assignedInEntry = true; break; }
+                    if (!assignedInEntry)
+                        sfx3 = (itype == "float" || itype == "double" || itype == "vec_t")
+                               ? " = 0.0f;\n" : " = 0;\n";
+                }
+                out += "    " + QString::fromStdString(itype + " " + tname) +
+                       QString::fromStdString(sfx3);
             }
             if (!m_forceDeclareTemps.empty()) out += "\n";
 
