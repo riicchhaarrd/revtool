@@ -4166,18 +4166,85 @@ private:
                 if (node->whileHasHeaderStmts && !node->children.empty() &&
                     node->children[0]->kind == StructKind::Block &&
                     node->children[0]->children.size() >= 2) {
-                    out += pad(indent) + "while (1) {\n";
-                    // Emit first child of wrapper (header statements)
-                    emitNode(out, node->children[0]->children[0].get(), indent + 1);
-                    // Emit break condition
-                    std::string breakCond = node->cond ?
-                        emitExpr(node->cond, !node->negated) : "0";
-                    out += pad(indent + 1) + "if (" +
-                           QString::fromStdString(breakCond) + ") break;\n";
-                    // Emit remaining body children
-                    for (size_t ci = 1; ci < node->children[0]->children.size(); ++ci)
-                        emitNode(out, node->children[0]->children[ci].get(), indent + 1);
-                    out += pad(indent) + "}\n";
+                    // Ghidra-style single-iteration linearization.  When the
+                    // body after the break ends with a Return statement (an
+                    // IRStmt inside a terminal Seq) and there are no other
+                    // break/continue that would be orphaned, the while loop
+                    // executes at most once — fold to
+                    // `A; if (!breakCond) { B; return X; }`.
+                    bool canLinearize = false;
+                    auto *bodyBlock = node->children[0].get();
+                    // Walk the tree of Block/If nodes to find whether the
+                    // terminal statement across all paths through the body
+                    // (after the break) is a Return.
+                    std::function<bool(StructNode*)> lastIsReturn =
+                        [&](StructNode *n) -> bool {
+                            if (!n) return false;
+                            if (n->kind == StructKind::Seq) {
+                                if (n->bbId < 0 ||
+                                    n->bbId >= (int)m_func.blocks.size()) return false;
+                                auto &bb = m_func.blocks[n->bbId];
+                                for (int i = n->stmtEnd - 1; i >= n->stmtStart && i < (int)bb.stmts.size(); --i) {
+                                    auto k = bb.stmts[i].kind;
+                                    if (k == IRStmtKind::Label || k == IRStmtKind::Phi ||
+                                        k == IRStmtKind::Jump || k == IRStmtKind::Branch)
+                                        continue;
+                                    return k == IRStmtKind::Return;
+                                }
+                                return false;
+                            }
+                            if (n->kind == StructKind::Block && !n->children.empty()) {
+                                for (int i = (int)n->children.size() - 1; i >= 0; --i) {
+                                    if (lastIsReturn(n->children[i].get())) return true;
+                                    // Stop at first node that has content
+                                    if (nodeHasContent(n->children[i].get())) return false;
+                                }
+                            }
+                            return false;
+                        };
+                    if (s_portMode && bodyBlock->children.size() >= 2 &&
+                        lastIsReturn(bodyBlock->children.back().get())) {
+                        std::function<bool(StructNode*)> hasBreakContinue =
+                            [&](StructNode *n) -> bool {
+                                if (!n) return false;
+                                if (n->kind == StructKind::Break ||
+                                    n->kind == StructKind::Continue) return true;
+                                if (n->kind == StructKind::While ||
+                                    n->kind == StructKind::For ||
+                                    n->kind == StructKind::DoWhile)
+                                    return false;
+                                for (auto &cc : n->children)
+                                    if (hasBreakContinue(cc.get())) return true;
+                                if (n->elseNode && hasBreakContinue(n->elseNode.get()))
+                                    return true;
+                                return false;
+                            };
+                        bool orphan = false;
+                        for (size_t ci = 1; ci < bodyBlock->children.size(); ++ci)
+                            if (hasBreakContinue(bodyBlock->children[ci].get()))
+                                { orphan = true; break; }
+                        canLinearize = !orphan;
+                    }
+                    if (canLinearize) {
+                        emitNode(out, bodyBlock->children[0].get(), indent);
+                        std::string keepCond = node->cond ?
+                            emitExpr(node->cond, node->negated) : "1";
+                        out += pad(indent) + "if (" +
+                               QString::fromStdString(keepCond) + ") {\n";
+                        for (size_t ci = 1; ci < bodyBlock->children.size(); ++ci)
+                            emitNode(out, bodyBlock->children[ci].get(), indent + 1);
+                        out += pad(indent) + "}\n";
+                    } else {
+                        out += pad(indent) + "while (1) {\n";
+                        emitNode(out, bodyBlock->children[0].get(), indent + 1);
+                        std::string breakCond = node->cond ?
+                            emitExpr(node->cond, !node->negated) : "0";
+                        out += pad(indent + 1) + "if (" +
+                               QString::fromStdString(breakCond) + ") break;\n";
+                        for (size_t ci = 1; ci < bodyBlock->children.size(); ++ci)
+                            emitNode(out, bodyBlock->children[ci].get(), indent + 1);
+                        out += pad(indent) + "}\n";
+                    }
                 } else {
                     out += pad(indent) + "while (" + QString::fromStdString(cond) + ") {\n";
                     for (auto &child : node->children)
