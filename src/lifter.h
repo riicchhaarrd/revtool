@@ -2644,7 +2644,27 @@ private:
                         }
                     }
                 }
-                auto res = IRExpr::mkBinary(irop, std::move(lhs), std::move(rhs));
+                auto res = IRExpr::mkBinary(irop, lhs->clone(), rhs->clone());
+                if (mn == "sub" &&
+                    o[0].type == X86_OP_REG && canonReg(o[0].reg) == X86_REG_EAX &&
+                    o[1].type == X86_OP_IMM && o[1].imm == 1 &&
+                    lhs->op == IROp::Temp) {
+                    bool lhsFromCall = false;
+                    int lhsTemp = lhs->tempId();
+                    for (auto it = bb.stmts.rbegin(); it != bb.stmts.rend(); ++it) {
+                        if (it->kind != IRStmtKind::Assign || it->destTemp != lhsTemp)
+                            continue;
+                        lhsFromCall = it->expr && it->expr->op == IROp::Call;
+                        break;
+                    }
+                    if (lhsFromCall) {
+                        // Handles compiler idioms like
+                        // "call; sub eax, 1; jle target" without an explicit cmp.
+                        m_flags.lhs = lhs->clone();
+                        m_flags.rhs = rhs->clone();
+                        m_flags.op = IROp::Sub;
+                    }
+                }
                 writeOp(o[0], std::move(res), bb, resultType);
             }
             return;
