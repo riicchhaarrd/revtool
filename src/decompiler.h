@@ -1346,6 +1346,18 @@ public:
         // Simplify redundant double (char *) casts:
         // *(TYPE *)((char *)((char *)X + N)) → *(TYPE *)((char *)X + N)
         cleaned.replace("((char *)((char *)", "((char *)(");
+        // Strip the `(char *)` cast when the inner expression is a bare
+        // identifier with no arithmetic (`((char *)(NAME))` → `(NAME)`).
+        // The cast is only meaningful when offset bytes are added.
+        // E.g. `*(int *)((char *)(alwaysfails))` → `*(int *)(alwaysfails)`.
+        if (s_portMode) {
+            QRegularExpression re(R"(\(\(char \*\)\((\w+)\)\))");
+            cleaned.replace(re, "(\\1)");
+            // And the same shape without the inner parens:
+            // `((char *)NAME)` (when followed by `)` so no `+ N` arith)
+            QRegularExpression re2(R"(\(\(char \*\)(\w+)\))");
+            cleaned.replace(re2, "(\\1)");
+        }
         // Fix invalid array pointer syntax in declarations: "float[4] * mtx" → "float * mtx"
         // Only on declaration lines (function signature or local variable declarations)
         {
