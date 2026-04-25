@@ -492,6 +492,9 @@ public:
         m_insn = insn;
         m_insnCount = funcEndIdx;
         m_regTemps.clear();
+        m_regGlobalSource.clear();
+        m_regFuncPtrName.clear();
+        m_blockExitState.clear();
         m_espArgs.clear();
         m_pushArgs.clear();
         m_fpuStack.clear();
@@ -617,17 +620,31 @@ public:
             if (bit != addrToBlock.end()) {
                 // Save previous block's register state
                 blockEndRegs[curBlock] = m_regTemps;
+                saveBlockState(curBlock);
                 int prevBlock = curBlock;
                 curBlock = bit->second;
-                // For large functions (30+ blocks): clear stale register state
-                // when the previous linear block is NOT a CFG predecessor.
-                // This prevents register values from one code path leaking into
-                // an unrelated block reached via a different jump.
-                // Only for large functions — small functions work correctly with
-                // linear state because their code layout matches execution order.
-                if (nBlocks >= 50 && curBlock > 0 && curBlock < nBlocks &&
+                // Restore register state from the block's real CFG
+                // predecessors. Address order often places an unrelated block
+                // between a conditional branch and its taken target; carrying
+                // registers linearly through that unrelated block leaks stale
+                // call-clobbered values into the target.
+                if (curBlock > 0 && curBlock < nBlocks &&
                     prevBlock >= 0 && prevBlock != curBlock) {
-                    if (!prePreds[curBlock].count(prevBlock)) {
+                    bool allPredsProcessed = !prePreds[curBlock].empty();
+                    for (int p : prePreds[curBlock]) {
+                        if (!m_blockExitState.count(p)) {
+                            allPredsProcessed = false;
+                            break;
+                        }
+                    }
+                    bool isLoopHeader =
+                        domLoopHeaders.count(curBlock) ||
+                        loopHeaderAddrs.count(in.address);
+                    bool linearPredecessor = prePreds[curBlock].count(prevBlock) != 0;
+                    if (!isLoopHeader && !linearPredecessor && allPredsProcessed &&
+                        prePreds[curBlock].size() == 1) {
+                        mergeBlockState(curBlock, prePreds, func);
+                    } else if (nBlocks >= 50 && !linearPredecessor) {
                         m_regTemps.clear();
                         m_regGlobalSource.clear();
                         m_regFuncPtrName.clear();
@@ -724,6 +741,7 @@ public:
             liftInsn(in, func.blocks[curBlock], func, addrToBlock);
         }
         blockEndRegs[curBlock] = m_regTemps; // save final block's state
+        saveBlockState(curBlock);
 
         // ── Pass 5b: ensure float functions have proper return ───────
         // The ret instruction may fall outside STABS-reported function size.
@@ -3397,12 +3415,12 @@ private:
             }
             int t = func.newTemp();
             bb.stmts.push_back(IRStmt::mkAssign(t, IRExpr::mkCall(fname, std::move(args))));
-            // repne scasb produces ~(strlen+1) in ECX. The typical idiom is:
-            //   repne scasb; not ecx  → ecx = strlen+1
-            //   lea reg, -1(%ecx, %esi) → reg = strlen + esi
-            // Assign strlen() directly to ECX. Suppress the next 'not ecx' (part of idiom).
-            // The lea's -1 cancels the +1 that NOT would produce.
-            assignReg(X86_REG_ECX, IRExpr::mkTemp(t), bb);
+            // repne scasb produces ~(strlen+1) in ECX. The usual following
+            // `not ecx` yields strlen+1, which is often passed to memcpy so
+            // the copied string includes its terminator.  Model that post-NOT
+            // value directly and suppress the explicit NOT.
+            assignReg(X86_REG_ECX,
+                IRExpr::mkBinary(IROp::Add, IRExpr::mkTemp(t), IRExpr::mkConst(1)), bb);
             m_suppressNextNot = true;
             return;
         }
