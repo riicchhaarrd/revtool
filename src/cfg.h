@@ -335,23 +335,35 @@ private:
             }
         }
 
-        // For each loop header, find the last block before the loop exits
+        // For each loop header, find the block after the natural loop.  A
+        // header may branch only within the loop body while the latch carries
+        // the real exit condition, so deriving the exit from the header branch
+        // alone mis-structures counter loops with optional per-iteration work.
         for (auto &[from, header] : m_backEdges) {
-            // The loop end is the fall-through block after the back-edge source
-            // or the target of the loop-exit branch
-            auto &hbb = m_func->blocks[header];
-            if (!hbb.stmts.empty() && hbb.stmts.back().kind == IRStmtKind::Branch) {
-                auto &br = hbb.stmts.back();
-                // One target is the loop body, the other is the loop exit
-                int exitBlock = -1;
-                if (br.trueTarget > header && br.trueTarget <= from + 1)
-                    exitBlock = br.falseTarget;
-                else
-                    exitBlock = br.trueTarget;
-                if (exitBlock >= 0) m_loopEnd[header] = exitBlock;
-            } else {
-                m_loopEnd[header] = from + 1;
+            std::set<int> loopBlocks;
+            loopBlocks.insert(header);
+            std::vector<int> stack = {from};
+            while (!stack.empty()) {
+                int b = stack.back();
+                stack.pop_back();
+                if (b < 0 || b >= n || loopBlocks.count(b)) continue;
+                loopBlocks.insert(b);
+                for (int p : m_func->blocks[b].preds)
+                    if (!loopBlocks.count(p))
+                        stack.push_back(p);
             }
+
+            std::set<int> exits;
+            for (int b : loopBlocks) {
+                for (int s : m_func->blocks[b].succs) {
+                    if (s >= 0 && s < n && !loopBlocks.count(s))
+                        exits.insert(s);
+                }
+            }
+            if (!exits.empty())
+                m_loopEnd[header] = *exits.begin();
+            else
+                m_loopEnd[header] = from + 1;
         }
     }
 
@@ -410,6 +422,120 @@ private:
                             if (stmtEnd2 > 0)
                                 block->children.push_back(StructNode::mkSeq(cur, 0, stmtEnd2));
                             cur = taken;
+                            continue;
+                        }
+                    }
+
+                    int backSrcForLatch = -1;
+                    for (auto &[from, hdr] : m_backEdges)
+                        if (hdr == cur) { backSrcForLatch = from; break; }
+
+                    // Some loops test per-iteration work in the header and use
+                    // a counter/pointer update in the latch as the real loop
+                    // condition:
+                    //   header: if (slot empty) goto latch; body; latch:
+                    //   latch:  if (--count) goto header; else exit
+                    // Treat these as do-while loops with an if inside, not as
+                    // while(header_condition).
+                    bool headerBranchesToExit =
+                        br.trueTarget == loopExit || br.falseTarget == loopExit;
+
+                    if ((br.trueTarget == cur || br.falseTarget == cur) &&
+                        headerBranchesToExit) {
+                        int stmtEnd = (int)bb.stmts.size() - 1;
+                        auto body = StructNode::mkBlock();
+                        if (stmtEnd > 0)
+                            body->children.push_back(StructNode::mkSeq(cur, 0, stmtEnd));
+
+                        auto doNode = StructNode::mkDoWhile(br.expr.get());
+                        doNode->negated = (br.trueTarget == loopExit);
+                        doNode->children.push_back(std::move(body));
+                        block->children.push_back(std::move(doNode));
+                        cur = loopExit;
+                        continue;
+                    }
+
+                    if (!headerBranchesToExit &&
+                        backSrcForLatch >= 0 && backSrcForLatch < n &&
+                        backSrcForLatch != cur &&
+                        !m_func->blocks[backSrcForLatch].stmts.empty() &&
+                        m_func->blocks[backSrcForLatch].stmts.back().kind == IRStmtKind::Branch) {
+                        auto &backBB = m_func->blocks[backSrcForLatch];
+                        auto &backBR = backBB.stmts.back();
+                        bool latchReturnsToHeader =
+                            backBR.trueTarget == cur || backBR.falseTarget == cur;
+                        bool latchBranchesToExit =
+                            backBR.trueTarget == loopExit ||
+                            backBR.falseTarget == loopExit;
+                        int convergence = findConvergence(br.trueTarget,
+                                                          br.falseTarget,
+                                                          backSrcForLatch,
+                                                          visited);
+                        if (convergence < 0) {
+                            if (br.trueTarget == backSrcForLatch ||
+                                br.falseTarget == backSrcForLatch)
+                                convergence = backSrcForLatch;
+                        }
+
+                        if (latchReturnsToHeader && latchBranchesToExit &&
+                            convergence >= 0 && convergence < n &&
+                            convergence != loopExit) {
+                            auto body = StructNode::mkBlock();
+                            int stmtEnd = (int)bb.stmts.size() - 1;
+                            if (stmtEnd > 0)
+                                body->children.push_back(StructNode::mkSeq(cur, 0, stmtEnd));
+
+                            auto structureArm = [&](int armStart) {
+                                std::vector<bool> armVisited = visited;
+                                m_loopExitStack.push_back(loopExit);
+                                auto arm = structureRegion(armStart, convergence,
+                                                           armVisited);
+                                m_loopExitStack.pop_back();
+                                for (int vi = 0; vi < n; ++vi)
+                                    if (armVisited[vi]) visited[vi] = true;
+                                return arm;
+                            };
+
+                            if (br.trueTarget != convergence &&
+                                br.falseTarget != convergence) {
+                                auto ifNode = StructNode::mkIf(br.expr.get(), false);
+                                ifNode->children.push_back(structureArm(br.trueTarget));
+                                ifNode->elseNode = structureArm(br.falseTarget);
+                                body->children.push_back(std::move(ifNode));
+                            } else if (br.trueTarget == convergence &&
+                                       br.falseTarget != convergence) {
+                                auto ifNode = StructNode::mkIf(br.expr.get(), true);
+                                ifNode->children.push_back(structureArm(br.falseTarget));
+                                body->children.push_back(std::move(ifNode));
+                            } else if (br.falseTarget == convergence &&
+                                       br.trueTarget != convergence) {
+                                auto ifNode = StructNode::mkIf(br.expr.get(), false);
+                                ifNode->children.push_back(structureArm(br.trueTarget));
+                                body->children.push_back(std::move(ifNode));
+                            }
+
+                            if (convergence != backSrcForLatch) {
+                                std::vector<bool> restVisited = visited;
+                                m_loopExitStack.push_back(loopExit);
+                                body->children.push_back(
+                                    structureRegion(convergence, backSrcForLatch,
+                                                    restVisited));
+                                m_loopExitStack.pop_back();
+                                for (int vi = 0; vi < n; ++vi)
+                                    if (restVisited[vi]) visited[vi] = true;
+                            }
+
+                            int backPreBranch = (int)backBB.stmts.size() - 1;
+                            if (backPreBranch > 0)
+                                body->children.push_back(
+                                    StructNode::mkSeq(backSrcForLatch, 0, backPreBranch));
+                            visited[backSrcForLatch] = true;
+
+                            auto doNode = StructNode::mkDoWhile(backBR.expr.get());
+                            doNode->negated = (backBR.trueTarget == loopExit);
+                            doNode->children.push_back(std::move(body));
+                            block->children.push_back(std::move(doNode));
+                            cur = loopExit;
                             continue;
                         }
                     }

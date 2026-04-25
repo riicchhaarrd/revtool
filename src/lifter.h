@@ -365,7 +365,8 @@ public:
                             if (it->first <= insn[ii].address) { blk = it->second; break; }
                     }
                     if (blk < 0 || !loopBlocks.count(blk)) continue;
-                    if (blk == hdr) continue; // header itself doesn't count
+                    if (blk == hdr && !backEdgeSources[hdr].count(hdr))
+                        continue; // header only counts for self-loop bodies
                     auto *det = insn[ii].detail;
                     if (!det) continue;
                     for (uint8_t oi = 0; oi < det->x86.op_count; ++oi) {
@@ -1124,10 +1125,13 @@ public:
                     }
                 }
 
-                // Collect induction patterns: t2 = t1 + const (in one pass)
+                // Collect induction patterns from latch blocks: t2 = t1 + const.
+                // Restricting to back-edge sources avoids treating derived address
+                // setup inside the loop body as loop-carried state.
                 // Map: baseTemp → loopTemp for each induction variable
                 std::map<int, int> inductionMap; // baseTemp → updatedTemp
                 for (int bi : loopBlocks) {
+                    if (!backEdgeSources.count(bi)) continue;
                     auto &lb = func.blocks[bi];
                     for (auto &stmt : lb.stmts) {
                         if (stmt.kind != IRStmtKind::Assign || stmt.destTemp < 0) continue;
@@ -1155,8 +1159,57 @@ public:
 
                     // Sanity: skip if baseTemp == loopTemp (no actual induction)
                     if (baseTemp == loopTemp) continue;
-                    // Skip if baseTemp is already a phi temp from a previous iteration
-                    if (baseTemp >= func.nextTemp - 20) continue;
+                    // Avoid cascading through freshly-created non-phi temps.
+                    // Header phi temps are legitimate loop-carried bases; fresh
+                    // derived address temps are not.
+                    if (baseTemp >= func.nextTemp - 20 &&
+                        !func.phiTemps.count(baseTemp))
+                        continue;
+
+                    auto insertBeforeTerminator = [&](BasicBlock &predBlock,
+                                                      IRStmt copy) {
+                        if (!predBlock.stmts.empty()) {
+                            auto k = predBlock.stmts.back().kind;
+                            if (k == IRStmtKind::Branch || k == IRStmtKind::Jump ||
+                                k == IRStmtKind::Switch || k == IRStmtKind::Return)
+                                predBlock.stmts.insert(predBlock.stmts.end() - 1,
+                                                       std::move(copy));
+                            else
+                                predBlock.stmts.push_back(std::move(copy));
+                        } else {
+                            predBlock.stmts.push_back(std::move(copy));
+                        }
+                    };
+
+                    if (func.phiTemps.count(baseTemp)) {
+                        std::unique_ptr<IRExpr> initialExpr;
+                        TypeRef phiType = func.tempType(baseTemp);
+                        for (auto it = header.stmts.begin();
+                             it != header.stmts.end(); ++it) {
+                            if (it->kind == IRStmtKind::Assign &&
+                                it->destTemp == baseTemp) {
+                                if (it->expr) initialExpr = it->expr->clone();
+                                header.stmts.erase(it);
+                                break;
+                            }
+                        }
+
+                        for (int pred : header.preds) {
+                            if (pred < 0 || pred >= n) continue;
+                            auto &predBlock = func.blocks[pred];
+                            std::unique_ptr<IRExpr> src =
+                                backEdgeSources.count(pred)
+                                    ? IRExpr::mkTemp(loopTemp,
+                                                     func.tempType(loopTemp))
+                                    : (initialExpr ? initialExpr->clone()
+                                                   : IRExpr::mkTemp(baseTemp,
+                                                       phiType));
+                            insertBeforeTerminator(predBlock,
+                                IRStmt::mkAssign(baseTemp, std::move(src),
+                                                 phiType));
+                        }
+                        continue;
+                    }
 
                     int phiTemp = func.newTemp(func.tempType(baseTemp));
                     func.phiTemps.insert(phiTemp); // mark as phi for copy-prop skip
@@ -1169,16 +1222,7 @@ public:
                         auto copy = IRStmt::mkAssign(phiTemp,
                             IRExpr::mkTemp(srcTemp, func.tempType(srcTemp)),
                             func.tempType(srcTemp));
-                        if (!predBlock.stmts.empty()) {
-                            auto k = predBlock.stmts.back().kind;
-                            if (k == IRStmtKind::Branch || k == IRStmtKind::Jump ||
-                                k == IRStmtKind::Switch || k == IRStmtKind::Return)
-                                predBlock.stmts.insert(predBlock.stmts.end() - 1, std::move(copy));
-                            else
-                                predBlock.stmts.push_back(std::move(copy));
-                        } else {
-                            predBlock.stmts.push_back(std::move(copy));
-                        }
+                        insertBeforeTerminator(predBlock, std::move(copy));
                         hasSources = true;
                     }
                     if (!hasSources) continue;
@@ -1331,6 +1375,8 @@ private:
         m_flags.op = s.flagsOp;
         m_flags.lhs.reset();
         m_flags.rhs.reset();
+        m_flags.carryLhs.reset();
+        m_flags.carryRhs.reset();
         m_fpuStack = s.fpuStack;
     }
 
@@ -1393,6 +1439,7 @@ private:
         int   temp = -1;
         IROp  op   = IROp::Eq;
         std::unique_ptr<IRExpr> lhs, rhs;
+        std::unique_ptr<IRExpr> carryLhs, carryRhs;
     } m_flags;
 
     // Call argument collection
@@ -1445,10 +1492,11 @@ private:
         m_regTemps[canonReg(reg)] = temp;
     }
 
-    void assignReg(x86_reg reg, std::unique_ptr<IRExpr> val, BasicBlock &bb, TypeRef t = NullType) {
+    int assignReg(x86_reg reg, std::unique_ptr<IRExpr> val, BasicBlock &bb, TypeRef t = NullType) {
         int temp = m_func->newTemp(t);
         bb.stmts.push_back(IRStmt::mkAssign(temp, std::move(val), t));
         writeReg(reg, temp, bb);
+        return temp;
     }
 
     // ── FPU stack helpers ──────────────────────────────────────────────
@@ -2605,6 +2653,11 @@ private:
             // xor reg, reg → zero
             if (mn == "xor" && o[0].type == X86_OP_REG && o[1].type == X86_OP_REG &&
                 canonReg(o[0].reg) == canonReg(o[1].reg)) {
+                m_flags.lhs = IRExpr::mkConst(0);
+                m_flags.rhs = IRExpr::mkConst(0);
+                m_flags.op = IROp::Sub;
+                m_flags.carryLhs.reset();
+                m_flags.carryRhs.reset();
                 writeOp(o[0], IRExpr::mkConst(0), bb);
                 return;
             }
@@ -2645,38 +2698,67 @@ private:
                     }
                 }
                 auto res = IRExpr::mkBinary(irop, lhs->clone(), rhs->clone());
-                if (mn == "sub" &&
-                    o[0].type == X86_OP_REG && canonReg(o[0].reg) == X86_REG_EAX &&
-                    o[1].type == X86_OP_IMM && o[1].imm == 1 &&
-                    lhs->op == IROp::Temp) {
-                    bool lhsFromCall = false;
-                    int lhsTemp = lhs->tempId();
-                    for (auto it = bb.stmts.rbegin(); it != bb.stmts.rend(); ++it) {
-                        if (it->kind != IRStmtKind::Assign || it->destTemp != lhsTemp)
-                            continue;
-                        lhsFromCall = it->expr && it->expr->op == IROp::Call;
-                        break;
-                    }
-                    if (lhsFromCall) {
-                        // Handles compiler idioms like
-                        // "call; sub eax, 1; jle target" without an explicit cmp.
-                        m_flags.lhs = lhs->clone();
-                        m_flags.rhs = rhs->clone();
-                        m_flags.op = IROp::Sub;
-                    }
+                auto flagExpr = res->clone();
+                if (mn == "sub") {
+                    m_flags.carryLhs = lhs->clone();
+                    m_flags.carryRhs = rhs->clone();
+                } else if (mn == "and") {
+                    m_flags.carryLhs.reset();
+                    m_flags.carryRhs.reset();
+                } else {
+                    m_flags.carryLhs.reset();
+                    m_flags.carryRhs.reset();
                 }
-                writeOp(o[0], std::move(res), bb, resultType);
+                if (o[0].type == X86_OP_REG) {
+                    int destTemp = assignReg(o[0].reg, std::move(res), bb,
+                                             resultType);
+                    m_flags.lhs = IRExpr::mkTemp(destTemp,
+                                                 func.tempType(destTemp));
+                } else {
+                    m_flags.lhs = std::move(flagExpr);
+                    writeOp(o[0], std::move(res), bb, resultType);
+                }
+                m_flags.rhs = IRExpr::mkConst(0);
+                m_flags.op = IROp::Sub;
             }
             return;
         }
         if (mn == "inc" && n == 1) {
             auto v = readOp(o[0]);
-            if (v) writeOp(o[0], IRExpr::mkBinary(IROp::Add, std::move(v), IRExpr::mkConst(1)), bb);
+            if (v) {
+                auto res = IRExpr::mkBinary(IROp::Add, v->clone(), IRExpr::mkConst(1));
+                m_flags.carryLhs.reset();
+                m_flags.carryRhs.reset();
+                if (o[0].type == X86_OP_REG) {
+                    int destTemp = assignReg(o[0].reg, std::move(res), bb);
+                    m_flags.lhs = IRExpr::mkTemp(destTemp,
+                                                 func.tempType(destTemp));
+                } else {
+                    m_flags.lhs = res->clone();
+                    writeOp(o[0], std::move(res), bb);
+                }
+                m_flags.rhs = IRExpr::mkConst(0);
+                m_flags.op = IROp::Sub;
+            }
             return;
         }
         if (mn == "dec" && n == 1) {
             auto v = readOp(o[0]);
-            if (v) writeOp(o[0], IRExpr::mkBinary(IROp::Sub, std::move(v), IRExpr::mkConst(1)), bb);
+            if (v) {
+                auto res = IRExpr::mkBinary(IROp::Sub, v->clone(), IRExpr::mkConst(1));
+                m_flags.carryLhs.reset();
+                m_flags.carryRhs.reset();
+                if (o[0].type == X86_OP_REG) {
+                    int destTemp = assignReg(o[0].reg, std::move(res), bb);
+                    m_flags.lhs = IRExpr::mkTemp(destTemp,
+                                                 func.tempType(destTemp));
+                } else {
+                    m_flags.lhs = res->clone();
+                    writeOp(o[0], std::move(res), bb);
+                }
+                m_flags.rhs = IRExpr::mkConst(0);
+                m_flags.op = IROp::Sub;
+            }
             return;
         }
         if (mn == "neg" && n == 1) {
@@ -2733,10 +2815,12 @@ private:
         // sbb reg, reg → reg = -(CF) → reg = (prev_cmp < 0 unsigned) ? -1 : 0
         if (mn == "sbb" && n == 2 && o[0].type == X86_OP_REG && o[1].type == X86_OP_REG &&
             canonReg(o[0].reg) == canonReg(o[1].reg)) {
-            if (m_flags.lhs) {
+            IRExpr *cfLhs = m_flags.carryLhs ? m_flags.carryLhs.get() : m_flags.lhs.get();
+            IRExpr *cfRhs = m_flags.carryRhs ? m_flags.carryRhs.get() : m_flags.rhs.get();
+            if (cfLhs) {
                 // CF=1 when lhs < rhs (unsigned) → sbb reg,reg = -(lhs < rhs) = (lhs < rhs) ? -1 : 0
-                auto cond = IRExpr::mkBinary(IROp::Ult, m_flags.lhs->clone(),
-                    m_flags.rhs ? m_flags.rhs->clone() : IRExpr::mkConst(0));
+                auto cond = IRExpr::mkBinary(IROp::Ult, cfLhs->clone(),
+                    cfRhs ? cfRhs->clone() : IRExpr::mkConst(0));
                 writeOp(o[0], IRExpr::mkUnary(IROp::Neg, std::move(cond)), bb);
             } else {
                 writeOp(o[0], IRExpr::mkConst(0), bb);
@@ -2756,9 +2840,11 @@ private:
         }
         // adc reg, 0 → reg = reg + CF → reg = reg + (prev_cmp < 0 unsigned)
         if (mn == "adc" && n == 2 && o[1].type == X86_OP_IMM && o[1].imm == 0) {
-            if (m_flags.lhs) {
-                auto carry = IRExpr::mkBinary(IROp::Ult, m_flags.lhs->clone(),
-                    m_flags.rhs ? m_flags.rhs->clone() : IRExpr::mkConst(0));
+            IRExpr *cfLhs = m_flags.carryLhs ? m_flags.carryLhs.get() : m_flags.lhs.get();
+            IRExpr *cfRhs = m_flags.carryRhs ? m_flags.carryRhs.get() : m_flags.rhs.get();
+            if (cfLhs) {
+                auto carry = IRExpr::mkBinary(IROp::Ult, cfLhs->clone(),
+                    cfRhs ? cfRhs->clone() : IRExpr::mkConst(0));
                 auto reg = readOp(o[0]);
                 if (reg)
                     writeOp(o[0], IRExpr::mkBinary(IROp::Add, std::move(reg), std::move(carry)), bb);
@@ -2770,6 +2856,8 @@ private:
         if (mn == "cmp" && n == 2) {
             m_flags.lhs = readOp(o[0]);
             m_flags.rhs = readOp(o[1]);
+            m_flags.carryLhs = m_flags.lhs ? m_flags.lhs->clone() : nullptr;
+            m_flags.carryRhs = m_flags.rhs ? m_flags.rhs->clone() : nullptr;
             // Preserve sub-dword width for correct comparison codegen
             if (o[0].type == X86_OP_MEM && o[0].size == 1 && m_flags.lhs)
                 m_flags.lhs = IRExpr::mkCast(CastKind::Trunc8, std::move(m_flags.lhs));
@@ -2781,6 +2869,8 @@ private:
         if (mn == "test" && n == 2) {
             m_flags.lhs = readOp(o[0]);
             m_flags.rhs = readOp(o[1]);
+            m_flags.carryLhs.reset();
+            m_flags.carryRhs.reset();
             // Note: register-width truncation for test/cmp disabled for now
             // because it causes re-emission of inlined call expressions
             m_flags.op = IROp::And;

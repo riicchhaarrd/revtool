@@ -6060,7 +6060,18 @@ private:
             case IRStmtKind::Assign: {
                 std::string rhs = stmt.expr ? emitExpr(stmt.expr.get()) : "0";
                 // Skip assignment for inlined temps — BUT keep calls with truly unused results
-                if (m_tempUseCount[stmt.destTemp] <= 1) {
+                bool loopStateAssign = m_func.phiTemps.count(stmt.destTemp);
+                if (loopStateAssign && m_tempUseCount[stmt.destTemp] <= 1 &&
+                    stmt.expr) {
+                    TypeRef aggType = aggregateObjectType(rhs, stmt.expr.get());
+                    auto *agg = aggType != NullType ? m_types.resolveType(aggType) : nullptr;
+                    if (agg && (agg->kind == StabsTypeKind::Struct ||
+                                agg->kind == StabsTypeKind::Union ||
+                                agg->kind == StabsTypeKind::Array) &&
+                        agg->sizeBytes > 4)
+                        loopStateAssign = false;
+                }
+                if (!loopStateAssign && m_tempUseCount[stmt.destTemp] <= 1) {
                     if (stmt.expr && stmt.expr->op == IROp::Call &&
                         m_tempUseCount[stmt.destTemp] == 0) {
                         // Return value truly unused — emit as standalone call
@@ -9407,6 +9418,15 @@ private:
         // Only use the coalesced name for temps that are actually declared
         // (use count > 1); single-use temps get inlined and don't need names.
         std::string tempName(int id) {
+            if (m_func.phiTemps.count(id)) {
+                m_forceDeclareTemps.insert(id);
+                auto vit = m_func.tempToVar.find(id);
+                if (vit != m_func.tempToVar.end()) {
+                    auto nit = m_func.varNames.find(vit->second);
+                    if (nit != m_func.varNames.end() && !nit->second.empty())
+                        return nit->second;
+                }
+            }
             if (m_tempUseCount[id] > 1 && !m_copyPropagated.count(id)) {
                 auto vit = m_func.tempToVar.find(id);
                 if (vit != m_func.tempToVar.end()) {
