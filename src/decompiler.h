@@ -9,6 +9,7 @@
 #include "struct_infer.h"
 #include "simplify.h"
 #include "macho.h"
+#include "port_emission_fixes.h"
 #include <QString>
 #include <QProcess>
 #include <QRegularExpression>
@@ -4174,8 +4175,7 @@ private:
             }
             if (!node || node->op != IROp::Var || node->name.empty())
                 return "";
-            if (!((node->name == "clc" && fieldName == "state") ||
-                  (node->name == "cl" && fieldName == "active")))
+            if (!PortEmissionFixes::isOpaqueStorageField(node->name, fieldName))
                 return "";
             auto *g = m_types.globalByName(node->name);
             if (!g || g->typeRef == NullType)
@@ -4200,7 +4200,7 @@ private:
             // These STABS globals are opaque in the type table but are used by
             // the binary as fixed storage objects.  Field zero is therefore the
             // object base address, not a C member dereference through void *.
-            return "(int)&" + node->name;
+            return PortEmissionFixes::opaqueStorageFieldZeroAddress(node->name, fieldName);
         }
 
         std::string portOpaqueGlobalFieldZeroAddressFromText(const std::string &base,
@@ -4219,48 +4219,13 @@ private:
                 name = extract("((const void *)");
             if (name.empty())
                 return "";
-            if ((name == "clc" && field == "state") ||
-                (name == "cl" && field == "active"))
-                return "(int)&" + name;
-            return "";
-        }
-
-        static void replaceAll(std::string &text, const std::string &from,
-                               const std::string &to) {
-            if (from.empty())
-                return;
-            size_t pos = 0;
-            while ((pos = text.find(from, pos)) != std::string::npos) {
-                text.replace(pos, from.size(), to);
-                pos += to.size();
-            }
+            return PortEmissionFixes::opaqueStorageFieldZeroAddress(name, field);
         }
 
         std::string rewritePortOpaqueStorageFieldExpr(std::string expr) const {
-            if (!s_portMode || expr.empty())
+            if (!s_portMode)
                 return expr;
-
-            auto rewrite = [&](const std::string &name, const std::string &field) {
-                const std::string addr = "&" + name;
-                for (const std::string &qual : {"void", "const void"}) {
-                    const std::string member = "((" + qual + " *)" + name + ")->" + field;
-
-                    replaceAll(expr, "((char *)(" + member + "))",
-                               "((char *)" + addr + ")");
-                    replaceAll(expr, "((char *)(" + member + ")",
-                               "((char *)" + addr);
-                    replaceAll(expr, "((char *)" + member,
-                               "((char *)" + addr);
-                    replaceAll(expr, member, "(int)" + addr);
-                }
-            };
-
-            // STABS exposes these client globals as pointers, but offset-zero
-            // use in the binary is storage-relative. Keep the correction local
-            // to expression emission instead of whole-file preprocessing.
-            rewrite("clc", "state");
-            rewrite("cl", "active");
-            return expr;
+            return PortEmissionFixes::rewriteOpaqueStorageFieldExpr(expr);
         }
 
         bool typeSupportsNamedMemberAccess(TypeRef ref) const {
