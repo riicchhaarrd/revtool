@@ -4510,6 +4510,353 @@ private:
             return lvalue;
         }
 
+        struct LinearOffsetExpr {
+            int64_t constant = 0;
+            std::map<std::string, int64_t> coeffs;
+            std::map<std::string, const IRExpr *> terms;
+        };
+
+        struct SourceGlobalArrayAddress {
+            std::string rawName;
+            std::string emitName;
+            TypeRef arrayType = NullType;
+            TypeRef elemType = NullType;
+            int elemSize = 0;
+            LinearOffsetExpr offset;
+        };
+
+        const IRExpr *stripCastsForAddress(const IRExpr *expr) const {
+            const IRExpr *node = expr;
+            for (int depth = 0; depth < 8 && node; ++depth) {
+                if (node->op == IROp::Cast && !node->kids.empty()) {
+                    node = node->kids[0].get();
+                    continue;
+                }
+                break;
+            }
+            return node;
+        }
+
+        const IRExpr *resolveLinearExpr(const IRExpr *expr, int depth = 0) const {
+            const IRExpr *node = stripCastsForAddress(expr);
+            if (!node || depth > 8)
+                return node;
+            if (node->op == IROp::Temp && !m_func.phiTemps.count(node->tempId())) {
+                auto it = m_tempDef.find(node->tempId());
+                if (it != m_tempDef.end() && it->second)
+                    return resolveLinearExpr(it->second, depth + 1);
+            }
+            return node;
+        }
+
+        std::string linearTermKey(const IRExpr *expr) const {
+            if (!expr)
+                return "";
+            if (expr->op == IROp::Var && !expr->name.empty())
+                return "v:" + expr->name;
+            if (expr->op == IROp::Temp)
+                return "t:" + std::to_string(expr->tempId());
+            return "";
+        }
+
+        void addLinearCoeff(LinearOffsetExpr &linear, const std::string &key,
+                            const IRExpr *term, int64_t coeff) const {
+            if (key.empty() || coeff == 0)
+                return;
+            int64_t next = linear.coeffs[key] + coeff;
+            if (next == 0) {
+                linear.coeffs.erase(key);
+                linear.terms.erase(key);
+                return;
+            }
+            linear.coeffs[key] = next;
+            if (!linear.terms.count(key))
+                linear.terms[key] = term;
+        }
+
+        bool addLinearOffsetTerm(const IRExpr *expr, int64_t scale,
+                                 LinearOffsetExpr &linear, int depth = 0) const {
+            const IRExpr *node = resolveLinearExpr(expr, depth);
+            if (!node || depth > 12)
+                return false;
+
+            if (node->isConst()) {
+                linear.constant += scale * (int64_t)node->value;
+                return true;
+            }
+
+            if ((node->op == IROp::Add || node->op == IROp::Sub) &&
+                node->kids.size() == 2) {
+                if (!addLinearOffsetTerm(node->kids[0].get(), scale,
+                                         linear, depth + 1))
+                    return false;
+                int64_t rhsScale = node->op == IROp::Sub ? -scale : scale;
+                return addLinearOffsetTerm(node->kids[1].get(), rhsScale,
+                                           linear, depth + 1);
+            }
+
+            if (node->op == IROp::Mul && node->kids.size() == 2) {
+                if (node->kids[0]->isConst())
+                    return addLinearOffsetTerm(node->kids[1].get(),
+                                               scale * (int64_t)node->kids[0]->value,
+                                               linear, depth + 1);
+                if (node->kids[1]->isConst())
+                    return addLinearOffsetTerm(node->kids[0].get(),
+                                               scale * (int64_t)node->kids[1]->value,
+                                               linear, depth + 1);
+                return false;
+            }
+
+            if (node->op == IROp::Shl && node->kids.size() == 2 &&
+                node->kids[1]->isConst() && node->kids[1]->value >= 0 &&
+                node->kids[1]->value < 31)
+                return addLinearOffsetTerm(node->kids[0].get(),
+                                           scale << node->kids[1]->value,
+                                           linear, depth + 1);
+
+            std::string key = linearTermKey(node);
+            if (key.empty())
+                return false;
+            addLinearCoeff(linear, key, node, scale);
+            return true;
+        }
+
+        void mergeLinearOffset(LinearOffsetExpr &dst,
+                               const LinearOffsetExpr &src) const {
+            dst.constant += src.constant;
+            for (auto &[key, coeff] : src.coeffs) {
+                auto it = src.terms.find(key);
+                addLinearCoeff(dst, key,
+                               it != src.terms.end() ? it->second : nullptr,
+                               coeff);
+            }
+        }
+
+        int arrayElementSizeBytes(TypeRef arrayType) const {
+            auto *array = m_types.resolveType(arrayType);
+            if (!array || array->kind != StabsTypeKind::Array)
+                return 0;
+            auto *elem = m_types.resolveType(array->targetType);
+            if (elem && elem->sizeBytes > 0)
+                return elem->sizeBytes;
+            if (elem && elem->kind == StabsTypeKind::Array) {
+                auto *inner = m_types.resolveType(elem->targetType);
+                int count = elem->arrayHigh - elem->arrayLow + 1;
+                if (inner && inner->sizeBytes > 0 && count > 0)
+                    return inner->sizeBytes * count;
+            }
+            return 0;
+        }
+
+        bool sourceGlobalArrayInfo(const std::string &rawName,
+                                   SourceGlobalArrayAddress &out) const {
+            auto *global = m_types.globalByName(rawName, m_func.sourceFileIdx);
+            if (!global || global->typeRef == NullType)
+                return false;
+            if (global->sourceFileIdx != m_func.sourceFileIdx)
+                return false;
+            auto *globalType = m_types.resolveType(global->typeRef);
+            if (!globalType || globalType->kind != StabsTypeKind::Array)
+                return false;
+            auto *elemType = m_types.resolveType(globalType->targetType);
+            if (!elemType || (elemType->kind != StabsTypeKind::Struct &&
+                              elemType->kind != StabsTypeKind::Union) ||
+                elemType->sizeBytes <= 0)
+                return false;
+
+            out.rawName = global->name;
+            out.emitName = cName(global->name);
+            out.arrayType = global->typeRef;
+            out.elemType = globalType->targetType;
+            out.elemSize = elemType->sizeBytes;
+            return true;
+        }
+
+        bool sourceGlobalArrayBaseExpr(const IRExpr *expr,
+                                       SourceGlobalArrayAddress &out) const {
+            const IRExpr *node = stripCastsForAddress(expr);
+            if (!node)
+                return false;
+
+            if (node->op == IROp::Temp && !m_func.phiTemps.count(node->tempId())) {
+                auto it = m_tempDef.find(node->tempId());
+                if (it != m_tempDef.end() && it->second)
+                    return sourceGlobalArrayBaseExpr(it->second, out);
+            }
+
+            if (node->op == IROp::AddrOf && !node->kids.empty()) {
+                const IRExpr *inner = stripCastsForAddress(node->kids[0].get());
+                if (inner && inner->op == IROp::Field && !inner->kids.empty()) {
+                    if (!sourceGlobalArrayAddressExpr(inner->kids[0].get(), out))
+                        return false;
+                    out.offset.constant += (int64_t)inner->value;
+                    return true;
+                }
+                return sourceGlobalArrayBaseExpr(inner, out);
+            }
+
+            if (node->op == IROp::Var && !node->name.empty())
+                return sourceGlobalArrayInfo(node->name, out);
+
+            if (node->op == IROp::Const) {
+                std::string rawName;
+                std::string emitName;
+                int byteOffset = 0;
+                if (!globalNameAndOffsetForAddress((uint32_t)node->value,
+                                                   rawName, emitName,
+                                                   byteOffset))
+                    return false;
+                if (!sourceGlobalArrayInfo(rawName, out))
+                    return false;
+                out.offset.constant += byteOffset;
+                return true;
+            }
+
+            return false;
+        }
+
+        bool sourceGlobalArrayAddressExpr(const IRExpr *expr,
+                                          SourceGlobalArrayAddress &out,
+                                          int depth = 0) const {
+            const IRExpr *node = stripCastsForAddress(expr);
+            if (!node || depth > 10)
+                return false;
+
+            if (sourceGlobalArrayBaseExpr(node, out))
+                return true;
+
+            if (node->op == IROp::Temp && !m_func.phiTemps.count(node->tempId())) {
+                auto it = m_tempDef.find(node->tempId());
+                if (it != m_tempDef.end() && it->second)
+                    return sourceGlobalArrayAddressExpr(it->second, out, depth + 1);
+            }
+
+            if ((node->op == IROp::Add || node->op == IROp::Sub) &&
+                node->kids.size() == 2) {
+                SourceGlobalArrayAddress base;
+                if (sourceGlobalArrayAddressExpr(node->kids[0].get(), base,
+                                                 depth + 1)) {
+                    LinearOffsetExpr delta;
+                    int64_t scale = node->op == IROp::Sub ? -1 : 1;
+                    if (!addLinearOffsetTerm(node->kids[1].get(), scale, delta))
+                        return false;
+                    mergeLinearOffset(base.offset, delta);
+                    out = base;
+                    return true;
+                }
+
+                if (node->op == IROp::Add &&
+                    sourceGlobalArrayAddressExpr(node->kids[1].get(), base,
+                                                 depth + 1)) {
+                    LinearOffsetExpr delta;
+                    if (!addLinearOffsetTerm(node->kids[0].get(), 1, delta))
+                        return false;
+                    mergeLinearOffset(base.offset, delta);
+                    out = base;
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        std::string emitLinearTermExpr(const LinearOffsetExpr &linear,
+                                       const std::string &key) {
+            auto it = linear.terms.find(key);
+            if (it == linear.terms.end() || !it->second)
+                return "";
+            return emitExpr(const_cast<IRExpr *>(it->second));
+        }
+
+        std::string sourceGlobalArrayFieldAccess(TypeRef elemType, int fieldOffset,
+                                                 const LinearOffsetExpr &inner,
+                                                 int accessSize) {
+            if (fieldOffset < 0)
+                return "";
+
+            if (inner.coeffs.empty()) {
+                std::string access =
+                    addressableFieldAccess(elemType, fieldOffset, true);
+                if (access.empty())
+                    return "";
+                std::vector<std::string> parts = splitMemberPath(access);
+                if (accessSize != 1 && parts.size() >= 2 &&
+                    fieldPathUsesCharArrayStorage(elemType, parts))
+                    return "";
+                return access;
+            }
+
+            if (inner.coeffs.size() != 1)
+                return "";
+
+            auto coeffIt = inner.coeffs.begin();
+            const StabsTypeField *field =
+                m_types.findFieldAtOffset(elemType, fieldOffset);
+            if (!field || field->bitOffset / 8 != fieldOffset ||
+                !usableFieldName(*field))
+                return "";
+            auto *fieldType = m_types.resolveType(field->typeRef);
+            if (!fieldType || fieldType->kind != StabsTypeKind::Array)
+                return "";
+            int elemSize = arrayElementSizeBytes(field->typeRef);
+            if (elemSize <= 0 || coeffIt->second != elemSize)
+                return "";
+
+            std::string index = emitLinearTermExpr(inner, coeffIt->first);
+            if (index.empty())
+                return "";
+            return field->name + "[" + index + "]";
+        }
+
+        std::string sourceGlobalArrayLvalueExpr(const IRExpr *addr,
+                                                int accessSize = 0) {
+            SourceGlobalArrayAddress arrayAddr;
+            if (!sourceGlobalArrayAddressExpr(addr, arrayAddr) ||
+                arrayAddr.elemSize <= 0)
+                return "";
+
+            LinearOffsetExpr inner = arrayAddr.offset;
+            if (inner.constant < 0)
+                return "";
+
+            std::string elementIndex = "0";
+            std::string elementKey;
+            for (auto &[key, coeff] : inner.coeffs) {
+                if (coeff == arrayAddr.elemSize) {
+                    if (!elementKey.empty())
+                        return "";
+                    elementKey = key;
+                }
+            }
+            if (!elementKey.empty()) {
+                elementIndex = emitLinearTermExpr(inner, elementKey);
+                if (elementIndex.empty())
+                    return "";
+                inner.coeffs.erase(elementKey);
+                inner.terms.erase(elementKey);
+            } else if (!inner.coeffs.empty()) {
+                return "";
+            }
+
+            int64_t elementConst = inner.constant / arrayAddr.elemSize;
+            int fieldOffset = (int)(inner.constant % arrayAddr.elemSize);
+            if (elementConst != 0) {
+                if (elementIndex == "0") {
+                    elementIndex = std::to_string(elementConst);
+                } else {
+                    elementIndex = "(" + elementIndex + " + " +
+                                   std::to_string(elementConst) + ")";
+                }
+            }
+
+            std::string access =
+                sourceGlobalArrayFieldAccess(arrayAddr.elemType, fieldOffset,
+                                             inner, accessSize);
+            if (access.empty())
+                return "";
+            return arrayAddr.emitName + "[" + elementIndex + "]." + access;
+        }
+
         static std::vector<std::string> splitMemberPath(const std::string &path) {
             std::vector<std::string> parts;
             size_t start = 0;
@@ -5859,6 +6206,11 @@ private:
                 else if (stmt.storeSize == 5) storeCast = "float";
                 else if (stmt.storeSize == 9) storeCast = "double";
                 if (s_portMode) {
+                    std::string arrayField = sourceGlobalArrayLvalueExpr(a, stmt.storeSize);
+                    if (!arrayField.empty()) {
+                        out += pad(indent) + QString::fromStdString(arrayField + " = " + val) + ";\n";
+                        break;
+                    }
                     std::string field = globalFieldLvalueExpr(a, true, stmt.storeSize);
                     if (!field.empty()) {
                         out += pad(indent) + QString::fromStdString(field + " = " + val) + ";\n";
@@ -7068,6 +7420,11 @@ private:
                     }
                 }
                 if (s_portMode && addr) {
+                    std::string arrayField = sourceGlobalArrayLvalueExpr(addr, e->loadSize);
+                    if (!arrayField.empty()) {
+                        result = arrayField;
+                        break;
+                    }
                     std::string field = globalFieldLvalueExpr(addr, true, e->loadSize);
                     if (!field.empty()) {
                         result = field;
@@ -9472,6 +9829,10 @@ private:
                 if (s_portMode && loadAddr) {
                     bool is8 = (e->castKind == CastKind::ZeroExt8 ||
                                 e->castKind == CastKind::Trunc8);
+                    std::string arrayField =
+                        sourceGlobalArrayLvalueExpr(loadAddr, is8 ? 1 : 2);
+                    if (!arrayField.empty())
+                        return arrayField;
                     std::string field = globalFieldLvalueExpr(loadAddr, true, is8 ? 1 : 2);
                     if (!field.empty())
                         return field;
