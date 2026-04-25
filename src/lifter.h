@@ -1285,6 +1285,116 @@ private:
     // Cache: which call target addresses use regparm(3) (static — shared across all lifts)
     static inline std::map<uint32_t, bool> m_regparmCache;
 
+    struct StackArrayAccess {
+        const StabsTypedVar *local = nullptr;
+        TypeRef arrayType = NullType;
+        TypeRef elemType = NullType;
+        int elemSize = 0;
+        int arraySize = 0;
+        int byteOffset = 0;
+        int elemIndex = 0;
+    };
+
+    int arrayElemSize(const StabsTypeInfo *arrayType) const {
+        if (!arrayType || arrayType->kind != StabsTypeKind::Array)
+            return 0;
+        auto *elem = m_types.resolveType(arrayType->targetType);
+        return elem && elem->sizeBytes > 0 ? elem->sizeBytes : 0;
+    }
+
+    int arrayStorageSize(const StabsTypeInfo *arrayType) const {
+        if (!arrayType || arrayType->kind != StabsTypeKind::Array)
+            return 0;
+        if (arrayType->sizeBytes > 0)
+            return arrayType->sizeBytes;
+        int elemSz = arrayElemSize(arrayType);
+        int count = arrayType->arrayHigh - arrayType->arrayLow + 1;
+        if (elemSz > 0 && count > 0)
+            return elemSz * count;
+        return 0;
+    }
+
+    bool stackArrayAtOffset(int disp, StackArrayAccess &out) const {
+        const StabsTypedVar *bestLocal = nullptr;
+        const StabsTypeInfo *bestArray = nullptr;
+        int bestByteOffset = 0x7fffffff;
+
+        for (auto &[off, loc] : m_localByOffset) {
+            auto *arrayType = m_types.resolveType(loc->typeRef);
+            if (!arrayType || arrayType->kind != StabsTypeKind::Array)
+                continue;
+            int elemSz = arrayElemSize(arrayType);
+            int arraySz = arrayStorageSize(arrayType);
+            if (elemSz <= 0 || arraySz <= 0)
+                continue;
+            if (disp < off || disp >= off + arraySz)
+                continue;
+            int byteOffset = disp - off;
+            if (byteOffset < bestByteOffset) {
+                bestLocal = loc;
+                bestArray = arrayType;
+                bestByteOffset = byteOffset;
+            }
+        }
+
+        if (!bestLocal || !bestArray)
+            return false;
+        int elemSz = arrayElemSize(bestArray);
+        if (elemSz <= 0 || bestByteOffset % elemSz != 0)
+            return false;
+        out.local = bestLocal;
+        out.arrayType = bestLocal->typeRef;
+        out.elemType = bestArray->targetType;
+        out.elemSize = elemSz;
+        out.arraySize = arrayStorageSize(bestArray);
+        out.byteOffset = bestByteOffset;
+        out.elemIndex = bestByteOffset / elemSz;
+        return true;
+    }
+
+    static std::string stackArrayElementName(const StackArrayAccess &access) {
+        char name[256];
+        snprintf(name, sizeof(name), "%s[%d]",
+                 access.local->name.c_str(), access.elemIndex);
+        return name;
+    }
+
+    std::unique_ptr<IRExpr> stackIndexedArrayAddress(x86_op_mem &m,
+                                                     int accessSize,
+                                                     StackArrayAccess *outAccess = nullptr) {
+        if (m.base != X86_REG_EBP || m.index == X86_REG_INVALID ||
+            m.disp >= 0 || accessSize <= 0)
+            return nullptr;
+
+        StackArrayAccess access;
+        if (!stackArrayAtOffset((int)m.disp, access))
+            return nullptr;
+        if (access.elemSize <= 0 || accessSize != access.elemSize)
+            return nullptr;
+
+        auto index = readReg(m.index);
+        if (!index)
+            return nullptr;
+
+        if ((int)m.scale != access.elemSize) {
+            if (access.elemSize != 1 || m.scale <= 1)
+                return nullptr;
+            index = IRExpr::mkBinary(IROp::Mul, std::move(index),
+                                     IRExpr::mkConst((int)m.scale));
+        }
+        if (access.elemIndex != 0) {
+            index = IRExpr::mkBinary(IROp::Add, std::move(index),
+                                     IRExpr::mkConst(access.elemIndex));
+        }
+
+        if (outAccess)
+            *outAccess = access;
+        return IRExpr::mkBinary(
+            IROp::Add,
+            IRExpr::mkVar(access.local->name, access.arrayType),
+            std::move(index));
+    }
+
     // Detect if a function at the given address uses regparm calling convention
     // by scanning its prologue bytes for: mov [ebp-N], eax/edx/ecx patterns.
     // Uses raw byte scanning for speed (no Capstone disassembly needed).
@@ -1609,7 +1719,7 @@ private:
         case X86_OP_REG: return readReg(op.reg);
         case X86_OP_IMM: return readImm(op.imm);
         case X86_OP_MEM: {
-            auto result = readMem(op.mem);
+            auto result = readMem(op.mem, op.size);
             // Propagate operand size for correct cast width
             if (result && op.size > 0 && op.size < 4) {
                 if (result->op == IROp::Load)
@@ -1639,7 +1749,7 @@ private:
         return IRExpr::mkConst(imm);
     }
 
-    std::unique_ptr<IRExpr> readMem(x86_op_mem &m) {
+    std::unique_ptr<IRExpr> readMem(x86_op_mem &m, int accessSize = 4) {
         // EBP-relative: param or local
         if (m.base == X86_REG_EBP && m.index == X86_REG_INVALID) {
             int d = (int)m.disp;
@@ -1649,6 +1759,12 @@ private:
                     return IRExpr::mkVar(it->second->name, it->second->typeRef);
             }
             if (d < 0) {
+                StackArrayAccess arrayAccess;
+                if (stackArrayAtOffset(d, arrayAccess) &&
+                    accessSize > 0 && accessSize == arrayAccess.elemSize) {
+                    return IRExpr::mkVar(stackArrayElementName(arrayAccess),
+                                         arrayAccess.elemType);
+                }
                 auto it = m_localByOffset.find(d);
                 if (it != m_localByOffset.end()) {
                     auto var = IRExpr::mkVar(it->second->name, it->second->typeRef);
@@ -1659,34 +1775,19 @@ private:
                         return IRExpr::mkLoad(std::move(var));
                     return var;
                 }
-                // Check if offset falls within an array local
-                for (auto &[off, loc] : m_localByOffset) {
-                    if (off > d) continue;
-                    auto *lt = m_types.resolveType(loc->typeRef);
-                    if (lt && lt->kind == StabsTypeKind::Array) {
-                        int arrSz = lt->sizeBytes;
-                        if (arrSz <= 0 && lt->arrayHigh >= lt->arrayLow) {
-                            auto *et = m_types.resolveType(lt->targetType);
-                            arrSz = (lt->arrayHigh - lt->arrayLow + 1) * (et && et->sizeBytes > 0 ? et->sizeBytes : 4);
-                        }
-                        if (arrSz <= 0) arrSz = 64;
-                        int elemSz = 4;
-                        { auto *et = m_types.resolveType(lt->targetType); if (et && et->sizeBytes > 0) elemSz = et->sizeBytes; }
-                        int arrayEnd = off + arrSz;
-                        if (d >= off && d < arrayEnd) {
-                            int idx = (d - off) / elemSz;
-                            char idxBuf[64];
-                            snprintf(idxBuf, sizeof(idxBuf), "%s[%d]", loc->name.c_str(), idx);
-                            return IRExpr::mkVar(idxBuf, lt->targetType);
-                        }
-                    }
-                }
             }
             // Unnamed stack slot
             char buf[32];
             if (d > 0) snprintf(buf, sizeof(buf), "arg_%x", (d - 8) / 4);
             else snprintf(buf, sizeof(buf), "var_%x", (-d) / 4);
             return IRExpr::mkVar(buf);
+        }
+
+        StackArrayAccess indexedAccess;
+        if (auto addr = stackIndexedArrayAddress(m, accessSize, &indexedAccess)) {
+            auto load = IRExpr::mkLoad(std::move(addr), indexedAccess.elemType);
+            load->loadSize = accessSize;
+            return load;
         }
 
         // PIC-relative (EBX + disp)
@@ -1920,39 +2021,28 @@ private:
                 }
             }
             if (d < 0) {
+                StackArrayAccess arrayAccess;
+                if (stackArrayAtOffset(d, arrayAccess) &&
+                    storeSize > 0 && storeSize == arrayAccess.elemSize) {
+                    bb.stmts.push_back(IRStmt::mkVarSet(
+                        stackArrayElementName(arrayAccess), std::move(val),
+                        arrayAccess.elemType, storeSize));
+                    return;
+                }
                 auto it = m_localByOffset.find(d);
                 if (it != m_localByOffset.end()) {
                     bb.stmts.push_back(IRStmt::mkVarSet(it->second->name, std::move(val), it->second->typeRef));
                     return;
-                }
-                // Check if offset falls within an array local
-                for (auto &[off, loc] : m_localByOffset) {
-                    if (off > d) continue;
-                    auto *lt = m_types.resolveType(loc->typeRef);
-                    if (lt && lt->kind == StabsTypeKind::Array) {
-                        int arrSz = lt->sizeBytes;
-                        if (arrSz <= 0 && lt->arrayHigh >= lt->arrayLow) {
-                            auto *et = m_types.resolveType(lt->targetType);
-                            arrSz = (lt->arrayHigh - lt->arrayLow + 1) * (et && et->sizeBytes > 0 ? et->sizeBytes : 4);
-                        }
-                        if (arrSz <= 0) arrSz = 64;
-                        int elemSz = 4;
-                        { auto *et = m_types.resolveType(lt->targetType); if (et && et->sizeBytes > 0) elemSz = et->sizeBytes; }
-                        int arrayEnd = off + arrSz;
-                        if (d >= off && d < arrayEnd) {
-                            int idx = (d - off) / elemSz;
-                            char idxBuf[64];
-                            snprintf(idxBuf, sizeof(idxBuf), "%s[%d]", loc->name.c_str(), idx);
-                            bb.stmts.push_back(IRStmt::mkVarSet(idxBuf, std::move(val), lt->targetType));
-                            return;
-                        }
-                    }
                 }
             }
             char buf[32];
             if (d > 0) snprintf(buf, sizeof(buf), "arg_%x", (d - 8) / 4);
             else snprintf(buf, sizeof(buf), "var_%x", (-d) / 4);
             bb.stmts.push_back(IRStmt::mkVarSet(buf, std::move(val)));
+            return;
+        }
+        if (auto addr = stackIndexedArrayAddress(m, storeSize)) {
+            bb.stmts.push_back(IRStmt::mkStore(std::move(addr), std::move(val), storeSize));
             return;
         }
         // Struct field write (skip offset 0: [reg+0] = *reg, not field access)

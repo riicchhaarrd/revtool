@@ -2917,16 +2917,29 @@ private:
             // optimized away in lifting).  Standard Ghidra-style cleanup.
             std::set<std::string> usedLocalNames;
             if (s_portMode) {
+                auto markUsedLocalName = [&](const std::string &name) {
+                    if (name.empty()) return;
+                    usedLocalNames.insert(name);
+                    size_t cut = name.find('[');
+                    size_t dot = name.find('.');
+                    size_t arrow = name.find("->");
+                    if (dot != std::string::npos && (cut == std::string::npos || dot < cut))
+                        cut = dot;
+                    if (arrow != std::string::npos && (cut == std::string::npos || arrow < cut))
+                        cut = arrow;
+                    if (cut != std::string::npos && cut > 0)
+                        usedLocalNames.insert(name.substr(0, cut));
+                };
                 std::function<void(const IRExpr*)> scanVars = [&](const IRExpr *e) {
                     if (!e) return;
                     if (e->op == IROp::Var && !e->name.empty())
-                        usedLocalNames.insert(e->name);
+                        markUsedLocalName(e->name);
                     for (auto &k : e->kids) scanVars(k.get());
                 };
                 for (auto &bb : m_func.blocks)
                     for (auto &stmt : bb.stmts) {
                         if (stmt.kind == IRStmtKind::VarSet && !stmt.destVar.empty())
-                            usedLocalNames.insert(stmt.destVar);
+                            markUsedLocalName(stmt.destVar);
                         scanVars(stmt.expr.get());
                         scanVars(stmt.addr.get());
                         for (auto &a : stmt.args) scanVars(a.get());
@@ -5422,6 +5435,37 @@ private:
             }
             return base;
         }
+
+        bool localArrayAddressIndex(IRExpr *addr, int accessSize,
+                                    IRExpr *&arrayBase, IRExpr *&indexExpr) const {
+            arrayBase = nullptr;
+            indexExpr = nullptr;
+            if (!addr || addr->op != IROp::Add || addr->kids.size() != 2 ||
+                accessSize <= 0)
+                return false;
+
+            for (int side = 0; side < 2; ++side) {
+                IRExpr *base = addr->kids[side].get();
+                IRExpr *idx = addr->kids[1 - side].get();
+                if (!base || !idx || base->op != IROp::Var || base->name.empty())
+                    continue;
+
+                TypeRef baseType = exprType(base);
+                auto *arrayType = baseType != NullType ? m_types.resolveType(baseType) : nullptr;
+                if (!arrayType || arrayType->kind != StabsTypeKind::Array)
+                    continue;
+                auto *elemType = m_types.resolveType(arrayType->targetType);
+                if (!elemType || elemType->sizeBytes <= 0 ||
+                    elemType->sizeBytes != accessSize)
+                    continue;
+
+                arrayBase = base;
+                indexExpr = idx;
+                return true;
+            }
+            return false;
+        }
+
         std::set<int>         m_inliningTemps;    // cycle guard for temp inlining in emitExpr
         bool                  m_emittedRetVoid = true; // true if function signature says void
         int                   m_addrDepth = 0;     // >0 when emitting Load/Store address sub-exprs
@@ -6266,7 +6310,7 @@ private:
                         }
                     }
                 }
-                if (s_portMode && stmt.expr &&
+                if (s_portMode && stmt.expr && stmt.expr->op != IROp::AddrOf &&
                     (aggregateObjectType(rhs, stmt.expr.get()) != NullType ||
                      m_types.globalByName(rhs)) &&
                     rhs.find_first_of("()+-*/&[] .") == std::string::npos) {
@@ -6650,6 +6694,13 @@ private:
                 }
                 // Add(base, Mul(idx, scale)) or Add(Mul(idx, scale), base) → base[idx] = val
                 else if (a->op == IROp::Add && a->kids.size() == 2) {
+                    IRExpr *arrayBase = nullptr;
+                    IRExpr *indexExpr = nullptr;
+                    if (localArrayAddressIndex(a, stmt.storeSize, arrayBase, indexExpr)) {
+                        out += pad(indent) + QString::fromStdString(
+                            emitExpr(arrayBase) + "[" + emitExpr(indexExpr) + "] = " + val) + ";\n";
+                        break;
+                    }
                     IRExpr *storeBase = nullptr, *storeIdx = nullptr;
                     int storeScale = 0;
                     for (int side = 0; side < 2; ++side) {
@@ -7086,8 +7137,21 @@ private:
                 } // end array/struct type check
                 // For sub-word stores (16-bit/8-bit), use pointer cast to force
                 // the correct store width: *(short *)(&dest) = val
+                bool compoundScalarStore = false;
+                if (destIsCompound && stmt.destType != NullType &&
+                    (stmt.storeSize == 1 || stmt.storeSize == 2)) {
+                    auto *dst = m_types.resolveType(stmt.destType);
+                    compoundScalarStore =
+                        dst && dst->sizeBytes == stmt.storeSize &&
+                        dst->kind != StabsTypeKind::Struct &&
+                        dst->kind != StabsTypeKind::Union &&
+                        dst->kind != StabsTypeKind::Array;
+                }
                 if (s_cosmeticMode && (stmt.storeSize == 2 || stmt.storeSize == 1)) {
                     // Cosmetic: simple assignment for readability
+                    out += pad(indent) + QString::fromStdString(
+                        cNameOrKeep(dest) + " = " + val) + ";\n";
+                } else if (compoundScalarStore) {
                     out += pad(indent) + QString::fromStdString(
                         cNameOrKeep(dest) + " = " + val) + ";\n";
                 } else if (stmt.storeSize == 2) {
@@ -7602,6 +7666,14 @@ private:
                     std::string field = globalFieldLvalueExpr(addr, true, e->loadSize);
                     if (!field.empty()) {
                         result = field;
+                        break;
+                    }
+                }
+                {
+                    IRExpr *arrayBase = nullptr;
+                    IRExpr *indexExpr = nullptr;
+                    if (localArrayAddressIndex(addr, e->loadSize, arrayBase, indexExpr)) {
+                        result = emitExpr(arrayBase) + "[" + emitExpr(indexExpr) + "]";
                         break;
                     }
                 }
