@@ -5,6 +5,7 @@
 #include <map>
 #include <algorithm>
 #include <cassert>
+#include <functional>
 
 // ── Control Flow Graph structuring ───────────────────────────────────
 // Recovers if/else, while, do-while, and switch from the basic block
@@ -598,6 +599,89 @@ private:
                             }
                             if (!condUsesCall)
                                 headerStmtsAreLoopBody = true;
+                        }
+
+                        // Header assignments that feed the branch condition
+                        // must remain inside the loop when they read values
+                        // updated by the latch/body.  Hoisting them before the
+                        // while freezes the condition variable and can turn
+                        // counter loops into infinite loops.
+                        if (!headerStmtsAreLoopBody && stmtEnd > 0 &&
+                            backSrcForLatch >= 0) {
+                            std::set<int> loopBlocks = {cur};
+                            std::vector<int> stack = {backSrcForLatch};
+                            while (!stack.empty()) {
+                                int b = stack.back();
+                                stack.pop_back();
+                                if (b < 0 || b >= n || loopBlocks.count(b)) continue;
+                                loopBlocks.insert(b);
+                                for (int p : m_func->blocks[b].preds)
+                                    if (!loopBlocks.count(p))
+                                        stack.push_back(p);
+                            }
+
+                            std::set<int> condTemps;
+                            std::set<std::string> condVars;
+                            std::function<void(const IRExpr*)> collectUses =
+                                [&](const IRExpr *e) {
+                                    if (!e) return;
+                                    if (e->op == IROp::Temp)
+                                        condTemps.insert(e->tempId());
+                                    else if (e->op == IROp::Var && !e->name.empty())
+                                        condVars.insert(e->name);
+                                    for (auto &k : e->kids)
+                                        collectUses(k.get());
+                                };
+                            collectUses(br.expr.get());
+
+                            std::set<int> loopWrittenTemps;
+                            std::set<std::string> loopWrittenVars;
+                            for (int b : loopBlocks) {
+                                if (b == cur) continue;
+                                for (auto &s : m_func->blocks[b].stmts) {
+                                    if (s.kind == IRStmtKind::Assign &&
+                                        s.destTemp >= 0)
+                                        loopWrittenTemps.insert(s.destTemp);
+                                    else if (s.kind == IRStmtKind::VarSet &&
+                                             !s.destVar.empty())
+                                        loopWrittenVars.insert(s.destVar);
+                                }
+                            }
+
+                            auto exprReadsLoopWritten = [&](const IRExpr *e) {
+                                bool found = false;
+                                std::function<void(const IRExpr*)> scan =
+                                    [&](const IRExpr *node) {
+                                        if (!node || found) return;
+                                        if (node->op == IROp::Temp &&
+                                            loopWrittenTemps.count(node->tempId())) {
+                                            found = true;
+                                            return;
+                                        }
+                                        if (node->op == IROp::Var &&
+                                            loopWrittenVars.count(node->name)) {
+                                            found = true;
+                                            return;
+                                        }
+                                        for (auto &k : node->kids)
+                                            scan(k.get());
+                                    };
+                                scan(e);
+                                return found;
+                            };
+
+                            for (int si = 0; si < stmtEnd; ++si) {
+                                auto &s = bb.stmts[si];
+                                bool feedsCond =
+                                    (s.kind == IRStmtKind::Assign &&
+                                     condTemps.count(s.destTemp)) ||
+                                    (s.kind == IRStmtKind::VarSet &&
+                                     condVars.count(s.destVar));
+                                if (feedsCond && exprReadsLoopWritten(s.expr.get())) {
+                                    headerStmtsAreLoopBody = true;
+                                    break;
+                                }
+                            }
                         }
                     }
 
