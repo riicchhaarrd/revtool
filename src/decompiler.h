@@ -1264,6 +1264,35 @@ public:
                     }
                 }
                 if (!srcHasPointerDecl) continue;
+                auto containsIdent = [](const QString &line, const QString &name) -> bool {
+                    int pos = 0;
+                    while ((pos = line.indexOf(name, pos)) >= 0) {
+                        bool before = (pos == 0 ||
+                                       (!line[pos - 1].isLetterOrNumber() &&
+                                        line[pos - 1] != '_'));
+                        int end = pos + name.size();
+                        bool after = (end >= line.size() ||
+                                      (!line[end].isLetterOrNumber() &&
+                                       line[end] != '_'));
+                        if (before && after)
+                            return true;
+                        pos = end;
+                    }
+                    return false;
+                };
+                // Only inline a trivial alias when the aliased variable is not
+                // already live before this assignment.  Register coalescing can
+                // produce later copies like `v6 = v13` after `v6` was used as a
+                // real pointer; removing the original declaration leaves earlier
+                // uses undeclared and loses the more precise type.
+                bool usedBeforeAlias = false;
+                for (int j = declLine + 1; j < i; ++j) {
+                    if (containsIdent(lines[j], varName)) {
+                        usedBeforeAlias = true;
+                        break;
+                    }
+                }
+                if (usedBeforeAlias) continue;
                 // Count uses after the assignment
                 int useCount = 0;
                 bool usedWithArrow = false;
@@ -2245,6 +2274,33 @@ public:
                 result = lines.join('\n');
             }
         }
+        if (s_portMode) {
+            QRegularExpression framesAddr(
+                R"(&([A-Za-z_][A-Za-z0-9_]*)->frames\[(\d+)\]\.ps)");
+            QRegularExpressionMatch match;
+            int pos = 0;
+            while ((pos = result.indexOf(framesAddr, pos, &match)) >= 0) {
+                QString base = match.captured(1);
+                QString idx = match.captured(2);
+                QString repl = "((char *)" + base +
+                    " + __builtin_offsetof(client_t, frames) + " + idx +
+                    " * (sizeof(((client_t *)0)->frames) / 32))";
+                result.replace(pos, match.capturedLength(0), repl);
+                pos += repl.size();
+            }
+            QRegularExpression netchanAddr(
+                R"(&([A-Za-z_][A-Za-z0-9_]*)->netchan\.remoteAddress\.type)");
+            pos = 0;
+            while ((pos = result.indexOf(netchanAddr, pos, &match)) >= 0) {
+                QString base = match.captured(1);
+                QString repl = "((char *)" + base +
+                    " + __builtin_offsetof(client_t, netchan) + "
+                    "__builtin_offsetof(struct netchan_t, remoteAddress) + "
+                    "__builtin_offsetof(struct netadr_t, type))";
+                result.replace(pos, match.capturedLength(0), repl);
+                pos += repl.size();
+            }
+        }
 
         return result;
     }
@@ -2789,6 +2845,23 @@ private:
                         if (found) break;
                     }
                 }
+                if (s_portMode &&
+                    (decl.find("char *") != std::string::npos ||
+                     decl.find("int *") != std::string::npos ||
+                     decl.find("int ") == 0)) {
+                    for (auto &[tid, vid] : m_func.tempToVar) {
+                        auto nit = m_func.varNames.find(vid);
+                        if (nit == m_func.varNames.end() || nit->second != l.name)
+                            continue;
+                        TypeRef st = tempStructPointerType(tid);
+                        if (st != NullType) {
+                            decl = m_types.formatDecl(st, l.name);
+                            if (decl.substr(0, 6) == "const ")
+                                decl = decl.substr(6);
+                            break;
+                        }
+                    }
+                }
                 // Override int → char* for locals used as pointers (non-port mode only)
                 if (!s_portMode && m_pointerVars.count(l.name) && decl == "int " + l.name) {
                     bool usedAsSubscript = false;
@@ -2891,15 +2964,19 @@ private:
                             if (n->op == IROp::Field && !n->kids.empty() && n->kids[0]) {
                                 auto *base = n->kids[0].get();
                                 if (base->op == IROp::Temp) {
-                                    TypeRef btype = base->typeRef;
-                                    if (btype == NullType)
-                                        btype = m_func.tempType(base->tempId());
+                                    int tid = base->tempId();
+                                    TypeRef btype = tempStructPointerType(tid);
+                                    if (btype == NullType) {
+                                        btype = base->typeRef;
+                                        if (btype == NullType)
+                                            btype = m_func.tempType(tid);
+                                    }
                                     if (btype != NullType) {
                                         auto *bt = m_types.resolveType(btype);
-                                        if (bt && (bt->kind == StabsTypeKind::Pointer ||
-                                                   bt->kind == StabsTypeKind::Struct ||
-                                                   bt->kind == StabsTypeKind::Union))
-                                            m_tempStructPtr[base->tempId()] = btype;
+                                        if (m_types.isStructPointer(btype) ||
+                                            (bt && (bt->kind == StabsTypeKind::Struct ||
+                                                    bt->kind == StabsTypeKind::Union)))
+                                            m_tempStructPtr[tid] = btype;
                                     }
                                 }
                             }
@@ -2999,6 +3076,16 @@ private:
                     }
                     if (ttype.empty())
                         ttype = inferTempType(id);
+                    if (s_portMode) {
+                        TypeRef structDefType = tempStructPointerType(id);
+                        if (shouldPreferStructPointer(structDefType, resolvedType) ||
+                            ((ttype == "int" || ttype == "int *" ||
+                              ttype == "char *" || ttype == "void *") &&
+                             structDefType != NullType)) {
+                            resolvedType = structDefType;
+                            ttype = m_types.formatType(structDefType);
+                        }
+                    }
                     // Fallback: after inferTempType too, reject void* which can't be
                     // subscripted or used in pointer arithmetic.  Type tag only —
                     // the pointer value is unchanged.
@@ -3795,6 +3882,163 @@ private:
             if (!stripped.empty() && stripped[0] == '&')
                 return "*(int *)(" + stripped + ")";
             return "*(int *)(&" + value + ")";
+        }
+
+        TypeRef fieldTypeFromBase(const IRExpr *fieldExpr) const {
+            if (!fieldExpr || fieldExpr->op != IROp::Field || fieldExpr->kids.empty() ||
+                !fieldExpr->kids[0])
+                return NullType;
+            const IRExpr *base = fieldExpr->kids[0].get();
+            TypeRef baseType = NullType;
+            if (base->op == IROp::Temp) {
+                int tid = base->tempId();
+                baseType = tempStructPointerType(tid);
+                if (baseType == NullType)
+                    baseType = base->typeRef;
+                if (baseType == NullType)
+                    baseType = m_func.tempType(tid);
+            } else if (base->op == IROp::Var && !base->name.empty()) {
+                for (auto &p : m_func.params)
+                    if (p.name == base->name && p.typeRef != NullType)
+                        { baseType = p.typeRef; break; }
+                if (baseType == NullType)
+                    for (auto &l : m_func.locals)
+                        if (l.name == base->name && l.typeRef != NullType)
+                            { baseType = l.typeRef; break; }
+                if (baseType == NullType) {
+                    auto *g = m_types.globalByName(base->name);
+                    if (g) baseType = g->typeRef;
+                }
+            } else {
+                baseType = exprType(const_cast<IRExpr *>(base));
+            }
+            TypeRef structRef = NullType;
+            if (baseType != NullType) {
+                if (m_types.isStructPointer(baseType))
+                    structRef = m_types.getPointedStruct(baseType);
+                else {
+                    auto *bt = m_types.resolveType(baseType);
+                    if (bt && (bt->kind == StabsTypeKind::Struct ||
+                               bt->kind == StabsTypeKind::Union))
+                        structRef = baseType;
+                }
+            }
+            if (structRef == NullType)
+                return NullType;
+            auto *field = m_types.findFieldAtOffset(structRef, (int)fieldExpr->value);
+            return field ? field->typeRef : NullType;
+        }
+
+        TypeRef tempDefinitionType(int id, int depth = 0) const {
+            if (depth > 8) return NullType;
+            auto dit = m_tempDef.find(id);
+            if (dit == m_tempDef.end() || !dit->second)
+                return NullType;
+            const IRExpr *def = dit->second;
+            if (def->op == IROp::Field)
+                return fieldTypeFromBase(def);
+            if (def->op == IROp::Temp)
+                return tempDefinitionType(def->tempId(), depth + 1);
+            if (def->op == IROp::Add && def->kids.size() == 2) {
+                for (auto &kid : def->kids) {
+                    if (!kid) continue;
+                    TypeRef kt = NullType;
+                    if (kid->op == IROp::Temp)
+                        kt = tempStructPointerType(kid->tempId(), depth + 1);
+                    if (kt == NullType)
+                        kt = kid->typeRef;
+                    if (kt != NullType && m_types.isStructPointer(kt))
+                        return kt;
+                }
+            }
+            if (def->op == IROp::Call && !def->name.empty()) {
+                auto *cf = m_mf.stabsFunctionByName(def->name);
+                if (cf && cf->returnType != NullType)
+                    return cf->returnType;
+            }
+            if (def->op == IROp::Load && !def->kids.empty()) {
+                TypeRef addrType = exprType(def->kids[0].get());
+                if (addrType != NullType)
+                    return m_types.derefPointer(addrType);
+            }
+            return def->typeRef;
+        }
+
+        TypeRef tempStructPointerType(int id, int depth = 0) const {
+            if (depth > 8) return NullType;
+            auto sit = m_tempStructPtr.find(id);
+            if (sit != m_tempStructPtr.end() && sit->second != NullType &&
+                m_types.isStructPointer(sit->second))
+                return sit->second;
+            TypeRef direct = m_func.tempType(id);
+            if (direct != NullType && m_types.isStructPointer(direct))
+                return direct;
+            auto vit = m_func.tempToVar.find(id);
+            if (vit != m_func.tempToVar.end()) {
+                auto vtit = m_func.varTypes.find(vit->second);
+                if (vtit != m_func.varTypes.end() && vtit->second != NullType &&
+                    m_types.isStructPointer(vtit->second))
+                    return vtit->second;
+            }
+            TypeRef defType = tempDefinitionType(id, depth + 1);
+            if (defType != NullType && m_types.isStructPointer(defType))
+                return defType;
+            return NullType;
+        }
+
+        bool shouldPreferStructPointer(TypeRef candidate, TypeRef current) const {
+            if (candidate == NullType || !m_types.isStructPointer(candidate))
+                return false;
+            if (current == NullType)
+                return true;
+            if (m_types.isStructPointer(current))
+                return false;
+            auto *ct = m_types.resolveType(current);
+            return ct && ct->kind == StabsTypeKind::Pointer;
+        }
+
+        bool fieldAccessNeedsRawPointer(TypeRef baseType, const IRExpr *fieldExpr,
+                                        const std::string &access) const {
+            if (!s_portMode || !fieldExpr || fieldExpr->op != IROp::Field ||
+                access.find('.') == std::string::npos)
+                return false;
+            TypeRef structRef = NullType;
+            if (baseType != NullType) {
+                if (m_types.isStructPointer(baseType))
+                    structRef = m_types.getPointedStruct(baseType);
+                else {
+                    auto *bt = m_types.resolveType(baseType);
+                    if (bt && (bt->kind == StabsTypeKind::Struct ||
+                               bt->kind == StabsTypeKind::Union))
+                        structRef = baseType;
+                }
+            }
+            if (structRef == NullType) {
+                int dots = (int)std::count(access.begin(), access.end(), '.');
+                return (access.find('[') != std::string::npos && dots > 0) || dots > 1;
+            }
+            auto *field = m_types.findFieldAtOffset(structRef, (int)fieldExpr->value);
+            if (!field || field->typeRef == NullType || field->name.empty())
+                return false;
+            std::string fieldDecl = m_types.formatDecl(field->typeRef, field->name);
+            while (!fieldDecl.empty() && fieldDecl.front() == ' ')
+                fieldDecl.erase(fieldDecl.begin());
+            if (fieldDecl.compare(0, 6, "const ") == 0)
+                fieldDecl = fieldDecl.substr(6);
+            if ((fieldDecl.compare(0, 5, "char ") == 0 ||
+                 fieldDecl.compare(0, 5, "byte ") == 0) &&
+                fieldDecl.find('[') != std::string::npos)
+                return true;
+            auto *ft = m_types.resolveType(field->typeRef);
+            if (ft && ft->kind == StabsTypeKind::Array) {
+                auto *elem = m_types.resolveType(ft->targetType);
+                std::string elemName = m_types.formatType(ft->targetType);
+                if ((elem && (elem->kind == StabsTypeKind::Char ||
+                              elem->kind == StabsTypeKind::UChar)) ||
+                    elemName == "char" || elemName == "byte")
+                    return true;
+            }
+            return false;
         }
 
         // Port mode: wrap a temp expression in a struct pointer cast for -> access.
@@ -6564,14 +6808,27 @@ private:
                     } else {
                         // Check if inner is a field_X on a non-pointer base
                         // → use pointer arithmetic instead of ->
-                        std::string innerStr = emitExpr(inner);
-                        if (innerStr.find("->field_") != std::string::npos) {
-                            // Convert &(base->field_N) to (base + N)
+                        TypeRef innerBaseType = NullType;
+                        if (inner->kids[0]->op == IROp::Temp)
+                            innerBaseType = tempStructPointerType(inner->kids[0]->tempId());
+                        if (innerBaseType == NullType)
+                            innerBaseType = exprType(inner->kids[0].get());
+                        if (fieldAccessNeedsRawPointer(innerBaseType, inner, inner->name)) {
                             std::string base2 = emitExpr(inner->kids[0].get());
-                            int off2 = (int)inner->value;
-                            result = "(" + base2 + " + " + std::to_string(off2) + ")";
+                            char hx[16];
+                            snprintf(hx, sizeof(hx), "0x%X", (unsigned)(int)inner->value);
+                            result = "(" + charPtrCast(base2, inner->kids[0].get()) +
+                                     " + " + hx + ")";
                         } else {
-                            result = "&" + innerStr;
+                            std::string innerStr = emitExpr(inner);
+                            if (innerStr.find("->field_") != std::string::npos) {
+                                // Convert &(base->field_N) to (base + N)
+                                std::string base2 = emitExpr(inner->kids[0].get());
+                                int off2 = (int)inner->value;
+                                result = "(" + base2 + " + " + std::to_string(off2) + ")";
+                            } else {
+                                result = "&" + innerStr;
+                            }
                         }
                     }
                 } else {
@@ -6689,9 +6946,11 @@ private:
                         if (e->kids[0]->op == IROp::Temp) {
                             int tid = e->kids[0]->tempId();
                             auto spit = m_tempStructPtr.find(tid);
-                            if (spit != m_tempStructPtr.end() && spit->second != NullType)
+                            declType = tempStructPointerType(tid);
+                            if (declType == NullType && spit != m_tempStructPtr.end() &&
+                                spit->second != NullType)
                                 declType = spit->second;
-                            else
+                            if (declType == NullType)
                                 declType = m_func.tempType(tid);
                         }
                         else if (e->kids[0]->op == IROp::Var) {
@@ -6763,7 +7022,16 @@ private:
                             }
                         }
                     }
-                    if (fieldIsLargeStruct) {
+                    TypeRef rawAccessBaseType = declType != NullType ? declType : baseType;
+                    bool rawNestedField =
+                        fieldAccessNeedsRawPointer(rawAccessBaseType, e, e->name);
+                    if (rawNestedField) {
+                        int off = (int)e->value;
+                        char hx[16]; snprintf(hx, sizeof(hx), "0x%X", (unsigned)off);
+                        result = std::string("*(") + loadCastType(e->loadSize) + " *)(" +
+                            charPtrCast(base, e->kids.empty() ? nullptr : e->kids[0].get()) +
+                            " + " + hx + ")";
+                    } else if (fieldIsLargeStruct) {
                         int off = (int)e->value;
                         result = std::string("*(") + loadCastType(e->loadSize) + " *)(" + charPtrCast(base, e->kids.empty() ? nullptr : e->kids[0].get()) + " + " + std::to_string(off) + ")";
                     } else if (e->name == "_") {
@@ -8063,6 +8331,11 @@ private:
             auto it = m_tempDef.find(id);
             if (it == m_tempDef.end() || !it->second) return "int";
             auto *e = it->second;
+            if (e->op == IROp::Field && !e->kids.empty()) {
+                TypeRef fieldType = fieldTypeFromBase(e);
+                if (fieldType != NullType)
+                    return m_types.formatType(fieldType);
+            }
             // If the expression itself has a type annotation, use it
             if (e->typeRef != NullType) {
                 auto *rt = m_types.resolveType(e->typeRef);
@@ -8416,10 +8689,31 @@ private:
         // Get the STABS type of an expression
         TypeRef exprType(IRExpr *e) const {
             if (!e) return NullType;
-            if (e->typeRef != NullType) return e->typeRef;
+            if (e->op == IROp::Field) {
+                TypeRef fieldType = fieldTypeFromBase(e);
+                if (fieldType != NullType)
+                    return fieldType;
+                return e->typeRef;
+            }
             if (e->op == IROp::Temp) {
                 TypeRef t = m_func.tempType(e->tempId());
+                TypeRef defType = tempDefinitionType(e->tempId());
+                if (shouldPreferStructPointer(defType, t))
+                    return defType;
+                auto vit = m_func.tempToVar.find(e->tempId());
+                if (vit != m_func.tempToVar.end()) {
+                    auto vtit = m_func.varTypes.find(vit->second);
+                    if (vtit != m_func.varTypes.end() &&
+                        shouldPreferStructPointer(vtit->second, t))
+                        return vtit->second;
+                }
+                auto sit = m_tempStructPtr.find(e->tempId());
+                if (sit != m_tempStructPtr.end() &&
+                    shouldPreferStructPointer(sit->second, t))
+                    return sit->second;
                 if (t != NullType) return t;
+                if (defType != NullType) return defType;
+                if (e->typeRef != NullType) return e->typeRef;
                 // Follow temp definition for pointer arithmetic patterns
                 auto dit = m_tempDef.find(e->tempId());
                 if (dit != m_tempDef.end() && dit->second) {
@@ -8445,7 +8739,7 @@ private:
                 }
                 return NullType;
             }
-            if (e->op == IROp::Field) return e->typeRef;
+            if (e->typeRef != NullType) return e->typeRef;
             // Add: propagate pointer type (ptr + int → ptr)
             if (e->op == IROp::Add && e->kids.size() == 2) {
                 TypeRef lt = exprType(e->kids[0].get());
