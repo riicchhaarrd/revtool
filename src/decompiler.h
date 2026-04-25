@@ -2301,6 +2301,45 @@ public:
                 pos += repl.size();
             }
         }
+        if (s_portMode) {
+            QStringList lines = result.split('\n');
+            std::map<QString, QString> localTypeOverride;
+            QRegularExpression sunParseAssign(
+                R"(^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*&.*->sunParse\s*;)");
+            QRegularExpression sunLightColorAssign(
+                R"(^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*&.*->sunLight\.color\[0\]\s*;)");
+            for (auto &line : lines) {
+                QRegularExpressionMatch m = sunParseAssign.match(line);
+                if (m.hasMatch())
+                    localTypeOverride[m.captured(1)] = "struct SunLightParseParams *";
+                m = sunLightColorAssign.match(line);
+                if (m.hasMatch())
+                    localTypeOverride[m.captured(1)] = "struct GfxLight *";
+            }
+            if (!localTypeOverride.empty()) {
+                for (auto &line : lines) {
+                    QString trimmed = line.trimmed();
+                    if (!trimmed.startsWith("struct GfxWorld *") || !trimmed.endsWith(";"))
+                        continue;
+                    int semi = trimmed.lastIndexOf(';');
+                    int ne = semi;
+                    while (ne > 0 && trimmed[ne - 1] == ' ') ne--;
+                    int ns = ne - 1;
+                    while (ns > 0 && (trimmed[ns - 1].isLetterOrNumber() ||
+                                      trimmed[ns - 1] == '_'))
+                        ns--;
+                    QString name = trimmed.mid(ns, ne - ns);
+                    auto it = localTypeOverride.find(name);
+                    if (it == localTypeOverride.end())
+                        continue;
+                    int indent = 0;
+                    while (indent < line.size() && line[indent] == ' ')
+                        indent++;
+                    line = QString(indent, ' ') + it->second + name + ";";
+                }
+                result = lines.join('\n');
+            }
+        }
 
         return result;
     }
@@ -3220,6 +3259,11 @@ private:
                     if (ttype.substr(0, 6) == "const ") ttype = ttype.substr(6);
                     // Replace void (non-pointer) with int — can't have void locals
                     if (ttype == "void") ttype = "int";
+                    // Anonymous aggregate keywords without a tag are not valid
+                    // local declarations (`union v84;`).  Temps here are scalar
+                    // register values, so keep the bytes as an int.
+                    if (ttype == "union" || ttype == "struct")
+                        ttype = "int";
                     // Final safety: void* can't be subscripted — force to int* in port mode
                     if (s_portMode && ttype == "void *")
                         ttype = "int *";
@@ -3329,6 +3373,8 @@ private:
                 // void* can't be subscripted or used in pointer arithmetic in C
                 if (s_portMode && itype == "void *")
                     itype = "int *";
+                if (itype == "union" || itype == "struct")
+                    itype = "int";
                 // Init conditionally-assigned temps to 0 — same logic as
                 // path P1 but for temps without tempType entries.  Also skip
                 // subscript-used temps (preprocess.py's fix_int_subscripted
@@ -3439,6 +3485,8 @@ private:
                 // void* can't be subscripted/arithmetic in C — type-tag only change
                 if (s_portMode && itype == "void *")
                     itype = "int *";
+                if (itype == "union" || itype == "struct")
+                    itype = "int";
                 // Same init-to-zero treatment as tempTypes and also-scan paths.
                 std::string sfx3 = ";\n";
                 if (s_portMode && !itype.empty() &&
