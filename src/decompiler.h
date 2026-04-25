@@ -1169,6 +1169,28 @@ public:
                 ++p;
             }
             cleaned.replace("(int)&(int)&", "(int)&");
+            auto fixClientVoidField0 = [&](const QString &name, const QString &field) {
+                const QString addr = "&" + name;
+                for (const QString &qual : {QString("void"), QString("const void")}) {
+                    QString member = "((" + qual + " *)" + name + ")->" + field;
+                    cleaned.replace("((char *)(" + member + "))", "((char *)" + addr + ")");
+                    cleaned.replace("((char *)" + member, "((char *)" + addr);
+                    cleaned.replace("((char *)(" + member + ")", "((char *)" + addr);
+
+                    QRegularExpression assignRe(
+                        "(=\\s*)\\(\\(" + QRegularExpression::escape(qual) +
+                        "\\s+\\*\\)" + QRegularExpression::escape(name) +
+                        "\\)->" + QRegularExpression::escape(field) + "\\s*;");
+                    cleaned.replace(assignRe, "\\1(int)" + addr + ";");
+
+                    cleaned.replace("((" + qual + " *)" + name + ")->" + field,
+                                    "*(int *)((char *)" + addr + ")");
+                }
+            };
+            // STABS exposes the client globals as void*, but the generated code
+            // uses field zero as an address base.  Preserve that address use in C.
+            fixClientVoidField0("clc", "state");
+            fixClientVoidField0("cl", "active");
         }
         // Pre-pass: fix &EXPR->field_X patterns → (EXPR + 0xX)
         // &0->field_X → 0xX
@@ -1412,6 +1434,23 @@ public:
         if (!s_cosmeticMode) {
             // Count occurrences of (char *)NAME + 0x patterns
             std::map<QString, int> globalCounts;
+            std::set<QString> localDeclNames;
+            {
+                QStringList localLines = cleaned.split('\n');
+                QRegularExpression declRe(
+                    R"(^\s*(?:(?:const|volatile|unsigned|signed|short|long)\s+|(?:struct|union|enum)\s+\w+\s+|[A-Za-z_]\w*\s+)+[*\s]*([A-Za-z_]\w*)\s*(?:\[[^\]]*\])?(?:\s*=\s*[^;]*)?;\s*$)");
+                bool inBody = false;
+                for (const QString &line : localLines) {
+                    if (!inBody) {
+                        if (line.contains('{'))
+                            inBody = true;
+                        continue;
+                    }
+                    auto m = declRe.match(line);
+                    if (m.hasMatch())
+                        localDeclNames.insert(m.captured(1));
+                }
+            }
             QString marker = "(char *)";
             int pos = 0;
             while ((pos = cleaned.indexOf(marker, pos)) != -1) {
@@ -1423,6 +1462,10 @@ public:
                     nameEnd++;
                 if (nameEnd > nameStart) {
                     QString gname = cleaned.mid(nameStart, nameEnd - nameStart);
+                    if (localDeclNames.count(gname)) {
+                        pos = nameEnd;
+                        continue;
+                    }
                     // Check followed by " + 0x"
                     int afterName = nameEnd;
                     while (afterName < cleaned.size() && cleaned[afterName] == ' ') afterName++;
@@ -1439,6 +1482,7 @@ public:
                 pos = nameStart;
             }
             for (auto &[gname, count] : globalCounts) {
+                if (localDeclNames.count(gname)) continue;
                 if (count < 3) continue;
                 QString ptrName = "_" + gname + "_p";
                 int bracePos = cleaned.indexOf('{');
@@ -2340,6 +2384,37 @@ public:
                 result = lines.join('\n');
             }
         }
+        if (s_portMode) {
+            QStringList lines = result.split('\n');
+            QRegularExpression ptrDecl(
+                R"(^(\s*)(?:char|int)\s*\*\s*(v\d+|var_[A-Za-z0-9_]+)\s*;)");
+            for (int i = 0; i < lines.size(); ++i) {
+                QRegularExpressionMatch m = ptrDecl.match(lines[i]);
+                if (!m.hasMatch())
+                    continue;
+                QString varName = m.captured(2);
+                bool usedInBitwise = false;
+                for (int j = i + 1; j < lines.size(); ++j) {
+                    QString line = lines[j];
+                    if (line.contains(varName + " &") ||
+                        line.contains(varName + " |") ||
+                        line.contains(varName + " ^") ||
+                        line.contains(varName + " >>") ||
+                        line.contains(varName + " <<") ||
+                        line.contains(varName + ") &") ||
+                        line.contains(varName + ") |") ||
+                        line.contains(varName + ") ^") ||
+                        line.contains(varName + ") >>") ||
+                        line.contains(varName + ") <<")) {
+                        usedInBitwise = true;
+                        break;
+                    }
+                }
+                if (usedInBitwise)
+                    lines[i] = m.captured(1) + "int " + varName + ";";
+            }
+            result = lines.join('\n');
+        }
 
         return result;
     }
@@ -2898,6 +2973,18 @@ private:
                             if (decl.substr(0, 6) == "const ")
                                 decl = decl.substr(6);
                             break;
+                        }
+                    }
+                }
+                if (s_portMode) {
+                    TypeRef callAggregate = localAggregateTypeFromCallUse(l.name);
+                    if (callAggregate != NullType) {
+                        auto *cat = m_types.resolveType(callAggregate);
+                        if (cat && (cat->kind == StabsTypeKind::Struct ||
+                                    cat->kind == StabsTypeKind::Union)) {
+                            decl = m_types.formatDecl(callAggregate, l.name);
+                            if (decl.substr(0, 6) == "const ")
+                                decl = decl.substr(6);
                         }
                     }
                 }
@@ -3772,17 +3859,22 @@ private:
                 }
             }
 
-            // Fix float→int: if a variable is declared float but used in
-            // bitwise/shift operations (>>, <<, &, |, ^), redeclare as int.
+            // Fix scalar register reuse: if a variable is declared with a
+            // non-integer type but used in bitwise/shift operations
+            // (>>, <<, &, |, ^), redeclare it as int.
             {
                 QStringList oLines = out.split('\n');
                 for (int li = 0; li < oLines.size(); ++li) {
                     QString t = oLines[li].trimmed();
-                    if (!t.startsWith("float ") && !t.startsWith("byte ")) continue;
+                    if (!t.startsWith("float ") && !t.startsWith("byte ") &&
+                        !t.startsWith("char *") && !t.startsWith("int *"))
+                        continue;
                     // Extract variable name
                     int semi = t.indexOf(';');
                     if (semi < 0) continue;
-                    QString typePart = t.startsWith("float ") ? "float " : "byte ";
+                    QString typePart = t.startsWith("float ") ? "float " :
+                                       t.startsWith("byte ") ? "byte " :
+                                       t.startsWith("char *") ? "char *" : "int *";
                     QString varName = t.mid(typePart.size(), semi - typePart.size()).trimmed();
                     if (varName.isEmpty()) continue;
                     // Check if this var is used in bitwise/shift ops
@@ -4087,6 +4179,86 @@ private:
                     return true;
             }
             return false;
+        }
+
+        bool typeSupportsNamedMemberAccess(TypeRef ref) const {
+            if (ref == NullType)
+                return false;
+            auto *t = m_types.resolveType(ref);
+            if (!t)
+                return false;
+            if (t->kind == StabsTypeKind::Pointer) {
+                auto *target = m_types.resolveType(t->targetType);
+                if (!target || (target->kind != StabsTypeKind::Struct &&
+                                target->kind != StabsTypeKind::Union))
+                    return false;
+                if (target->name.empty() || target->name.find("$_") == 0)
+                    return false;
+                return true;
+            }
+            if (t->kind == StabsTypeKind::Struct || t->kind == StabsTypeKind::Union)
+                return !t->name.empty() && t->name.find("$_") != 0;
+            return false;
+        }
+
+        TypeRef localAggregateTypeFromCallUse(const std::string &name) const {
+            if (name.empty())
+                return NullType;
+            TypeRef found = NullType;
+            auto argNamesLocal = [&](const IRExpr *arg, bool addressOf) -> bool {
+                if (!arg) return false;
+                if (addressOf) {
+                    if (arg->op != IROp::AddrOf || arg->kids.empty())
+                        return false;
+                    arg = arg->kids[0].get();
+                }
+                return arg && arg->op == IROp::Var && arg->name == name;
+            };
+            auto considerCall = [&](const IRExpr *call) {
+                if (!call || call->op != IROp::Call || call->name.empty() || found != NullType)
+                    return;
+                const StabsFunction *callee = m_mf.stabsFunctionByName(call->name);
+                if (!callee || callee->params.empty())
+                    return;
+                size_t argc = std::min(call->kids.size(), callee->params.size());
+                for (size_t i = 0; i < argc && found == NullType; ++i) {
+                    TypeRef paramType = callee->params[i].typeRef;
+                    if (paramType == NullType)
+                        continue;
+                    TypeRef pointee = m_types.derefPointer(paramType);
+                    if (pointee != NullType && argNamesLocal(call->kids[i].get(), true)) {
+                        auto *pt = m_types.resolveType(pointee);
+                        if (pt && (pt->kind == StabsTypeKind::Struct ||
+                                   pt->kind == StabsTypeKind::Union))
+                            found = pointee;
+                        continue;
+                    }
+                    auto *vt = m_types.resolveType(paramType);
+                    if (vt && (vt->kind == StabsTypeKind::Struct ||
+                               vt->kind == StabsTypeKind::Union) &&
+                        argNamesLocal(call->kids[i].get(), false)) {
+                        found = paramType;
+                    }
+                }
+            };
+            std::function<void(const IRExpr*)> scan = [&](const IRExpr *e) {
+                if (!e || found != NullType)
+                    return;
+                considerCall(e);
+                for (auto &k : e->kids)
+                    scan(k.get());
+            };
+            for (auto &bb : m_func.blocks) {
+                if (found != NullType) break;
+                for (auto &stmt : bb.stmts) {
+                    scan(stmt.expr.get());
+                    scan(stmt.addr.get());
+                    for (auto &a : stmt.args)
+                        scan(a.get());
+                    if (found != NullType) break;
+                }
+            }
+            return found;
         }
 
         // Port mode: wrap a temp expression in a struct pointer cast for -> access.
@@ -6732,9 +6904,26 @@ private:
                                     result = base + "->" + access;
                                 }
                             } else {
-                                if (!isDirectStruct)
-                                    base = portCastForArrow(base, addr->kids[0].get(), baseType, access);
-                                result = base + (isDirectStruct ? "." : "->") + access;
+                                if (s_portMode && !isDirectStruct &&
+                                    !typeSupportsNamedMemberAccess(baseType)) {
+                                    char hx[16];
+                                    snprintf(hx, sizeof(hx), "0x%llX", (unsigned long long)off);
+                                    result = std::string("*(") + loadCastType(e->loadSize) +
+                                             " *)(" + charPtrCast(base, addr->kids[0].get()) +
+                                             (off == 0 ? ")" : (" + " + std::string(hx) + ")"));
+                                } else {
+                                    if (!isDirectStruct)
+                                        base = portCastForArrow(base, addr->kids[0].get(), baseType, access);
+                                    if (s_portMode && base.find("void *") != std::string::npos) {
+                                        char hx[16];
+                                        snprintf(hx, sizeof(hx), "0x%llX", (unsigned long long)off);
+                                        result = std::string("*(") + loadCastType(e->loadSize) +
+                                                 " *)(" + charPtrCast(base, addr->kids[0].get()) +
+                                                 (off == 0 ? ")" : (" + " + std::string(hx) + ")"));
+                                    } else {
+                                        result = base + (isDirectStruct ? "." : "->") + access;
+                                    }
+                                }
                             }
                         }
                     }
@@ -7073,12 +7262,26 @@ private:
                     TypeRef rawAccessBaseType = declType != NullType ? declType : baseType;
                     bool rawNestedField =
                         fieldAccessNeedsRawPointer(rawAccessBaseType, e, e->name);
+                    bool rawInvalidMemberBase =
+                        s_portMode && e->kids[0] &&
+                        (base.find("void *") != std::string::npos ||
+                         (!typeSupportsNamedMemberAccess(rawAccessBaseType) &&
+                          e->kids[0]->op == IROp::Cast));
                     if (rawNestedField) {
                         int off = (int)e->value;
                         char hx[16]; snprintf(hx, sizeof(hx), "0x%X", (unsigned)off);
                         result = std::string("*(") + loadCastType(e->loadSize) + " *)(" +
                             charPtrCast(base, e->kids.empty() ? nullptr : e->kids[0].get()) +
                             " + " + hx + ")";
+                    } else if (rawInvalidMemberBase) {
+                        int off = (int)e->value;
+                        char hx[16]; snprintf(hx, sizeof(hx), "0x%X", (unsigned)off);
+                        if (off == 0)
+                            result = std::string("*(") + loadCastType(e->loadSize) + " *)(" +
+                                charPtrCast(base, e->kids[0].get()) + ")";
+                        else
+                            result = std::string("*(") + loadCastType(e->loadSize) + " *)(" +
+                                charPtrCast(base, e->kids[0].get()) + " + " + hx + ")";
                     } else if (fieldIsLargeStruct) {
                         int off = (int)e->value;
                         result = std::string("*(") + loadCastType(e->loadSize) + " *)(" + charPtrCast(base, e->kids.empty() ? nullptr : e->kids[0].get()) + " + " + std::to_string(off) + ")";
