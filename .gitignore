@@ -18,6 +18,7 @@ port/dis
 port/decomp_autogen/
 port/dis_autogen/
 port/platform_stubs/auto_stubs.c
+port/include/stabs_types.h
 
 __pycache__/
 port/__pycache__/

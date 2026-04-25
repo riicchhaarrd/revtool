@@ -813,6 +813,18 @@ private:
                     std::string gname = entry.substr(0, cpos);
                     auto it = nlSyms.find(gname);
                     if (it != nlSyms.end()) {
+                        bool alreadyTyped = false;
+                        for (auto &g : m_typeTable.globals()) {
+                            if (g.name == gname && g.address == it->second &&
+                                g.typeRef != NullType) {
+                                alreadyTyped = true;
+                                break;
+                            }
+                        }
+                        if (alreadyTyped) {
+                            spos += slen + 1;
+                            continue;
+                        }
                         auto parsed = m_typeTable.parseSymbol(entry);
                         if (parsed.typeRef != NullType) {
                             // Validate: if the type resolves to a struct, check if

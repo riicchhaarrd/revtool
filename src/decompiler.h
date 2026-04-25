@@ -1168,6 +1168,7 @@ public:
                 }
                 ++p;
             }
+            cleaned.replace("(int)&(int)&", "(int)&");
         }
         // Pre-pass: fix &EXPR->field_X patterns → (EXPR + 0xX)
         // &0->field_X → 0xX
@@ -1254,6 +1255,15 @@ public:
                     }
                 }
                 if (!hasDecl) continue;
+                bool srcHasPointerDecl = false;
+                for (int j = 0; j < i; ++j) {
+                    QString dt = lines[j].trimmed();
+                    if (dt.contains("*" + srcName) || dt.contains("* " + srcName)) {
+                        srcHasPointerDecl = true;
+                        break;
+                    }
+                }
+                if (!srcHasPointerDecl) continue;
                 // Count uses after the assignment
                 int useCount = 0;
                 bool usedWithArrow = false;
@@ -3682,6 +3692,111 @@ private:
         std::map<int, TypeRef> m_tempStructPtr;   // temp → struct pointer type (from Field access)
         std::set<int>         m_forceDeclareTemps; // temps that leak as raw tN and need declaration
 
+        std::string stripOuterParens(std::string s) const {
+            bool changed = true;
+            while (changed && s.size() >= 2 && s.front() == '(' && s.back() == ')') {
+                changed = false;
+                int depth = 0;
+                bool wraps = true;
+                for (size_t i = 0; i < s.size(); ++i) {
+                    if (s[i] == '(') depth++;
+                    else if (s[i] == ')') depth--;
+                    if (depth == 0 && i + 1 < s.size()) {
+                        wraps = false;
+                        break;
+                    }
+                }
+                if (wraps) {
+                    s = s.substr(1, s.size() - 2);
+                    changed = true;
+                }
+            }
+            return s;
+        }
+
+        bool isAggregateType(TypeRef ref) const {
+            if (ref == NullType) return false;
+            auto *t = m_types.resolveType(ref);
+            if (t && (t->kind == StabsTypeKind::Struct ||
+                      t->kind == StabsTypeKind::Union ||
+                      t->kind == StabsTypeKind::Array))
+                return true;
+            std::string name = m_types.formatType(ref);
+            if (name.find("struct ") == 0 || name.find("union ") == 0)
+                return true;
+            std::string decl = m_types.formatDecl(ref, "__aggregate_probe");
+            return decl.find("struct ") == 0 || decl.find("union ") == 0;
+        }
+
+        TypeRef namedObjectType(const std::string &rawName) const {
+            std::string name = stripOuterParens(rawName);
+            if (!name.empty() && name[0] == '&')
+                name = stripOuterParens(name.substr(1));
+            if (name.empty() || name.find_first_of("()+-*/&[] .") != std::string::npos)
+                return NullType;
+            auto *global = m_types.globalByName(name);
+            if (global && isAggregateType(global->typeRef))
+                return global->typeRef;
+            for (auto &p : m_func.params)
+                if (p.name == name && p.typeRef != NullType) return p.typeRef;
+            for (auto &l : m_func.locals)
+                if (l.name == name && l.typeRef != NullType) return l.typeRef;
+            return global ? global->typeRef : NullType;
+        }
+
+        TypeRef aggregateObjectType(const std::string &printed, const IRExpr *expr) {
+            TypeRef ref = NullType;
+            if (expr) {
+                if (expr->op == IROp::Temp) {
+                    if (m_pointerTemps.count(expr->tempId()) ||
+                        m_func.pointerTemps.count(expr->tempId()) ||
+                        m_tempStructPtr.count(expr->tempId()))
+                        return NullType;
+                    std::string strippedPrinted = stripOuterParens(printed);
+                    if (!strippedPrinted.empty() &&
+                        strippedPrinted.find_first_of("()+-*/[] .") != std::string::npos)
+                        return NullType;
+                    ref = m_func.tempType(expr->tempId());
+                    if (ref == NullType) {
+                        auto vit = m_func.tempToVar.find(expr->tempId());
+                        if (vit != m_func.tempToVar.end()) {
+                            auto nit = m_func.varNames.find(vit->second);
+                            if (nit != m_func.varNames.end())
+                                ref = namedObjectType(nit->second);
+                        }
+                    }
+                }
+                bool objectLikeExpr =
+                    expr->op == IROp::Var || expr->op == IROp::Temp ||
+                    expr->op == IROp::Field || expr->op == IROp::Load;
+                if (ref == NullType && expr->typeRef != NullType && objectLikeExpr)
+                    ref = expr->typeRef;
+                if (ref == NullType && expr->op == IROp::Var)
+                    ref = namedObjectType(expr->name);
+            }
+            if (ref == NullType)
+                ref = namedObjectType(printed);
+            return isAggregateType(ref) ? ref : NullType;
+        }
+
+        std::string aggregateAddressOf(const std::string &base, const IRExpr *baseExpr) {
+            std::string stripped = stripOuterParens(base);
+            if (!stripped.empty() && stripped[0] == '&')
+                return stripped;
+            if (aggregateObjectType(stripped, baseExpr) == NullType)
+                return "";
+            if (stripped.empty() || stripped.find_first_of("()+-*/&[] .") != std::string::npos)
+                return "";
+            return "&" + stripped;
+        }
+
+        std::string aggregateFirstWord(const std::string &value) const {
+            std::string stripped = stripOuterParens(value);
+            if (!stripped.empty() && stripped[0] == '&')
+                return "*(int *)(" + stripped + ")";
+            return "*(int *)(&" + value + ")";
+        }
+
         // Port mode: wrap a temp expression in a struct pointer cast for -> access.
         // Returns the casted expression string, or the original if no cast needed.
         std::string portCastForArrow(const std::string &base, IRExpr *baseExpr, TypeRef baseType,
@@ -3712,6 +3827,9 @@ private:
         // For struct-valued globals, use &base to get address first.
         std::string charPtrCast(const std::string &base, IRExpr *baseExpr = nullptr) {
             if (!s_portMode) return "(char *)(" + base + ")";
+            std::string aggregateAddr = aggregateAddressOf(base, baseExpr);
+            if (!aggregateAddr.empty())
+                return "(char *)(" + aggregateAddr + ")";
             // Check IR annotation first
             if (baseExpr && baseExpr->op == IROp::Var && baseExpr->typeRef != NullType) {
                 auto *t = m_types.resolveType(baseExpr->typeRef);
@@ -3734,7 +3852,12 @@ private:
         // build `*(T *)((char *)BASE + N)` manually. Without this, GCC rejects
         // `(char *)dxState` when dxState is `struct X` (not a pointer).
         std::string structAddrOf(const std::string &base, const IRExpr *baseExpr) {
-            if (base.empty() || base[0] == '&' || base.find_first_of("()+-*/[] ") != std::string::npos)
+            if (base.empty() || base[0] == '&')
+                return base;
+            std::string aggregateAddr = aggregateAddressOf(base, baseExpr);
+            if (!aggregateAddr.empty())
+                return aggregateAddr;
+            if (base.find_first_of("()+-*/[] ") != std::string::npos)
                 return base;
             // 1) Check IR annotation on Var expressions
             if (baseExpr && baseExpr->op == IROp::Var && baseExpr->typeRef != NullType) {
@@ -4603,6 +4726,39 @@ private:
                         }
                     }
                 }
+                if (s_portMode && stmt.expr &&
+                    (aggregateObjectType(rhs, stmt.expr.get()) != NullType ||
+                     m_types.globalByName(rhs)) &&
+                    rhs.find_first_of("()+-*/&[] .") == std::string::npos) {
+                    TypeRef lhsType = m_func.tempType(stmt.destTemp);
+                    if (lhsType == NullType) {
+                        auto vit = m_func.tempToVar.find(stmt.destTemp);
+                        if (vit != m_func.tempToVar.end()) {
+                            auto vtit = m_func.varTypes.find(vit->second);
+                            if (vtit != m_func.varTypes.end())
+                                lhsType = vtit->second;
+                        }
+                    }
+                    auto *lt = lhsType != NullType ? m_types.resolveType(lhsType) : nullptr;
+                    bool lhsIsPointer = (lt && lt->kind == StabsTypeKind::Pointer) ||
+                        m_pointerTemps.count(stmt.destTemp) ||
+                        m_func.pointerTemps.count(stmt.destTemp) ||
+                        m_tempStructPtr.count(stmt.destTemp);
+                    if (lhsIsPointer)
+                        rhs = "&" + rhs;
+                }
+                if (s_portMode && aggregateObjectType(lhs, nullptr) != NullType &&
+                    lhs.find_first_of("()+-*/&[] .") == std::string::npos) {
+                    std::string rhsStore = rhs;
+                    if (stmt.expr && aggregateObjectType(rhs, stmt.expr.get()) != NullType &&
+                        rhs.find_first_of("()+-*/&[] .") == std::string::npos)
+                        rhsStore = "*(int *)(&" + rhs + ")";
+                    else
+                        rhsStore = "(int)" + rhs;
+                    out += pad(indent) + QString::fromStdString(
+                        "*(int *)(&" + lhs + ") = " + rhsStore) + ";\n";
+                    break;
+                }
                 out += pad(indent) + QString::fromStdString(lhs + " = " + rhs) + ";\n";
                 break;
             }
@@ -4748,7 +4904,13 @@ private:
                                      storeCast.c_str(), baseStr.c_str(), (unsigned)(int)a->value, val.c_str());
                             out += pad(indent) + QString::fromStdString(buf) + ";\n";
                         } else {
-                            out += pad(indent) + QString::fromStdString(emitExpr(a) + " = " + val) + ";\n";
+                            std::string lhs = emitExpr(a);
+                            if (s_portMode && aggregateObjectType(lhs, a) != NullType &&
+                                lhs.find_first_of("()+-*/&[] .") == std::string::npos)
+                                out += pad(indent) + QString::fromStdString(
+                                    "*(" + storeCast + " *)(&" + lhs + ") = " + val) + ";\n";
+                            else
+                                out += pad(indent) + QString::fromStdString(lhs + " = " + val) + ";\n";
                         }
                     }
                 }
@@ -5057,6 +5219,11 @@ private:
                     std::string addrS = emitExpr(a);
                     TypeRef at = s_cosmeticMode ? safeExprType(a) : exprType(a);
                     auto *atInfo = (at != NullType) ? m_types.resolveType(at) : nullptr;
+                    if (s_portMode && aggregateObjectType(addrS, a) != NullType &&
+                        addrS.find_first_of("()+-*/&[] .") == std::string::npos) {
+                        out += pad(indent) + QString::fromStdString(
+                            "*(" + storeCast + " *)(&" + addrS + ") = " + val) + ";\n";
+                    } else
                     if (atInfo && atInfo->kind == StabsTypeKind::Pointer) {
                         auto *tgt = m_types.resolveType(atInfo->targetType);
                         if (s_cosmeticMode && stmt.storeSize == 4) {
@@ -5257,6 +5424,21 @@ private:
                         if (p.name == dest) { isParam = true; break; }
                     if (isParam && stmt.expr && stmt.expr->op == IROp::String)
                         break; // suppress string-to-param assignment
+                }
+                if (s_portMode && !destIsCompound &&
+                    dest.find_first_of("()+-*/&[] .") == std::string::npos) {
+                    auto *dg = m_types.globalByName(dest);
+                    if (dg && isAggregateType(dg->typeRef)) {
+                        std::string rhsStore = val;
+                        if (stmt.expr && aggregateObjectType(val, stmt.expr.get()) != NullType &&
+                            val.find_first_of("()+-*/&[] .") == std::string::npos)
+                            rhsStore = "*(int *)(&" + val + ")";
+                        else
+                            rhsStore = "(int)" + val;
+                        out += pad(indent) + QString::fromStdString(
+                            "*(int *)(&" + cNameOrKeep(dest) + ") = " + rhsStore) + ";\n";
+                        break;
+                    }
                 }
                 // Suppress dead stores to 'this' from register reuse
                 if (dest == "this" && stmt.expr) {
@@ -5826,6 +6008,18 @@ private:
             case IROp::Load: {
                 auto *addr = e->kids[0].get();
                 struct LoadDepthGuard { int &d; LoadDepthGuard(int &d):d(d){d++;} ~LoadDepthGuard(){d--;} } _ldg(m_addrDepth);
+                if (s_portMode && addr && addr->op == IROp::AddrOf && !addr->kids.empty()) {
+                    IRExpr *inner = addr->kids[0].get();
+                    std::string innerStr = emitExpr(inner);
+                    TypeRef innerType = aggregateObjectType(innerStr, inner);
+                    auto *it = innerType != NullType ? m_types.resolveType(innerType) : nullptr;
+                    if (it && it->kind == StabsTypeKind::Array &&
+                        !innerStr.empty() &&
+                        innerStr.find_first_of("()+-*/&[] .") == std::string::npos) {
+                        result = "(int)&" + innerStr;
+                        break;
+                    }
+                }
                 // (base + index*scale + const) → base->array_NN[index] pattern
                 if (addr && addr->op == IROp::Add && addr->kids.size() == 2 &&
                     addr->kids[1]->isConst() && addr->kids[1]->value > 0 &&
@@ -6254,15 +6448,18 @@ private:
                     }
                     if (result.empty()) {
                         // Check if base is a struct/union (needs &)
-                        std::string baseRef = base;
+                        std::string baseRef = structAddrOf(base, addr->kids[0].get());
                         TypeRef bt = exprType(addr->kids[0].get());
                         if (bt != NullType) {
                             auto *bti = m_types.resolveType(bt);
                             std::string btName = m_types.formatType(bt);
                             if ((bti && (bti->kind == StabsTypeKind::Struct ||
                                          bti->kind == StabsTypeKind::Union)) ||
-                                btName.find("struct ") == 0 || btName.find("union ") == 0)
+                                btName.find("struct ") == 0 || btName.find("union ") == 0) {
                                 baseRef = "&" + base;
+                                if (!base.empty() && base.front() == '(')
+                                    baseRef = structAddrOf(base, addr->kids[0].get());
+                            }
                         }
                         char buf[256];
                         snprintf(buf, sizeof(buf), "*(%s *)((char *)%s + 0x%llX)",
@@ -6335,8 +6532,12 @@ private:
                     const char *lct = loadCastType(e->loadSize);
                     if (isPtr)
                         result = std::string("*(") + lct + " *)(" + addrStr + ")";
-                    else if (isAggregate)
-                        result = std::string("*(") + lct + " *)(&" + addrStr + ")";
+                    else if (isAggregate) {
+                        if (!addrStr.empty() && addrStr[0] == '&')
+                            result = std::string("*(") + lct + " *)(" + addrStr + ")";
+                        else
+                            result = std::string("*(") + lct + " *)(&" + addrStr + ")";
+                    }
                     else
                         result = std::string("*(") + lct + " *)(" + charPtrCast(addrStr, addr) + ")";
                 }
@@ -6386,8 +6587,12 @@ private:
                     }
                     if (isArray)
                         result = emitExpr(inner);
-                    else
+                    else if (inner && (inner->op == IROp::Var ||
+                                       inner->op == IROp::Field ||
+                                       inner->op == IROp::Load))
                         result = "&" + emitExpr(inner);
+                    else
+                        result = emitExpr(inner);
                 }
                 break;
             }
@@ -6564,7 +6769,8 @@ private:
                     } else if (e->name == "_") {
                         int off = (int)e->value;
                         char hx[16]; snprintf(hx, sizeof(hx), "0x%X", (unsigned)off);
-                        result = std::string("*(") + loadCastType(e->loadSize) + " *)((char *)(&" + base + ") + " + hx + ")";
+                        result = std::string("*(") + loadCastType(e->loadSize) + " *)(" +
+                            charPtrCast(base, e->kids.empty() ? nullptr : e->kids[0].get()) + " + " + hx + ")";
                     } else if (s_portMode && e->kids[0] &&
                                (e->kids[0]->op == IROp::Temp || e->kids[0]->op == IROp::Var) &&
                                [&]{
@@ -6579,10 +6785,12 @@ private:
                                }()) {
                         int off = (int)e->value;
                         if (off == 0)
-                            result = std::string("*(") + loadCastType(e->loadSize) + " *)(" + base + ")";
+                            result = std::string("*(") + loadCastType(e->loadSize) + " *)(" +
+                                structAddrOf(base, e->kids[0].get()) + ")";
                         else {
                             char hx[16]; snprintf(hx, sizeof(hx), "0x%X", (unsigned)off);
-                            result = std::string("*(") + loadCastType(e->loadSize) + " *)((char *)(" + base + ") + " + hx + ")";
+                            result = std::string("*(") + loadCastType(e->loadSize) + " *)(" +
+                                charPtrCast(base, e->kids[0].get()) + " + " + hx + ")";
                         }
                     } else {
                         result = base + (useArrow ? "->" : ".") + e->name;
@@ -6745,11 +6953,12 @@ private:
                 // (base + const) in expression context → &base->field_XX (pointer base)
                 // or ((char *)&base + offset) (struct base)
                 if (e->op == IROp::Add && e->kids[1] && e->kids[1]->isConst() &&
-                    e->kids[1]->value > 0 && e->kids[1]->value < 0x10000 &&
+                    e->kids[1]->value > 0 &&
                     (e->kids[0]->op == IROp::Var || e->kids[0]->op == IROp::Temp)) {
                     if (!lhs.empty() && (isalpha(lhs[0]) || lhs[0] == '_')) {
                         int off = (int)e->kids[1]->value;
                         TypeRef baseType = exprType(e->kids[0].get());
+                        std::string aggregateAddr = aggregateAddressOf(lhs, e->kids[0].get());
                         // Also check global type
                         if (baseType == NullType && e->kids[0]->op == IROp::Var &&
                             !e->kids[0]->name.empty()) {
@@ -6811,22 +7020,28 @@ private:
                             }
                         }
                         if (skipStructField) { isPtr = false; isStruct = false; access.clear(); }
-                        if (isPtr && !skipStructField) {
-                            if (!access.empty()) {
-                                std::string castLhs = portCastForArrow(lhs, e->kids[0].get(), baseType, access);
-                                result = "&" + castLhs + "->" + access;
-                            } else {
-                                char fname[32]; snprintf(fname, sizeof(fname), "field_%X", (unsigned)off);
-                                result = "&" + lhs + "->" + fname;
-                            }
-                            break;
+                        bool handledStructAdd = false;
+                        if (isPtr && !skipStructField && !access.empty()) {
+                            std::string castLhs = portCastForArrow(lhs, e->kids[0].get(), baseType, access);
+                            result = "&" + castLhs + "->" + access;
+                            handledStructAdd = true;
+                        } else if (isPtr && !skipStructField && off < 0x10000) {
+                            char fname[32]; snprintf(fname, sizeof(fname), "field_%X", (unsigned)off);
+                            result = "&" + lhs + "->" + fname;
+                            handledStructAdd = true;
                         } else if (isStruct && !skipStructField) {
-                            if (!access.empty())
+                            if (!access.empty()) {
                                 result = "&" + lhs + "." + access;
-                            else
+                            } else {
                                 result = "((char *)&" + lhs + " + " + std::to_string(off) + ")";
-                            break;
+                            }
+                            handledStructAdd = true;
+                        } else if (!aggregateAddr.empty()) {
+                            result = "((char *)" + aggregateAddr + " + " + std::to_string(off) + ")";
+                            handledStructAdd = true;
                         }
+                        if (handledStructAdd)
+                            break;
                         // Not a struct/pointer base — fall through to other handlers
                     }
                 }
@@ -6849,18 +7064,21 @@ private:
                 {
                     auto wrapAggregate = [&](std::string &s, IRExpr *kid) {
                         if (!kid) return;
-                        TypeRef kt = NullType;
-                        if (kid->op == IROp::Var) {
-                            kt = kid->typeRef;
-                            if (kt == NullType)
-                                for (auto &p : m_func.params)
-                                    if (p.name == kid->name && p.typeRef != NullType)
-                                        { kt = p.typeRef; break; }
-                        }
+                        std::string stripped = stripOuterParens(s);
+                        if (!stripped.empty() && stripped[0] == '&')
+                            return;
+                        TypeRef kt = namedObjectType(s);
+                        if (kt == NullType)
+                            kt = aggregateObjectType(s, kid);
                         if (kt != NullType) {
                             auto *t = m_types.resolveType(kt);
-                            if (t && (t->kind == StabsTypeKind::Struct || t->kind == StabsTypeKind::Union))
-                                s = "*(int *)(&" + s + ")";
+                            if (t && t->kind == StabsTypeKind::Array &&
+                                (e->op == IROp::Add || e->op == IROp::Sub)) {
+                                s = "(int)&" + s;
+                            } else if ((t && (t->kind == StabsTypeKind::Struct || t->kind == StabsTypeKind::Union)) ||
+                                m_types.formatType(kt).find("struct ") == 0 ||
+                                m_types.formatType(kt).find("union ") == 0)
+                                s = aggregateFirstWord(s);
                         }
                     };
                     wrapAggregate(lhs, e->kids[0].get());
@@ -7097,6 +7315,7 @@ private:
                     auto needsCast = [&](const std::string &s, IRExpr *kid) -> int {
                         if (!s.empty() && s[0] == '&') return 1;
                         if (!s.empty() && s[0] == '(' && s.size() > 1 && s[1] == '&') return 1;
+                        if (aggregateObjectType(s, kid) != NullType) return 2;
                         // Check if the operand's emitted string refers to a known
                         // struct-valued global/local.  We check by *name* whether
                         // the IR op is Var or Temp, because coalesced temps can
@@ -7374,7 +7593,7 @@ private:
                     if (kt != NullType) {
                         auto *t = m_types.resolveType(kt);
                         if (t && (t->kind == StabsTypeKind::Struct || t->kind == StabsTypeKind::Union))
-                            s = "*(int *)(&" + s + ")";
+                            s = aggregateFirstWord(s);
                     }
                 };
                 fixAggregateVar(lhs, e->kids[0].get());
@@ -8041,6 +8260,14 @@ private:
             if (inner.empty()) return "0";
             // Casting 0 to any type is still 0
             if (inner == "0") return "0";
+            if (e->castKind == CastKind::FloatToInt &&
+                inner_e->op == IROp::AddrOf && !inner_e->kids.empty()) {
+                IRExpr *target = inner_e->kids[0].get();
+                if (target && target->op != IROp::Var &&
+                    target->op != IROp::Field &&
+                    target->op != IROp::Load)
+                    return emitExpr(target);
+            }
             // Wrap struct/union values — can't cast aggregates directly
             if (inner_e->op == IROp::Var) {
                 TypeRef kt = inner_e->typeRef;
@@ -8052,7 +8279,7 @@ private:
                 if (kt != NullType) {
                     auto *t = m_types.resolveType(kt);
                     if (t && (t->kind == StabsTypeKind::Struct || t->kind == StabsTypeKind::Union))
-                        inner = "*(int *)(&" + inner + ")";
+                        inner = aggregateFirstWord(inner);
                 }
             }
             // Elide identity casts: Cast(A, Cast(A, x)) → Cast(A, x)
