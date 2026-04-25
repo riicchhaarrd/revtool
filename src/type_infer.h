@@ -140,7 +140,7 @@ private:
         if (kit == m_knownType.end()) {
             m_knownType[root] = tref;
         } else {
-            // Prefer more specific type: Float > Pointer > Struct > Int
+            // Prefer more specific type: Float > StructPtr > Pointer > Struct > Int
             auto *existing = m_types->resolveType(kit->second);
             auto *candidate = m_types->resolveType(tref);
             if (existing && candidate) {
@@ -150,6 +150,15 @@ private:
                     m_knownType[root] = tref;
                 else if (existing->kind == StabsTypeKind::Int && candidate->kind != StabsTypeKind::Int)
                     m_knownType[root] = tref;
+                // Prefer struct pointer over generic pointer (char *, void *)
+                else if (existing->kind == StabsTypeKind::Pointer && candidate->kind == StabsTypeKind::Pointer) {
+                    auto *exTarget = m_types->resolveType(existing->targetType);
+                    auto *candTarget = m_types->resolveType(candidate->targetType);
+                    bool exIsStruct = exTarget && (exTarget->kind == StabsTypeKind::Struct || exTarget->kind == StabsTypeKind::Union);
+                    bool candIsStruct = candTarget && (candTarget->kind == StabsTypeKind::Struct || candTarget->kind == StabsTypeKind::Union);
+                    if (candIsStruct && !exIsStruct)
+                        m_knownType[root] = tref;
+                }
             }
         }
     }
@@ -185,12 +194,16 @@ private:
                 if (et && (et->kind == StabsTypeKind::Union || et->kind == StabsTypeKind::Struct))
                     exprT = NullType;
                 // Also check by formatted name (cross-CU type conflicts)
+                // But preserve pointer-to-struct types (they're valid for temps)
                 if (exprT != NullType) {
                     std::string fmt = m_types->formatType(exprT);
-                    if (fmt.find("DvarValue") != std::string::npos ||
-                        fmt.find("DvarLimits") != std::string::npos ||
-                        fmt.find("union ") == 0 || fmt.find("struct ") == 0)
-                        exprT = NullType;
+                    bool isPointer = fmt.find('*') != std::string::npos;
+                    if (!isPointer) {
+                        if (fmt.find("DvarValue") != std::string::npos ||
+                            fmt.find("DvarLimits") != std::string::npos ||
+                            fmt.find("union ") == 0 || fmt.find("struct ") == 0)
+                            exprT = NullType;
+                    }
                 }
                 if (exprT != NullType)
                     setType(stmt.destTemp, exprT);
@@ -206,14 +219,20 @@ private:
                 bool isStructType = false;
                 if (srcType != NullType) {
                     auto *st = m_types->resolveType(srcType);
+                    // Only block by-value struct types, not pointers-to-struct
                     isStructType = st && (st->kind == StabsTypeKind::Struct ||
                                           st->kind == StabsTypeKind::Union);
-                    // Also check formatted name for cross-CU conflicts
-                    if (!isStructType) {
+                    // Allow struct pointers to propagate
+                    if (st && st->kind == StabsTypeKind::Pointer)
+                        isStructType = false;
+                    // Also check formatted name for cross-CU conflicts (only non-pointer)
+                    if (!isStructType && srcType != NullType) {
                         std::string fmt = m_types->formatType(srcType);
-                        if (fmt.find("State") != std::string::npos ||
-                            fmt.find("_s") != std::string::npos)
-                            isStructType = true;
+                        if (fmt.find('*') == std::string::npos) {
+                            if (fmt.find("State") != std::string::npos ||
+                                fmt.find("_s") != std::string::npos)
+                                isStructType = true;
+                        }
                     }
                 }
                 if (isStructType) {
@@ -240,9 +259,17 @@ private:
             break;
         }
         case IRStmtKind::Store: {
-            // Store(addr, val): if addr is a Temp, it's a pointer
-            if (stmt.addr && stmt.addr->op == IROp::Temp) {
-                markAsPointer(stmt.addr->tempId());
+            // Store(addr, val): addr (or addr's base) is a pointer
+            if (stmt.addr) {
+                auto *a = stmt.addr.get();
+                if (a->op == IROp::Temp)
+                    markAsPointer(a->tempId());
+                else if (a->op == IROp::Add && !a->kids.empty() && a->kids[0] &&
+                         a->kids[0]->op == IROp::Temp)
+                    markAsPointer(a->kids[0]->tempId());
+                else if (a->op == IROp::Field && !a->kids.empty() && a->kids[0] &&
+                         a->kids[0]->op == IROp::Temp)
+                    markAsPointer(a->kids[0]->tempId());
             }
             // Propagate: if we know the addr's pointee type, the stored value has that type
             if (stmt.addr && stmt.expr) {
@@ -258,7 +285,7 @@ private:
             break;
         }
         case IRStmtKind::VarSet: {
-            // var = expr: if var has a known type, propagate to expr temp
+            // var = expr: bidirectional type propagation
             if (!stmt.destVar.empty() && stmt.expr && stmt.expr->op == IROp::Temp) {
                 TypeRef varType = NullType;
                 for (auto &p : m_func->params)
@@ -269,6 +296,24 @@ private:
                 }
                 if (varType != NullType)
                     setType(stmt.expr->tempId(), varType);
+                // Reverse: if expr's inferred type is a struct pointer and the
+                // var's type is a generic pointer, upgrade the var's type
+                TypeRef exprT = inferExprType(stmt.expr.get());
+                if (exprT != NullType && varType != NullType) {
+                    auto *et = m_types->resolveType(exprT);
+                    auto *vt = m_types->resolveType(varType);
+                    if (et && vt && et->kind == StabsTypeKind::Pointer && vt->kind == StabsTypeKind::Pointer) {
+                        auto *etgt = m_types->resolveType(et->targetType);
+                        auto *vtgt = m_types->resolveType(vt->targetType);
+                        bool exprIsStructPtr = etgt && (etgt->kind == StabsTypeKind::Struct || etgt->kind == StabsTypeKind::Union);
+                        bool varIsStructPtr = vtgt && (vtgt->kind == StabsTypeKind::Struct || vtgt->kind == StabsTypeKind::Union);
+                        if (exprIsStructPtr && !varIsStructPtr) {
+                            // Update the local's type in-place
+                            for (auto &l : m_func->locals)
+                                if (l.name == stmt.destVar) { l.typeRef = exprT; break; }
+                        }
+                    }
+                }
             }
             break;
         }
@@ -348,16 +393,16 @@ private:
     }
 
     void markAsPointer(int tid) {
+        // Mark this temp as a pointer in the IRFunc so the emitter knows
+        m_func->pointerTemps.insert(tid);
         int root = find(tid);
-        // Don't override a known struct pointer with plain pointer
+        // Don't override a known struct pointer type
         auto kit = m_knownType.find(root);
         if (kit != m_knownType.end() && kit->second != NullType) {
             auto *t = m_types->resolveType(kit->second);
-            if (t && t->kind == StabsTypeKind::Pointer) return; // already a pointer type
+            if (t && t->kind == StabsTypeKind::Pointer) return;
         }
-        // We note this temp is a pointer but can't infer the pointee type
-        // without more context.  Just mark it for the emitter.
-        m_func->tempTypes[tid]; // ensure entry exists (default NullType)
+        m_func->tempTypes[tid]; // ensure entry exists
     }
 
     TypeRef inferExprType(const IRExpr *e) {
@@ -376,35 +421,93 @@ private:
                 if (p.name == e->name && p.typeRef != NullType) return p.typeRef;
             for (auto &l : m_func->locals)
                 if (l.name == e->name && l.typeRef != NullType) return l.typeRef;
+            // Look up global variable types (e.g. cm.brushes → cbrush_t *)
+            if (!e->name.empty()) {
+                auto *gv = m_types->globalByName(e->name);
+                if (gv && gv->typeRef != NullType) return gv->typeRef;
+            }
         }
         if (e->op == IROp::Field) return e->typeRef;
-        if (e->op == IROp::Call) return e->typeRef;
+        if (e->op == IROp::Call) {
+            if (e->typeRef != NullType) return e->typeRef;
+            if (m_mf && !e->name.empty()) {
+                auto *cf = m_mf->stabsFunctionByName(e->name);
+                if (cf && cf->returnType != NullType) return cf->returnType;
+            }
+            return NullType;
+        }
+        // Const address → check if it's a known global variable
+        if (e->op == IROp::Const && e->value > 0x1000 && e->value < 0x20000000 && m_mf) {
+            std::string sym = m_mf->symbolNameAtAddress((uint32_t)e->value);
+            if (!sym.empty()) {
+                if (sym[0] == '_' && sym[1] != '_') sym = sym.substr(1);
+                auto *gv = m_types->globalByName(sym);
+                if (gv && gv->typeRef != NullType) return gv->typeRef;
+            }
+        }
         // &expr → pointer to expr's type (don't propagate struct types through AddrOf)
         if (e->op == IROp::AddrOf) return NullType;
 
         // Load(addr) -> type is the pointee type of addr
         if (e->op == IROp::Load && !e->kids.empty()) {
-            // Special case: Load(Add(structPtr, const)) → field type
+            // Special case: Load(Add(base, const)) → field type
+            // Handles both pointer-to-struct and by-value struct globals
             auto *addr = e->kids[0].get();
             if (addr && addr->op == IROp::Add && addr->kids.size() == 2 &&
                 addr->kids[1] && addr->kids[1]->isConst()) {
                 TypeRef baseType = inferExprType(addr->kids[0].get());
                 if (baseType != NullType) {
+                    TypeRef structType = NullType;
+                    // Try as pointer-to-struct first
                     TypeRef pointee = m_types->derefPointer(baseType);
                     if (pointee != NullType) {
                         auto *pt = m_types->resolveType(pointee);
-                        if (pt && (pt->kind == StabsTypeKind::Struct || pt->kind == StabsTypeKind::Union)) {
-                            // Don't return the struct type — return NullType so the
-                            // temp gets a scalar type from context instead
-                            return NullType;
+                        if (pt && (pt->kind == StabsTypeKind::Struct || pt->kind == StabsTypeKind::Union))
+                            structType = pointee;
+                    }
+                    // Also try as direct struct (by-value globals like `cm`)
+                    if (structType == NullType) {
+                        auto *bt = m_types->resolveType(baseType);
+                        if (bt && (bt->kind == StabsTypeKind::Struct || bt->kind == StabsTypeKind::Union))
+                            structType = baseType;
+                    }
+                    if (structType != NullType) {
+                        int offset = (int)addr->kids[1]->value;
+                        auto *field = m_types->findFieldAtOffset(structType, offset);
+                        if (field && field->typeRef != NullType) {
+                            auto *ft = m_types->resolveType(field->typeRef);
+                            if (ft && ft->kind == StabsTypeKind::Pointer)
+                                return field->typeRef;
+                            if (ft && ft->kind != StabsTypeKind::Struct &&
+                                ft->kind != StabsTypeKind::Union)
+                                return field->typeRef;
                         }
+                        return NullType;
                     }
                 }
             }
             TypeRef addrType = inferExprType(e->kids[0].get());
             if (addrType != NullType) {
                 TypeRef pointee = m_types->derefPointer(addrType);
-                if (pointee != NullType) return pointee;
+                if (pointee != NullType) {
+                    auto *pt = m_types->resolveType(pointee);
+                    // If pointed-to type is a struct, resolve field at offset 0
+                    // (Load(structPtr) loads the first field, not the whole struct)
+                    if (pt && (pt->kind == StabsTypeKind::Struct || pt->kind == StabsTypeKind::Union) &&
+                        pt->sizeBytes > 4) {
+                        auto *field = m_types->findFieldAtOffset(pointee, 0);
+                        if (field && field->typeRef != NullType) {
+                            auto *ft = m_types->resolveType(field->typeRef);
+                            if (ft && ft->kind == StabsTypeKind::Pointer)
+                                return field->typeRef;
+                            if (ft && ft->kind != StabsTypeKind::Struct &&
+                                ft->kind != StabsTypeKind::Union)
+                                return field->typeRef;
+                        }
+                        return NullType;
+                    }
+                    return pointee;
+                }
             }
         }
 

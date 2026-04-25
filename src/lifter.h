@@ -365,7 +365,8 @@ public:
                             if (it->first <= insn[ii].address) { blk = it->second; break; }
                     }
                     if (blk < 0 || !loopBlocks.count(blk)) continue;
-                    if (blk == hdr) continue; // header itself doesn't count
+                    if (blk == hdr && !backEdgeSources[hdr].count(hdr))
+                        continue; // header only counts for self-loop bodies
                     auto *det = insn[ii].detail;
                     if (!det) continue;
                     for (uint8_t oi = 0; oi < det->x86.op_count; ++oi) {
@@ -488,6 +489,8 @@ public:
         // ── Pass 5: lift instructions into basic blocks ─────────────
         m_func = &func;
         m_cs = cs;
+        m_insn = insn;
+        m_insnCount = funcEndIdx;
         m_regTemps.clear();
         m_espArgs.clear();
         m_pushArgs.clear();
@@ -560,6 +563,8 @@ public:
         }
 
         if (!func.blocks.empty() && !m_regParamRegs.empty()) {
+            // Mark this function as using regparm calling convention
+            if (sfn) const_cast<StabsFunction*>(sfn)->isRegparm = true;
             auto &bb0 = func.blocks[0];
 
             // Bind the regparam registers to parameter names
@@ -1121,10 +1126,13 @@ public:
                     }
                 }
 
-                // Collect induction patterns: t2 = t1 + const (in one pass)
+                // Collect induction patterns from latch blocks: t2 = t1 + const.
+                // Restricting to back-edge sources avoids treating derived address
+                // setup inside the loop body as loop-carried state.
                 // Map: baseTemp → loopTemp for each induction variable
                 std::map<int, int> inductionMap; // baseTemp → updatedTemp
                 for (int bi : loopBlocks) {
+                    if (!backEdgeSources.count(bi)) continue;
                     auto &lb = func.blocks[bi];
                     for (auto &stmt : lb.stmts) {
                         if (stmt.kind != IRStmtKind::Assign || stmt.destTemp < 0) continue;
@@ -1152,8 +1160,57 @@ public:
 
                     // Sanity: skip if baseTemp == loopTemp (no actual induction)
                     if (baseTemp == loopTemp) continue;
-                    // Skip if baseTemp is already a phi temp from a previous iteration
-                    if (baseTemp >= func.nextTemp - 20) continue;
+                    // Avoid cascading through freshly-created non-phi temps.
+                    // Header phi temps are legitimate loop-carried bases; fresh
+                    // derived address temps are not.
+                    if (baseTemp >= func.nextTemp - 20 &&
+                        !func.phiTemps.count(baseTemp))
+                        continue;
+
+                    auto insertBeforeTerminator = [&](BasicBlock &predBlock,
+                                                      IRStmt copy) {
+                        if (!predBlock.stmts.empty()) {
+                            auto k = predBlock.stmts.back().kind;
+                            if (k == IRStmtKind::Branch || k == IRStmtKind::Jump ||
+                                k == IRStmtKind::Switch || k == IRStmtKind::Return)
+                                predBlock.stmts.insert(predBlock.stmts.end() - 1,
+                                                       std::move(copy));
+                            else
+                                predBlock.stmts.push_back(std::move(copy));
+                        } else {
+                            predBlock.stmts.push_back(std::move(copy));
+                        }
+                    };
+
+                    if (func.phiTemps.count(baseTemp)) {
+                        std::unique_ptr<IRExpr> initialExpr;
+                        TypeRef phiType = func.tempType(baseTemp);
+                        for (auto it = header.stmts.begin();
+                             it != header.stmts.end(); ++it) {
+                            if (it->kind == IRStmtKind::Assign &&
+                                it->destTemp == baseTemp) {
+                                if (it->expr) initialExpr = it->expr->clone();
+                                header.stmts.erase(it);
+                                break;
+                            }
+                        }
+
+                        for (int pred : header.preds) {
+                            if (pred < 0 || pred >= n) continue;
+                            auto &predBlock = func.blocks[pred];
+                            std::unique_ptr<IRExpr> src =
+                                backEdgeSources.count(pred)
+                                    ? IRExpr::mkTemp(loopTemp,
+                                                     func.tempType(loopTemp))
+                                    : (initialExpr ? initialExpr->clone()
+                                                   : IRExpr::mkTemp(baseTemp,
+                                                       phiType));
+                            insertBeforeTerminator(predBlock,
+                                IRStmt::mkAssign(baseTemp, std::move(src),
+                                                 phiType));
+                        }
+                        continue;
+                    }
 
                     int phiTemp = func.newTemp(func.tempType(baseTemp));
                     func.phiTemps.insert(phiTemp); // mark as phi for copy-prop skip
@@ -1166,16 +1223,7 @@ public:
                         auto copy = IRStmt::mkAssign(phiTemp,
                             IRExpr::mkTemp(srcTemp, func.tempType(srcTemp)),
                             func.tempType(srcTemp));
-                        if (!predBlock.stmts.empty()) {
-                            auto k = predBlock.stmts.back().kind;
-                            if (k == IRStmtKind::Branch || k == IRStmtKind::Jump ||
-                                k == IRStmtKind::Switch || k == IRStmtKind::Return)
-                                predBlock.stmts.insert(predBlock.stmts.end() - 1, std::move(copy));
-                            else
-                                predBlock.stmts.push_back(std::move(copy));
-                        } else {
-                            predBlock.stmts.push_back(std::move(copy));
-                        }
+                        insertBeforeTerminator(predBlock, std::move(copy));
                         hasSources = true;
                     }
                     if (!hasSources) continue;
@@ -1232,6 +1280,58 @@ private:
     std::map<x86_reg, const StabsTypedVar*> m_regParamRegs;  // register params (regparm)
     std::set<x86_reg> m_regParamInjected;  // which reg params we've already injected
     std::list<StabsTypedVar> m_regParamLocals;  // stable storage for regparm stack locals
+    // Instruction array reference (set during lift)
+    cs_insn *m_insn = nullptr;
+    size_t m_insnCount = 0;
+
+    // Cache: which call target addresses use regparm(3) (static — shared across all lifts)
+    static inline std::map<uint32_t, bool> m_regparmCache;
+
+    // Detect if a function at the given address uses regparm calling convention
+    // by scanning its prologue bytes for: mov [ebp-N], eax/edx/ecx patterns.
+    // Uses raw byte scanning for speed (no Capstone disassembly needed).
+    bool isCalleeRegparm(uint32_t addr) {
+        auto cit = m_regparmCache.find(addr);
+        if (cit != m_regparmCache.end()) return cit->second;
+        bool result = false;
+        const StabsFunction *sf = m_mf.stabsFunctionAt(addr);
+        if (sf && sf->isRegparm) { result = true; }
+        else if (sf && !sf->params.empty()) {
+            int64_t fo = m_mf.fileOffsetForAddress(addr);
+            if (fo >= 0) {
+                const uint8_t *code = m_mf.bytesAt((uint32_t)fo, 32);
+                if (code) {
+                    // Scan prologue for regparm patterns in first 32 bytes:
+                    // 1. mov [ebp-N], eax/edx/ecx (save to stack)
+                    // 2. mov edi/esi/ebx, eax/edx/ecx (save to callee-saved reg)
+                    int regSaves = 0;
+                    for (int i = 0; i < 28; ++i) {
+                        if (code[i] == 0x89 && i + 1 < 32) {
+                            uint8_t modrm = code[i+1];
+                            uint8_t srcReg = (modrm >> 3) & 7;
+                            // Pattern 1: mov [ebp+disp8], eax/ecx/edx
+                            if (i + 2 < 32 && (modrm & 0xC7) == 0x45) {
+                                int8_t disp = (int8_t)code[i+2];
+                                if (disp < 0 && (srcReg == 0 || srcReg == 1 || srcReg == 2))
+                                    regSaves++;
+                            }
+                            // Pattern 2: mov reg, eax/ecx/edx (reg-to-reg, mod=11)
+                            else if ((modrm & 0xC0) == 0xC0) {
+                                uint8_t dstReg = modrm & 7;
+                                if ((srcReg == 0 || srcReg == 1 || srcReg == 2) &&
+                                    (dstReg == 7 || dstReg == 6 || dstReg == 3))
+                                    regSaves++; // mov edi/esi/ebx, eax/ecx/edx
+                            }
+                        }
+                    }
+                    if (regSaves >= 1) result = true; // even 1 save suggests regparm
+                }
+            }
+        }
+        m_regparmCache[addr] = result;
+        return result;
+    }
+
     std::set<uint32_t> m_floatReturnAddrs;   // call target addresses known to return float
     std::set<uint32_t> m_floatRetCallSites;  // instruction addresses of float-returning calls
 
@@ -1277,6 +1377,8 @@ private:
         m_flags.op = s.flagsOp;
         m_flags.lhs.reset();
         m_flags.rhs.reset();
+        m_flags.carryLhs.reset();
+        m_flags.carryRhs.reset();
         m_fpuStack = s.fpuStack;
     }
 
@@ -1339,6 +1441,7 @@ private:
         int   temp = -1;
         IROp  op   = IROp::Eq;
         std::unique_ptr<IRExpr> lhs, rhs;
+        std::unique_ptr<IRExpr> carryLhs, carryRhs;
     } m_flags;
 
     // Call argument collection
@@ -1391,10 +1494,11 @@ private:
         m_regTemps[canonReg(reg)] = temp;
     }
 
-    void assignReg(x86_reg reg, std::unique_ptr<IRExpr> val, BasicBlock &bb, TypeRef t = NullType) {
+    int assignReg(x86_reg reg, std::unique_ptr<IRExpr> val, BasicBlock &bb, TypeRef t = NullType) {
         int temp = m_func->newTemp(t);
         bb.stmts.push_back(IRStmt::mkAssign(temp, std::move(val), t));
         writeReg(reg, temp, bb);
+        return temp;
     }
 
     // ── FPU stack helpers ──────────────────────────────────────────────
@@ -1733,7 +1837,6 @@ private:
                     auto *gt = m_types.resolveType(gn->typeRef);
                     if (gt && gt->kind == StabsTypeKind::Pointer)
                         return IRExpr::mkVar(symName, gn->typeRef);
-                    // For NLP (IMPORT segment), struct types = pointer to struct
                     if (gt && (gt->kind == StabsTypeKind::Struct ||
                                gt->kind == StabsTypeKind::Union)) {
                         const Section *sec = m_mf.sectionForAddress(addr);
@@ -1746,28 +1849,35 @@ private:
             // Try nearest symbol for base+offset access
             { std::string nearest = m_mf.nearestSymbolName(addr);
               if (!nearest.empty()) {
-                // Cosmetic mode: resolve (global + offset) to global.field for struct globals
-                extern bool g_cosmeticMode;
-                if (g_cosmeticMode) {
-                    size_t plus = nearest.find(" + 0x");
-                    if (plus != std::string::npos && nearest.front() == '(' && nearest.back() == ')') {
-                        std::string gname = nearest.substr(1, plus - 1);
-                        unsigned goff = 0;
-                        sscanf(nearest.c_str() + plus + 3, "%x", &goff);
-                        auto *gn = m_types.globalByName(gname, m_curSourceFileIdx);
-                        if (gn && gn->typeRef != NullType) {
-                            auto *gt = m_types.resolveType(gn->typeRef);
-                            if (gt && (gt->kind == StabsTypeKind::Struct || gt->kind == StabsTypeKind::Union)) {
-                                std::string access = m_types.formatFieldAccess(gn->typeRef, (int)goff);
-                                if (!access.empty()) {
-                                    auto base = IRExpr::mkVar(gname, gn->typeRef);
-                                    auto *field = m_types.findFieldAtOffset(gn->typeRef, (int)goff);
-                                    TypeRef ft = field ? field->typeRef : NullType;
-                                    return IRExpr::mkField(std::move(base), access, (int)goff, ft);
-                                }
+                // Resolve (global + offset) to global.field for struct/array-of-struct globals
+                size_t plus = nearest.find(" + 0x");
+                if (plus != std::string::npos && nearest.front() == '(' && nearest.back() == ')') {
+                    std::string gname = nearest.substr(1, plus - 1);
+                    unsigned goff = 0;
+                    sscanf(nearest.c_str() + plus + 3, "%x", &goff);
+                    auto *gn = m_types.globalByName(gname, m_curSourceFileIdx);
+                    if (gn && gn->typeRef != NullType) {
+                        auto *gt = m_types.resolveType(gn->typeRef);
+                        TypeRef structType = NullType;
+                        if (gt && (gt->kind == StabsTypeKind::Struct || gt->kind == StabsTypeKind::Union))
+                            structType = gn->typeRef;
+                        else if (gt && gt->kind == StabsTypeKind::Array) {
+                            auto *et = m_types.resolveType(gt->targetType);
+                            if (et && (et->kind == StabsTypeKind::Struct || et->kind == StabsTypeKind::Union)) {
+                                int elemSz = et->sizeBytes;
+                                if (elemSz > 0 && (int)goff < elemSz)
+                                    structType = gt->targetType;
                             }
-                            // Array types: keep the (globalName + offset) form
-                            // The nearest symbol name is already readable
+                        }
+                        if (structType != NullType) {
+                            std::string access = m_types.formatFieldAccess(structType, (int)goff);
+                            if (!access.empty()) {
+                                auto base = IRExpr::mkVar(gname, gn->typeRef);
+                                auto *field = m_types.findFieldAtOffset(structType, (int)goff);
+                                TypeRef ft = field ? field->typeRef : NullType;
+                                return IRExpr::mkField(std::move(base), access, (int)goff, ft);
+                            }
+                            return IRExpr::mkLoad(IRExpr::mkConst(addr));
                         }
                     }
                 }
@@ -1911,9 +2021,8 @@ private:
                 bb.stmts.push_back(IRStmt::mkVarSet(symName, std::move(val), NullType, storeSize));
                 return;
             }
-            // Cosmetic mode: resolve (global + offset) to global.field for struct globals
-            extern bool g_cosmeticMode;
-            if (g_cosmeticMode) {
+            // Resolve (global + offset) to global.field for struct/array-of-struct globals
+            {
                 std::string nearest = m_mf.nearestSymbolName(addr);
                 if (!nearest.empty()) {
                     size_t plus = nearest.find(" + 0x");
@@ -1924,11 +2033,22 @@ private:
                         auto *gn = m_types.globalByName(gname, m_curSourceFileIdx);
                         if (gn && gn->typeRef != NullType) {
                             auto *gt = m_types.resolveType(gn->typeRef);
-                            if (gt && (gt->kind == StabsTypeKind::Struct || gt->kind == StabsTypeKind::Union)) {
-                                std::string access = m_types.formatFieldAccess(gn->typeRef, (int)goff);
+                            TypeRef structType = NullType;
+                            if (gt && (gt->kind == StabsTypeKind::Struct || gt->kind == StabsTypeKind::Union))
+                                structType = gn->typeRef;
+                            else if (gt && gt->kind == StabsTypeKind::Array) {
+                                auto *et = m_types.resolveType(gt->targetType);
+                                if (et && (et->kind == StabsTypeKind::Struct || et->kind == StabsTypeKind::Union)) {
+                                    int elemSz = et->sizeBytes;
+                                    if (elemSz > 0 && (int)goff < elemSz)
+                                        structType = gt->targetType;
+                                }
+                            }
+                            if (structType != NullType) {
+                                std::string access = m_types.formatFieldAccess(structType, (int)goff);
                                 if (!access.empty()) {
                                     auto base = IRExpr::mkVar(gname, gn->typeRef);
-                                    auto *field = m_types.findFieldAtOffset(gn->typeRef, (int)goff);
+                                    auto *field = m_types.findFieldAtOffset(structType, (int)goff);
                                     TypeRef ft = field ? field->typeRef : NullType;
                                     auto fld = IRExpr::mkField(std::move(base), access, (int)goff, ft);
                                     bb.stmts.push_back(IRStmt::mkStore(std::move(fld), std::move(val), storeSize));
@@ -2105,6 +2225,176 @@ private:
             else cmpOp = IROp::Ne;
         }
         return IRExpr::mkBinary(cmpOp, std::move(lhs), std::move(rhs));
+    }
+
+    // ── Struct-by-value arg consolidation ───────────────────────────
+    // The lifter captures each pushed/copied word as one call arg.  For a
+    // callee whose prototype expects a struct-by-value >4 bytes, those
+    // N words need to collapse to a single arg.  When the ABI setup was
+    // a memcpy-from-pointer (each word is a Load from base + i*4 off the
+    // same base register), we can recover the source pointer and emit
+    // `*(struct X *)base` — byte-for-byte equivalent to the original
+    // sequence of pushes.  When the pattern isn't recognized (struct
+    // assembled from scratch), we leave the arg list alone; the call
+    // won't compile, but that's honest — we don't know the struct body.
+    static bool irExprEqual(const IRExpr *a, const IRExpr *b) {
+        if (!a && !b) return true;
+        if (!a || !b) return false;
+        if (a->op != b->op || a->value != b->value ||
+            a->name != b->name || a->castKind != b->castKind ||
+            a->kids.size() != b->kids.size())
+            return false;
+        for (size_t i = 0; i < a->kids.size(); ++i)
+            if (!irExprEqual(a->kids[i].get(), b->kids[i].get())) return false;
+        return true;
+    }
+
+    std::vector<std::unique_ptr<IRExpr>>
+    consolidateStructByValueArgs(const std::string &target,
+                                 std::vector<std::unique_ptr<IRExpr>> args) {
+        if (target.empty()) return args;
+        const StabsFunction *callee = m_mf.stabsFunctionByName(target);
+        if (!callee || callee->params.empty()) return args;
+
+        std::vector<std::unique_ptr<IRExpr>> out;
+        size_t argIdx = 0;
+        for (auto &p : callee->params) {
+            if (argIdx >= args.size()) break;
+            int pSize = 4;
+            bool isLargeStruct = false;
+            if (p.typeRef != NullType) {
+                auto *pt = m_types.resolveType(p.typeRef);
+                if (pt && pt->sizeBytes > 0) {
+                    pSize = pt->sizeBytes;
+                    isLargeStruct =
+                        (pt->kind == StabsTypeKind::Struct ||
+                         pt->kind == StabsTypeKind::Union) &&
+                        pSize > 4;
+                }
+            }
+            if (!isLargeStruct) {
+                out.push_back(std::move(args[argIdx++]));
+                continue;
+            }
+            int words = (pSize + 3) / 4;
+            if (argIdx + (size_t)words > args.size()) {
+                // Not enough words captured — leave remaining args alone.
+                while (argIdx < args.size()) out.push_back(std::move(args[argIdx++]));
+                break;
+            }
+            // Try to match the memcpy-from-pointer pattern: every word is
+            // Load(Add(base, startOff + i*4)) for the same base IRExpr.
+            IRExpr *base = nullptr;
+            int startOff = 0;
+            bool matched = true;
+            for (int i = 0; i < words; ++i) {
+                auto *w = args[argIdx + (size_t)i].get();
+                if (!w || w->op != IROp::Load || w->kids.empty() || !w->kids[0]) {
+                    matched = false; break;
+                }
+                auto *addr = w->kids[0].get();
+                IRExpr *thisBase = nullptr;
+                int thisOff = 0;
+                if (addr->op == IROp::Add && addr->kids.size() == 2 &&
+                    addr->kids[0] && addr->kids[1] && addr->kids[1]->isConst()) {
+                    thisBase = addr->kids[0].get();
+                    thisOff = (int)addr->kids[1]->value;
+                } else {
+                    thisBase = addr;
+                    thisOff = 0;
+                }
+                if (i == 0) { base = thisBase; startOff = thisOff; }
+                else if (!irExprEqual(base, thisBase) ||
+                         thisOff != startOff + i * 4) {
+                    matched = false; break;
+                }
+            }
+            // Special case: word 0 is a Var (or Temp coalesced to a param)
+            // whose type matches the struct param.  This handles forwarding
+            // a struct-by-value parameter (`from`) to another function
+            // expecting that struct.  Restricted to function PARAMETERS
+            // (not locals) because the emitter downgrades local
+            // by-value structs to `int` — passing the local would then
+            // fail with the same "int where struct expected" error.
+            if (!matched && words >= 1 && m_func) {
+                auto *first = args[argIdx].get();
+                std::string varName;
+                if (first && first->op == IROp::Var && !first->name.empty()) {
+                    varName = first->name;
+                } else if (first && first->op == IROp::Temp) {
+                    int tid = (int)first->value;
+                    auto vit = m_func->tempToVar.find(tid);
+                    if (vit != m_func->tempToVar.end()) {
+                        auto nit = m_func->varNames.find(vit->second);
+                        if (nit != m_func->varNames.end()) varName = nit->second;
+                    }
+                }
+                // Find the candidate type: from named-var lookup, or from the
+                // temp's tempType if no name found.
+                TypeRef vtRef = NullType;
+                if (!varName.empty()) {
+                    for (auto &fp : m_func->params)
+                        if (fp.name == varName && fp.typeRef != NullType)
+                            { vtRef = fp.typeRef; break; }
+                    if (vtRef == NullType)
+                        for (auto &fl : m_func->locals)
+                            if (fl.name == varName && fl.typeRef != NullType)
+                                { vtRef = fl.typeRef; break; }
+                }
+                if (vtRef == NullType && first && first->op == IROp::Temp) {
+                    vtRef = m_func->tempType((int)first->value);
+                }
+                if (vtRef != NullType) {
+                    auto *vt = m_types.resolveType(vtRef);
+                    auto *pt = m_types.resolveType(p.typeRef);
+                    if (vt && pt &&
+                        (vt->kind == StabsTypeKind::Struct ||
+                         vt->kind == StabsTypeKind::Union) &&
+                        vt->kind == pt->kind &&
+                        !vt->name.empty() && vt->name == pt->name) {
+                        out.push_back(std::move(args[argIdx]));
+                        argIdx += (size_t)words;
+                        continue;
+                    }
+                }
+            }
+            if (matched && base) {
+                auto baseClone = base->clone();
+                std::unique_ptr<IRExpr> addr;
+                if (startOff != 0) {
+                    addr = IRExpr::mkBinary(IROp::Add,
+                                            std::move(baseClone),
+                                            IRExpr::mkConst((uint64_t)startOff));
+                } else {
+                    addr = std::move(baseClone);
+                }
+                auto structLoad = std::make_unique<IRExpr>();
+                structLoad->op = IROp::Load;
+                structLoad->typeRef = p.typeRef;
+                structLoad->loadSize = pSize;
+                structLoad->kids.push_back(std::move(addr));
+                out.push_back(std::move(structLoad));
+            } else {
+                // Pattern didn't match: the caller assembled the struct from
+                // individual word values (stack-materialized locals, register
+                // spills, etc.).  Synthesize an IR node that the emitter will
+                // expand into a compound-literal cast so all N words land in
+                // the call arg's stack slot byte-for-byte.  This is modelled
+                // as a Call to the synthetic name `__pack_struct` with the
+                // captured words as kids — the emitter recognizes it.
+                auto packExpr = std::make_unique<IRExpr>();
+                packExpr->op = IROp::Call;
+                packExpr->name = "__pack_struct";
+                packExpr->typeRef = p.typeRef;
+                packExpr->loadSize = pSize;
+                for (int i = 0; i < words; ++i)
+                    packExpr->kids.push_back(std::move(args[argIdx + (size_t)i]));
+                out.push_back(std::move(packExpr));
+            }
+            argIdx += (size_t)words;
+        }
+        while (argIdx < args.size()) out.push_back(std::move(args[argIdx++]));
+        return out;
     }
 
     // ── Main instruction lifter ─────────────────────────────────────
@@ -2365,6 +2655,11 @@ private:
             // xor reg, reg → zero
             if (mn == "xor" && o[0].type == X86_OP_REG && o[1].type == X86_OP_REG &&
                 canonReg(o[0].reg) == canonReg(o[1].reg)) {
+                m_flags.lhs = IRExpr::mkConst(0);
+                m_flags.rhs = IRExpr::mkConst(0);
+                m_flags.op = IROp::Sub;
+                m_flags.carryLhs.reset();
+                m_flags.carryRhs.reset();
                 writeOp(o[0], IRExpr::mkConst(0), bb);
                 return;
             }
@@ -2404,19 +2699,68 @@ private:
                         }
                     }
                 }
-                auto res = IRExpr::mkBinary(irop, std::move(lhs), std::move(rhs));
-                writeOp(o[0], std::move(res), bb, resultType);
+                auto res = IRExpr::mkBinary(irop, lhs->clone(), rhs->clone());
+                auto flagExpr = res->clone();
+                if (mn == "sub") {
+                    m_flags.carryLhs = lhs->clone();
+                    m_flags.carryRhs = rhs->clone();
+                } else if (mn == "and") {
+                    m_flags.carryLhs.reset();
+                    m_flags.carryRhs.reset();
+                } else {
+                    m_flags.carryLhs.reset();
+                    m_flags.carryRhs.reset();
+                }
+                if (o[0].type == X86_OP_REG) {
+                    int destTemp = assignReg(o[0].reg, std::move(res), bb,
+                                             resultType);
+                    m_flags.lhs = IRExpr::mkTemp(destTemp,
+                                                 func.tempType(destTemp));
+                } else {
+                    m_flags.lhs = std::move(flagExpr);
+                    writeOp(o[0], std::move(res), bb, resultType);
+                }
+                m_flags.rhs = IRExpr::mkConst(0);
+                m_flags.op = IROp::Sub;
             }
             return;
         }
         if (mn == "inc" && n == 1) {
             auto v = readOp(o[0]);
-            if (v) writeOp(o[0], IRExpr::mkBinary(IROp::Add, std::move(v), IRExpr::mkConst(1)), bb);
+            if (v) {
+                auto res = IRExpr::mkBinary(IROp::Add, v->clone(), IRExpr::mkConst(1));
+                m_flags.carryLhs.reset();
+                m_flags.carryRhs.reset();
+                if (o[0].type == X86_OP_REG) {
+                    int destTemp = assignReg(o[0].reg, std::move(res), bb);
+                    m_flags.lhs = IRExpr::mkTemp(destTemp,
+                                                 func.tempType(destTemp));
+                } else {
+                    m_flags.lhs = res->clone();
+                    writeOp(o[0], std::move(res), bb);
+                }
+                m_flags.rhs = IRExpr::mkConst(0);
+                m_flags.op = IROp::Sub;
+            }
             return;
         }
         if (mn == "dec" && n == 1) {
             auto v = readOp(o[0]);
-            if (v) writeOp(o[0], IRExpr::mkBinary(IROp::Sub, std::move(v), IRExpr::mkConst(1)), bb);
+            if (v) {
+                auto res = IRExpr::mkBinary(IROp::Sub, v->clone(), IRExpr::mkConst(1));
+                m_flags.carryLhs.reset();
+                m_flags.carryRhs.reset();
+                if (o[0].type == X86_OP_REG) {
+                    int destTemp = assignReg(o[0].reg, std::move(res), bb);
+                    m_flags.lhs = IRExpr::mkTemp(destTemp,
+                                                 func.tempType(destTemp));
+                } else {
+                    m_flags.lhs = res->clone();
+                    writeOp(o[0], std::move(res), bb);
+                }
+                m_flags.rhs = IRExpr::mkConst(0);
+                m_flags.op = IROp::Sub;
+            }
             return;
         }
         if (mn == "neg" && n == 1) {
@@ -2473,10 +2817,12 @@ private:
         // sbb reg, reg → reg = -(CF) → reg = (prev_cmp < 0 unsigned) ? -1 : 0
         if (mn == "sbb" && n == 2 && o[0].type == X86_OP_REG && o[1].type == X86_OP_REG &&
             canonReg(o[0].reg) == canonReg(o[1].reg)) {
-            if (m_flags.lhs) {
+            IRExpr *cfLhs = m_flags.carryLhs ? m_flags.carryLhs.get() : m_flags.lhs.get();
+            IRExpr *cfRhs = m_flags.carryRhs ? m_flags.carryRhs.get() : m_flags.rhs.get();
+            if (cfLhs) {
                 // CF=1 when lhs < rhs (unsigned) → sbb reg,reg = -(lhs < rhs) = (lhs < rhs) ? -1 : 0
-                auto cond = IRExpr::mkBinary(IROp::Ult, m_flags.lhs->clone(),
-                    m_flags.rhs ? m_flags.rhs->clone() : IRExpr::mkConst(0));
+                auto cond = IRExpr::mkBinary(IROp::Ult, cfLhs->clone(),
+                    cfRhs ? cfRhs->clone() : IRExpr::mkConst(0));
                 writeOp(o[0], IRExpr::mkUnary(IROp::Neg, std::move(cond)), bb);
             } else {
                 writeOp(o[0], IRExpr::mkConst(0), bb);
@@ -2496,9 +2842,11 @@ private:
         }
         // adc reg, 0 → reg = reg + CF → reg = reg + (prev_cmp < 0 unsigned)
         if (mn == "adc" && n == 2 && o[1].type == X86_OP_IMM && o[1].imm == 0) {
-            if (m_flags.lhs) {
-                auto carry = IRExpr::mkBinary(IROp::Ult, m_flags.lhs->clone(),
-                    m_flags.rhs ? m_flags.rhs->clone() : IRExpr::mkConst(0));
+            IRExpr *cfLhs = m_flags.carryLhs ? m_flags.carryLhs.get() : m_flags.lhs.get();
+            IRExpr *cfRhs = m_flags.carryRhs ? m_flags.carryRhs.get() : m_flags.rhs.get();
+            if (cfLhs) {
+                auto carry = IRExpr::mkBinary(IROp::Ult, cfLhs->clone(),
+                    cfRhs ? cfRhs->clone() : IRExpr::mkConst(0));
                 auto reg = readOp(o[0]);
                 if (reg)
                     writeOp(o[0], IRExpr::mkBinary(IROp::Add, std::move(reg), std::move(carry)), bb);
@@ -2510,6 +2858,8 @@ private:
         if (mn == "cmp" && n == 2) {
             m_flags.lhs = readOp(o[0]);
             m_flags.rhs = readOp(o[1]);
+            m_flags.carryLhs = m_flags.lhs ? m_flags.lhs->clone() : nullptr;
+            m_flags.carryRhs = m_flags.rhs ? m_flags.rhs->clone() : nullptr;
             // Preserve sub-dword width for correct comparison codegen
             if (o[0].type == X86_OP_MEM && o[0].size == 1 && m_flags.lhs)
                 m_flags.lhs = IRExpr::mkCast(CastKind::Trunc8, std::move(m_flags.lhs));
@@ -2521,6 +2871,8 @@ private:
         if (mn == "test" && n == 2) {
             m_flags.lhs = readOp(o[0]);
             m_flags.rhs = readOp(o[1]);
+            m_flags.carryLhs.reset();
+            m_flags.carryRhs.reset();
             // Note: register-width truncation for test/cmp disabled for now
             // because it causes re-emission of inlined call expressions
             m_flags.op = IROp::And;
@@ -2798,6 +3150,32 @@ private:
                 for (int a = (int)m_pushArgs.size() - 1; a >= 0; --a)
                     args.push_back(std::move(m_pushArgs[a]));
             }
+            // Detect regparm(3) calls: check if callee uses regparm by
+            // scanning its prologue for register saves (mov [ebp-N], eax/edx/ecx).
+            {
+                const StabsFunction *callee = m_mf.stabsFunctionByName(target);
+                if (callee && callee->address && isCalleeRegparm(callee->address) &&
+                    !callee->params.empty()) {
+                    static const x86_reg regparmOrder[] = {X86_REG_EAX, X86_REG_EDX, X86_REG_ECX};
+                    int nStackArgs = (int)args.size();
+                    int nRegArgs = std::min(3, (int)callee->params.size() - nStackArgs);
+                    if (nRegArgs > 0) {
+                        std::vector<std::unique_ptr<IRExpr>> regArgs;
+                        for (int ri = 0; ri < nRegArgs; ++ri) {
+                            auto it = m_regTemps.find(regparmOrder[ri]);
+                            if (it != m_regTemps.end())
+                                regArgs.push_back(IRExpr::mkTemp(it->second,
+                                    m_func->tempType(it->second)));
+                            else
+                                break;
+                        }
+                        if ((int)regArgs.size() == nRegArgs) {
+                            for (int ri = nRegArgs - 1; ri >= 0; --ri)
+                                args.insert(args.begin(), std::move(regArgs[ri]));
+                        }
+                    }
+                }
+            }
             m_espArgs.clear();
             m_pushArgs.clear();
             // Prepend fptable index if present
@@ -2805,6 +3183,12 @@ private:
                 args.insert(args.begin(), std::move(m_fpTableIndex));
                 m_fpTableIndex.reset();
             }
+
+            // Collapse struct-by-value args that were captured word-by-word
+            // back into a single argument when the memcpy-from-pointer
+            // pattern is present.  Preserves semantics; otherwise leaves
+            // args untouched (compile fails honestly).
+            args = consolidateStructByValueArgs(target, std::move(args));
 
             auto callExpr = IRExpr::mkCall(target, std::move(args), retType);
 

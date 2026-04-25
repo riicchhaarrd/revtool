@@ -28,6 +28,7 @@
 #include <cstring>
 #include <map>
 #include <set>
+#include <string>
 #include <tuple>
 #include <unordered_map>
 #include <vector>
@@ -643,6 +644,8 @@ int main(int argc, char *argv[]) {
             "  -n <name>          Decompile function by name (substring match)\n"
             "  -s <idx>           Decompile source file by index\n"
             "  -a                 Decompile all source files\n"
+            "  -o <dir>           Write -a output to individual .c files\n"
+            "  --only <file>      Limit -a to basenames listed in file\n"
             "  --json             Emit machine-readable JSON\n"
             "  --gcc              Pipe output through gcc to count errors\n"
             "  --ssa              Enable full SSA pass (experimental)\n"
@@ -662,6 +665,8 @@ int main(int argc, char *argv[]) {
     int srcIdx = -1;
     const char *funcName = nullptr;
     const char *xrefString = nullptr;
+    const char *outDir = nullptr;
+    const char *onlyList = nullptr;
 
     for (int i = 2; i < argc; ++i) {
         if (strcmp(argv[i], "-l") == 0) doList = true;
@@ -675,7 +680,7 @@ int main(int argc, char *argv[]) {
         else if (strcmp(argv[i], "--ssa") == 0) Decompiler::s_useSSA = true;
         else if (strcmp(argv[i], "--flat") == 0) Decompiler::s_flatMode = true;
         else if (strcmp(argv[i], "--cosmetic") == 0) { Decompiler::s_cosmeticMode = true; g_cosmeticMode = true; }
-        else if (strcmp(argv[i], "--port") == 0) { Decompiler::s_cosmeticMode = true; Decompiler::s_portMode = true; g_cosmeticMode = true; }
+        else if (strcmp(argv[i], "--port") == 0) { Decompiler::s_portMode = true; }
         else if (strcmp(argv[i], "--types") == 0) doTypes = true;
         else if (strcmp(argv[i], "--srcof") == 0 && i + 1 < argc)
             srcOfAddr = strtoul(argv[++i], nullptr, 16);
@@ -686,6 +691,10 @@ int main(int argc, char *argv[]) {
             srcIdx = atoi(argv[++i]);
         else if (strcmp(argv[i], "-n") == 0 && i + 1 < argc)
             funcName = argv[++i];
+        else if (strcmp(argv[i], "-o") == 0 && i + 1 < argc)
+            outDir = argv[++i];
+        else if (strcmp(argv[i], "--only") == 0 && i + 1 < argc)
+            onlyList = argv[++i];
     }
 
     auto fail = [&](int code, const QString &msg) {
@@ -888,12 +897,42 @@ int main(int argc, char *argv[]) {
             return 0;
         }
     } else if (doAll) {
+        // Optional allow-list: one basename (without .c) per line.
+        std::set<std::string> onlySet;
+        if (onlyList) {
+            FILE *fp = fopen(onlyList, "r");
+            if (!fp) {
+                fprintf(stderr, "Cannot open --only list: %s\n", onlyList);
+                return 1;
+            }
+            char line[256];
+            while (fgets(line, sizeof(line), fp)) {
+                std::string s(line);
+                while (!s.empty() && (s.back() == '\n' || s.back() == '\r' || s.back() == ' '))
+                    s.pop_back();
+                if (!s.empty()) onlySet.insert(s);
+            }
+            fclose(fp);
+        }
+
         auto &sources = mf.stabsSourceFiles();
-        int totalErrors = 0;
+        int totalErrors = 0, written = 0, skipped = 0;
         QJsonArray files;
         for (size_t i = 0; i < sources.size(); ++i) {
             auto &sf = sources[i];
             if (sf.functionIndices.empty()) continue;
+
+            // Derive basename: strip directory prefix and extension
+            std::string base = sf.filename;
+            size_t slash = base.find_last_of('/');
+            if (slash != std::string::npos) base.erase(0, slash + 1);
+            size_t dot = base.find_last_of('.');
+            if (dot != std::string::npos) base.erase(dot);
+            if (!onlySet.empty() && !onlySet.count(base)) {
+                skipped++;
+                continue;
+            }
+
             if (!jsonMode)
                 fprintf(stderr, "Decompiling [%zu] %s%s...\n",
                         i, sf.directory.c_str(), sf.filename.c_str());
@@ -909,7 +948,20 @@ int main(int argc, char *argv[]) {
                 item["source_path"] = sourcePathFor(mf, (int)i);
                 item["code"] = fileOut;
                 if (doGcc) item["gcc_errors"] = errs;
+                if (outDir) item["output_path"] = QString::fromStdString(std::string(outDir) + "/" + base + ".c");
                 files.append(item);
+            }
+            if (outDir) {
+                std::string outPath = std::string(outDir) + "/" + base + ".c";
+                FILE *fp = fopen(outPath.c_str(), "w");
+                if (!fp) {
+                    fprintf(stderr, "Cannot write %s\n", outPath.c_str());
+                    continue;
+                }
+                QByteArray ba = fileOut.toUtf8();
+                fwrite(ba.data(), 1, ba.size(), fp);
+                fclose(fp);
+                written++;
             } else if (!quiet) {
                 printf("// ═══ [%zu] %s%s ═══\n",
                        i, sf.directory.c_str(), sf.filename.c_str());
@@ -920,10 +972,18 @@ int main(int argc, char *argv[]) {
             QJsonObject obj = makeMeta("decompile_all_sources");
             obj["files"] = files;
             if (doGcc) obj["gcc_total_errors"] = totalErrors;
+            if (outDir) {
+                obj["output_dir"] = QString::fromUtf8(outDir);
+                obj["written"] = written;
+                obj["skipped"] = skipped;
+            }
             printJson(obj);
-        } else if (doGcc) {
-            printf("\n=== Total: %d gcc errors across %zu files ===\n",
-                   totalErrors, sources.size());
+        } else {
+            if (outDir)
+                fprintf(stderr, "Wrote %d files to %s (%d skipped)\n", written, outDir, skipped);
+            if (doGcc)
+                printf("\n=== Total: %d gcc errors across %zu files ===\n",
+                       totalErrors, sources.size());
         }
         return 0;
     } else {

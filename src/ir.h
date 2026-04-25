@@ -55,6 +55,7 @@ enum class CastKind {
     SignExt8, SignExt16,    // signed widening
     Trunc8, Trunc16,       // narrowing
     IntToFloat, FloatToInt,
+    PtrToInt,
     BitCast,
 };
 
@@ -311,6 +312,7 @@ struct IRFunc {
     bool                     isStatic = false;
     bool                     detectedVoid = false; // heuristic: function returns void despite STABS saying int
     std::set<int>            phiTemps;    // temps from phi nodes — don't const-propagate
+    std::set<int>            pointerTemps; // temps known to be pointers (from type inference)
     std::vector<StabsTypedVar> params;
     std::vector<StabsTypedVar> locals;
     int                      sourceFileIdx = -1;

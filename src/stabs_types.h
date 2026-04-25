@@ -242,6 +242,33 @@ public:
             }
             if (fallback) return fallback;
         }
+        // CU type unification: when this is a complete Struct/Union with a
+        // real (non-anonymous) name, look across all CUs for a sibling with
+        // the SAME name AND the SAME size-in-bytes that has MORE fields.
+        // CU collisions cause the same struct to be parsed with truncated
+        // field lists in some CUs; the size-match check filters out
+        // accidental name overlaps from unrelated structs.
+        if ((t->kind == StabsTypeKind::Struct || t->kind == StabsTypeKind::Union) &&
+            !t->name.empty() && t->name.find("$_") != 0 &&
+            t->sizeBytes > 0) {
+            // Cache canonical lookups (mutable to keep resolveType const).
+            auto cit = m_canonicalCache.find(ref);
+            if (cit != m_canonicalCache.end()) return cit->second;
+            const StabsTypeInfo *best = t;
+            size_t bestFields = t->fields.size();
+            for (auto &[tref2, ti2] : m_types) {
+                if (tref2 == ref) continue;
+                if (ti2.kind != t->kind) continue;
+                if (ti2.name != t->name) continue;
+                if (ti2.sizeBytes != t->sizeBytes) continue;
+                if (ti2.fields.size() > bestFields) {
+                    best = &ti2;
+                    bestFields = ti2.fields.size();
+                }
+            }
+            m_canonicalCache[ref] = best;
+            return best;
+        }
         return t;
     }
 
@@ -290,11 +317,19 @@ public:
         case StabsTypeKind::LongDouble: return "long double";
 
         case StabsTypeKind::Pointer: {
+            auto *tgt = resolveType(t->targetType);
+            // Pointer to anonymous struct/union → void *
+            if (tgt && (tgt->kind == StabsTypeKind::Struct || tgt->kind == StabsTypeKind::Union) &&
+                tgt->name.find("$_") == 0)
+                return "void *";
             std::string inner = formatType(t->targetType, depth + 1);
             // Check if target is a function pointer
-            auto *tgt = getType(t->targetType);
-            if (tgt && tgt->kind == StabsTypeKind::Function)
+            auto *rawTgt = getType(t->targetType);
+            if (rawTgt && rawTgt->kind == StabsTypeKind::Function)
                 return inner; // already formatted as function pointer
+            // Fix array pointer syntax: "int[N] *" → "int *"
+            if (inner.find('[') != std::string::npos)
+                inner = inner.substr(0, inner.find('['));
             return inner + " *";
         }
         case StabsTypeKind::Reference: return formatType(t->targetType, depth + 1) + " *"; // C++ ref → C ptr
@@ -367,7 +402,33 @@ public:
                 return ret + " (*" + varName + ")()";
             }
         }
-        return formatType(ref) + " " + varName;
+        std::string typeStr = formatType(ref);
+        // void* can't be subscripted or used in arithmetic — use char*
+        // void*→char* too broad, disabled
+        return typeStr + " " + varName;
+    }
+
+    // Field bit size with fallback to the field type's size in bits.
+    // STABS sometimes omits the explicit bit width for typedef'd array fields
+    // (e.g., `D3DMATRIX viewProjectionMatrix` — D3DMATRIX is typedef int[16]).
+    // Without the fallback, range checks like `bitTarget < f.bitOffset + f.bitSize`
+    // collapse to strict-equality and we lose `field[i]` resolution entirely.
+    //
+    // IMPORTANT: the fallback is gated on the resolved type being Array or an
+    // opaque Struct/Union.  Applying it to fully-defined struct fields makes
+    // the "falls inside larger field" path drill into every unrelated sub-
+    // struct (sharedUiInfo_t.serverStatus — char[] in the header, struct in
+    // STABS — would emit serverStatus.sortKey etc.), breaking ui_main_mp/
+    // ui_shared_obj by ~150 errors each.
+    int fieldBitSize(const StabsTypeField &f) const {
+        if (f.bitSize > 0) return f.bitSize;
+        auto *ft = resolveType(f.typeRef);
+        if (!ft || ft->sizeBytes <= 0) return 0;
+        if (ft->kind == StabsTypeKind::Array) return ft->sizeBytes * 8;
+        if ((ft->kind == StabsTypeKind::Struct || ft->kind == StabsTypeKind::Union) &&
+            ft->fields.empty())
+            return ft->sizeBytes * 8;
+        return 0;
     }
 
     // Find struct/union field at a given byte offset
@@ -382,7 +443,8 @@ public:
         }
         // Try nested: find the field whose range contains the offset
         for (auto &f : t->fields) {
-            if (bitTarget >= f.bitOffset && bitTarget < f.bitOffset + f.bitSize)
+            int sz = fieldBitSize(f);
+            if (sz > 0 && bitTarget >= f.bitOffset && bitTarget < f.bitOffset + sz)
                 return &f;
         }
         return nullptr;
@@ -390,7 +452,7 @@ public:
 
     // Format a field access with array subscript when the offset falls inside an array field.
     // Returns "fieldName" for exact match, "fieldName[i]" for array, "fieldName.subfield" for nested struct.
-    std::string formatFieldAccess(TypeRef ref, int byteOffset, bool debug = false) const {
+    std::string formatFieldAccess(TypeRef ref, int byteOffset, bool debug = false, bool scalarAccess = false) const {
         auto *t = resolveType(ref);
         if (!t || (t->kind != StabsTypeKind::Struct && t->kind != StabsTypeKind::Union))
             return "";
@@ -402,12 +464,41 @@ public:
         for (auto &f : t->fields) {
             if (f.name.empty() || f.name[0] == '!' || f.name[0] == '/' ||
                 f.name.find("::") != std::string::npos ||
-                (f.bitSize == 0 && f.bitOffset == 0))
+                (f.bitSize == 0 && f.bitOffset == 0 && f.name.size() > 1))
                 continue;
-            if (bitTarget > f.bitOffset && bitTarget < f.bitOffset + f.bitSize) {
+            int fBitSize = fieldBitSize(f);
+            if (bitTarget > f.bitOffset && bitTarget < f.bitOffset + fBitSize) {
                 int fieldByteStart = f.bitOffset / 8;
                 int offsetInField = byteOffset - fieldByteStart;
                 auto *ft = resolveType(f.typeRef);
+                // Opaque struct (declared but no body) — treat as int array so
+                // accesses into it round-trip as `field[i]` instead of the bare
+                // field name.  Covers cases like `D3DMATRIX viewProjectionMatrix`
+                // where the typedef chain resolves to a struct with sizeBytes
+                // set but no fields parsed.
+                if (ft && (ft->kind == StabsTypeKind::Struct ||
+                           ft->kind == StabsTypeKind::Union)) {
+                    if (ft->fields.empty() && ft->sizeBytes > 0) {
+                        int elemSize = 4;
+                        int idx = offsetInField / elemSize;
+                        int subOff = offsetInField % elemSize;
+                        if (subOff == 0)
+                            return f.name + "[" + std::to_string(idx) + "]";
+                    } else if (!ft->fields.empty()) {
+                        // Only drill into sub-struct fields that are scalar (not
+                        // nested structs), to avoid accessing opaque char[N] fields
+                        // in port headers
+                        auto *subField = findFieldAtOffset(f.typeRef, offsetInField);
+                        if (subField && subField->typeRef != NullType) {
+                            auto *sft = resolveType(subField->typeRef);
+                            if (sft && sft->kind != StabsTypeKind::Struct &&
+                                sft->kind != StabsTypeKind::Union &&
+                                sft->kind != StabsTypeKind::Array) {
+                                return f.name + "." + subField->name;
+                            }
+                        }
+                    }
+                }
                 if (ft && ft->kind == StabsTypeKind::Array) {
                     auto *elemT = resolveType(ft->targetType);
                     int elemSize = elemT ? elemT->sizeBytes : 4;
@@ -446,16 +537,18 @@ public:
                 f.name.find("(") != std::string::npos ||
                 f.name.find("<") != std::string::npos ||
                 f.name.find("operator") == 0 ||
-                (f.bitSize == 0 && f.bitOffset == 0))
+                (f.bitSize == 0 && f.bitOffset == 0 && f.name.size() > 1))
                 continue;
             if (f.bitOffset == bitTarget || f.bitOffset / 8 == byteOffset) {
                 // Check if this field is actually inside a larger array field
                 // (STABS may have overlapping fields for array elements)
                 for (auto &af : t->fields) {
-                    if (af.name.empty() || af.bitSize == 0) continue;
+                    if (af.name.empty()) continue;
+                    int afBitSize = fieldBitSize(af);
+                    if (afBitSize == 0) continue;
                     auto *aft = resolveType(af.typeRef);
                     if (aft && aft->kind == StabsTypeKind::Array &&
-                        bitTarget >= af.bitOffset && bitTarget < af.bitOffset + af.bitSize &&
+                        bitTarget >= af.bitOffset && bitTarget < af.bitOffset + afBitSize &&
                         af.bitOffset != bitTarget) {
                         // This offset is inside a larger array field — prefer array access
                         auto *elemT = resolveType(aft->targetType);
@@ -529,8 +622,26 @@ public:
                     }
                 }
                 // If field is an array, accessing at its base offset = first element
-                if (ft && ft->kind == StabsTypeKind::Array)
+                if (ft && ft->kind == StabsTypeKind::Array) {
+                    if (scalarAccess) {
+                        auto *elemT2 = resolveType(ft->targetType);
+                        if (elemT2 && (elemT2->kind == StabsTypeKind::Struct ||
+                                       elemT2->kind == StabsTypeKind::Union) &&
+                            elemT2->sizeBytes > 4) {
+                            std::string sub = formatFieldAccess(ft->targetType, 0, false, true);
+                            if (!sub.empty())
+                                return f.name + "[0]." + sub;
+                        }
+                    }
                     return f.name + "[0]";
+                }
+                // Opaque struct with known size — treat as int array [0]
+                if (ft && (ft->kind == StabsTypeKind::Struct ||
+                           ft->kind == StabsTypeKind::Union) &&
+                    ft->fields.empty() && ft->sizeBytes >= 4)
+                    return f.name + "[0]";
+                if (f.name == "_")
+                    return "";
                 return f.name;
             }
         }
@@ -541,10 +652,18 @@ public:
                 f.name.find("::") != std::string::npos ||
                 (f.bitSize == 0 && f.bitOffset == 0))
                 continue;
-            if (bitTarget >= f.bitOffset && bitTarget < f.bitOffset + f.bitSize) {
+            int fBitSize2 = fieldBitSize(f);
+            if (fBitSize2 > 0 && bitTarget >= f.bitOffset && bitTarget < f.bitOffset + fBitSize2) {
                 int fieldByteStart = f.bitOffset / 8;
                 int offsetInField = byteOffset - fieldByteStart;
-                // Check if field type is an array
+                // Check if field type is an array.
+                // NOTE: keep getType (not resolveType) here.  Using resolveType
+                // here follows typedefs onto large struct buffers (serverStatus
+                // char[] that STABS types as struct serverStatus_s) and drills
+                // into the struct body, producing wrong `.sub` accesses on
+                // what the header carries as char[].  The viewProjectionMatrix
+                // array case is handled earlier by the opaque-struct-as-int-
+                // array block in the "inside larger field FIRST" loop.
                 auto *ft = getType(f.typeRef);
                 if (ft && ft->kind == StabsTypeKind::Array) {
                     auto *elemT = resolveType(ft->targetType);
@@ -623,6 +742,50 @@ public:
         return NullType;
     }
 
+    // ── Synthetic type creation (for struct inference) ──────────────
+    // Allocate a new TypeRef for a synthetic type
+    TypeRef allocSyntheticType() {
+        int id = --m_syntheticCounter;
+        return TypeRef{-99, id}; // unit -99 to avoid collision with real types
+    }
+
+    // Create a synthetic struct type and return its TypeRef
+    TypeRef createSyntheticStruct(const std::string &name,
+                                  const std::vector<StabsTypeField> &fields,
+                                  int sizeBytes) {
+        TypeRef ref = allocSyntheticType();
+        auto &ti = m_types[ref];
+        ti.kind = StabsTypeKind::Struct;
+        ti.name = name;
+        ti.sizeBytes = sizeBytes;
+        ti.fields = fields;
+        return ref;
+    }
+
+    // Replace a char[] field in an existing struct with a sub-struct type
+    bool replaceFieldType(TypeRef structRef, int fieldByteOffset, TypeRef newFieldType) {
+        auto it = m_types.find(structRef);
+        if (it == m_types.end()) return false;
+        int bitTarget = fieldByteOffset * 8;
+        for (auto &f : it->second.fields) {
+            if (f.bitOffset == bitTarget || f.bitOffset / 8 == fieldByteOffset) {
+                f.typeRef = newFieldType;
+                // Update the field name to use the new type's name
+                auto *nt = getType(newFieldType);
+                if (nt && !nt->name.empty())
+                    f.name = f.name; // keep original name
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Get mutable access to a type (for field modification)
+    StabsTypeInfo* getMutableType(TypeRef ref) {
+        auto it = m_types.find(ref);
+        return it != m_types.end() ? &it->second : nullptr;
+    }
+
     // Global/static variable lookups
     const std::vector<StabsGlobalVar>& globals() const { return m_globals; }
 
@@ -672,6 +835,12 @@ public:
         return best;
     }
 
+    const StabsGlobalVar* globalByAddress(uint32_t address) const {
+        for (auto &g : m_globals)
+            if (g.address == address && g.typeRef != NullType) return &g;
+        return nullptr;
+    }
+
     // Include files
     const std::vector<std::string>& includes() const { return m_includes; }
 
@@ -694,6 +863,7 @@ public:
             if (f.name.find("(") != std::string::npos) continue;
             if (f.name[0] == '!' || f.name[0] == '#' || f.name[0] == '$') continue;
             if (f.name[0] == '~') continue; // destructor
+            if (f.name.find("_vptr$") != std::string::npos) continue;
             if (f.name.find("operator") == 0) continue; // operator overloads
             // Skip names with C++ template or reference artifacts
             if (f.name.find("<") != std::string::npos) continue;
@@ -703,7 +873,50 @@ public:
             if (f.name.find("=") != std::string::npos) continue;
             // Skip fields with no size (C++ static members, vtable pointers)
             if (f.bitSize == 0 && f.bitOffset == 0) continue;
-            out += "    " + formatDecl(f.typeRef, f.name) + ";\n";
+            // Skip C++ vtable pointers (_vptr$ClassName)
+            if (f.name.find("_vptr$") != std::string::npos) continue;
+            // Handle anonymous struct/union fields (names like $_NNNN)
+            auto *ft = resolveType(f.typeRef);
+            bool isAnon = false;
+            if (ft && (ft->kind == StabsTypeKind::Struct || ft->kind == StabsTypeKind::Union))
+                isAnon = ft->name.find("$_") == 0;
+            // Also check the unresolved type name
+            if (!isAnon) {
+                auto *rawT = getType(f.typeRef);
+                if (rawT && rawT->kind == StabsTypeKind::ForwardRef && rawT->forwardTag.find("$_") == 0)
+                    isAnon = true;
+                if (rawT && (rawT->kind == StabsTypeKind::Struct || rawT->kind == StabsTypeKind::Union) &&
+                    rawT->name.find("$_") == 0)
+                    isAnon = true;
+            }
+            if (isAnon && ft && !ft->fields.empty() && ft->sizeBytes > 0) {
+                // Inline the anonymous struct body
+                std::string kw2 = (ft->kind == StabsTypeKind::Union) ? "union" : "struct";
+                out += "    " + kw2 + " {\n";
+                for (auto &sf : ft->fields) {
+                    if (sf.name.empty() || sf.name[0] == '/' || sf.name[0] == '!') continue;
+                    if (sf.name.find("::") != std::string::npos) continue;
+                    if (sf.bitSize == 0 && sf.bitOffset == 0) continue;
+                    std::string sfdecl = formatDecl(sf.typeRef, sf.name);
+                    if (sfdecl.find("(*)()") != std::string::npos) continue;
+                    out += "        " + sfdecl + ";\n";
+                }
+                out += "    } " + f.name + ";\n";
+            } else if (isAnon) {
+                // Anonymous struct with unknown body — emit as char[size] padding
+                int sz = 4;
+                if (ft && ft->sizeBytes > 0) sz = ft->sizeBytes;
+                else {
+                    int fBitSz = fieldBitSize(f);
+                    if (fBitSz > 0) sz = fBitSz / 8;
+                }
+                out += "    char " + f.name + "[" + std::to_string(sz) + "];\n";
+            } else {
+                std::string fdecl = formatDecl(f.typeRef, f.name);
+                // Skip fields with invalid C syntax (function pointer pointers etc.)
+                if (fdecl.find("(*)()") != std::string::npos) continue;
+                out += "    " + fdecl + ";\n";
+            }
         }
         out += "}";
         return out;
@@ -728,9 +941,13 @@ public:
 private:
     std::map<TypeRef, StabsTypeInfo>         m_types;
     std::vector<StabsGlobalVar>              m_globals;
+    // Mutable cache for resolveType's CU-unification: maps a TypeRef to
+    // the fattest sibling-by-name (or itself if no fatter found).
+    mutable std::map<TypeRef, const StabsTypeInfo*> m_canonicalCache;
     std::unordered_map<uint32_t, std::vector<size_t>> m_globalByAddr;
     std::vector<std::string>                 m_includes;
     int                                      m_unit = 0;
+    int                                      m_syntheticCounter = -1000000; // negative TypeRefs for synthetic types
 
     // Check if a type ref should be protected from overwrite.
     // ForwardRefs with real tag names (like clientStatic_t) carry valuable

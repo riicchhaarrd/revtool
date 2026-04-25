@@ -209,6 +209,7 @@ struct StabsFunction {
     std::vector<std::pair<uint32_t, int>> lineMap; // addr -> line number
     std::vector<StabsTypedVar> params;
     std::vector<StabsTypedVar> locals;
+    bool isRegparm = false;  // true if function uses regparm(3) calling convention
 };
 
 struct StabsSourceFile {
@@ -251,6 +252,7 @@ public:
     const std::vector<StabsFunction>&   stabsFunctions()   const { return m_stabsFuncs; }
     const std::vector<StabsSourceFile>& stabsSourceFiles() const { return m_stabsSources; }
     const StabsTypeTable&               typeTable()        const { return m_typeTable; }
+    StabsTypeTable&                     mutableTypeTable()        { return m_typeTable; }
     uint32_t entryPoint() const { return m_entryPoint; }
     const std::vector<DataDirectoryEntry>& dataDirectories() const {
         return m_peHeader.dataDirectories;
@@ -1088,7 +1090,19 @@ private:
                     if (!related && sn.size() >= 4) related = (gn.find(sn.substr(0,4)) != std::string::npos);
                     if (!related) useType = NullType;
                 }
-                m_typeTable.addGlobal(parsed.name, sym.n_value, useType, true);
+                {
+                    std::string gname = parsed.name;
+                    // Strip C++ function scope from static locals:
+                    // "FS_ShiftStr(char const*, int)::buf" → "buf"
+                    auto scopePos = gname.rfind("::");
+                    if (scopePos != std::string::npos && scopePos + 2 < gname.size()) {
+                        // Only strip if there's a function-like pattern before ::
+                        auto parenPos = gname.find('(');
+                        if (parenPos != std::string::npos && parenPos < scopePos)
+                            gname = gname.substr(scopePos + 2);
+                    }
+                    m_typeTable.addGlobal(gname, sym.n_value, useType, true);
+                }
                 break;
             }
             case N_RSYM: {
@@ -1274,6 +1288,18 @@ private:
                     std::string gname = entry.substr(0, cpos);
                     auto it = nlSyms.find(gname);
                     if (it != nlSyms.end()) {
+                        bool alreadyTyped = false;
+                        for (auto &g : m_typeTable.globals()) {
+                            if (g.name == gname && g.address == it->second &&
+                                g.typeRef != NullType) {
+                                alreadyTyped = true;
+                                break;
+                            }
+                        }
+                        if (alreadyTyped) {
+                            spos += slen + 1;
+                            continue;
+                        }
                         auto parsed = m_typeTable.parseSymbol(entry);
                         if (parsed.typeRef != NullType) {
                             // Validate: if the type resolves to a struct, check if
@@ -1612,7 +1638,16 @@ private:
             if (name.find(':') != std::string::npos) continue;
             // Demangle C++ names
             std::string demangled = demangleNameOnly(sym.name);
-            if (!demangled.empty() && demangled != sym.name) name = demangled;
+            if (!demangled.empty() && demangled != sym.name) {
+                name = demangled;
+                // Strip function scope from static locals:
+                // "FS_ShiftStr(char const*, int)::buf" → "buf"
+                auto paren = name.find('(');
+                auto scope = name.rfind("::");
+                if (paren != std::string::npos && scope != std::string::npos &&
+                    paren < scope && scope + 2 < name.size())
+                    name = name.substr(scope + 2);
+            }
             m_dataSymMap[sym.n_value] = name;
         }
         // Also resolve import pointer targets: map import ptr address → target name

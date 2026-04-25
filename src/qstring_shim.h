@@ -7,8 +7,11 @@
 #include <cctype>
 #include <algorithm>
 #include <cstdio>
+#include <regex>
 
 class QStringList;
+class QRegularExpression;
+class QRegularExpressionMatch;
 
 // Minimal QChar wrapper so that QString::operator[] can expose isLetterOrNumber().
 class QChar {
@@ -94,6 +97,8 @@ public:
         size_t pos = find(s, (size_t)(from < 0 ? 0 : from));
         return pos == npos ? -1 : (int)pos;
     }
+    int indexOf(const QRegularExpression &re, int from = 0,
+                QRegularExpressionMatch *match = nullptr) const;
 
     QString mid(int pos, int len = -1) const {
         if (pos < 0) pos = 0;
@@ -195,6 +200,7 @@ public:
     QString &replace(const QString &from, const QString &to) {
         return replace(from.c_str(), to.c_str());
     }
+    QString &replace(const QRegularExpression &re, const QString &to);
 
     // remove(pos, len): erase substring in-place
     QString &remove(int pos, int len) {
@@ -269,4 +275,91 @@ inline QStringList QString::split(char sep) const {
     }
     result.push_back(substr(start));
     return result;
+}
+
+class QRegularExpressionMatch {
+    friend class QRegularExpression;
+    friend class QString;
+
+    bool matched_ = false;
+    std::vector<QString> captures_;
+    std::vector<int> lengths_;
+
+    void setMatch(const std::smatch &m) {
+        matched_ = true;
+        captures_.clear();
+        lengths_.clear();
+        captures_.reserve(m.size());
+        lengths_.reserve(m.size());
+        for (size_t i = 0; i < m.size(); ++i) {
+            captures_.push_back(m[i].matched ? QString(m[i].str()) : QString());
+            lengths_.push_back(m[i].matched ? (int)m[i].length() : -1);
+        }
+    }
+
+public:
+    bool hasMatch() const { return matched_; }
+    QString captured(int idx) const {
+        if (idx < 0 || (size_t)idx >= captures_.size()) return {};
+        return captures_[(size_t)idx];
+    }
+    int capturedLength(int idx) const {
+        if (idx < 0 || (size_t)idx >= lengths_.size()) return -1;
+        return lengths_[(size_t)idx];
+    }
+};
+
+class QRegularExpression {
+    std::regex regex_;
+
+public:
+    QRegularExpression(const char *pattern) : regex_(pattern) {}
+    QRegularExpression(const QString &pattern) : regex_(pattern) {}
+
+    const std::regex &regex() const { return regex_; }
+
+    QRegularExpressionMatch match(const QString &s) const {
+        QRegularExpressionMatch out;
+        std::string input = s;
+        std::smatch m;
+        if (std::regex_search(input, m, regex_))
+            out.setMatch(m);
+        return out;
+    }
+};
+
+inline QString regexReplacementForStd(QString replacement) {
+    QString out;
+    for (size_t i = 0; i < replacement.size(); ++i) {
+        if (replacement[i] == '\\' && i + 1 < replacement.size() &&
+            replacement[i + 1].isDigit()) {
+            out += '$';
+            out += replacement[i + 1];
+            ++i;
+        } else {
+            out += replacement[i];
+        }
+    }
+    return out;
+}
+
+inline int QString::indexOf(const QRegularExpression &re, int from,
+                            QRegularExpressionMatch *match) const {
+    if (from < 0) from = 0;
+    if ((size_t)from > size()) return -1;
+
+    std::string input = substr((size_t)from);
+    std::smatch m;
+    if (!std::regex_search(input, m, re.regex()))
+        return -1;
+    if (match)
+        match->setMatch(m);
+    return from + (int)m.position(0);
+}
+
+inline QString &QString::replace(const QRegularExpression &re, const QString &to) {
+    std::string replaced = std::regex_replace(
+        std::string(*this), re.regex(), std::string(regexReplacementForStd(to)));
+    assign(replaced);
+    return *this;
 }
