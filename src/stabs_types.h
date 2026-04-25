@@ -164,9 +164,36 @@ public:
         return result;
     }
 
+    bool isWeakGlobalType(TypeRef ref) const {
+        if (ref == NullType)
+            return true;
+        auto *t = resolveType(ref);
+        if (!t)
+            return true;
+        return t->kind == StabsTypeKind::Int ||
+               t->kind == StabsTypeKind::UInt ||
+               t->kind == StabsTypeKind::Void;
+    }
+
     // Register a global/static variable
     void addGlobal(const std::string &name, uint32_t addr, TypeRef type, bool isStatic, int srcIdx = -1) {
-        m_globals.push_back({name, addr, type, isStatic, srcIdx >= 0 ? srcIdx : m_unit});
+        TypeRef useType = type;
+        if (name == "cl" || name == "clc") {
+            if (addr && isWeakGlobalType(useType)) {
+                for (auto &g : m_globals) {
+                    if (g.name == name && !isWeakGlobalType(g.typeRef)) {
+                        useType = g.typeRef;
+                        break;
+                    }
+                }
+            } else if (!addr && !isWeakGlobalType(useType)) {
+                for (auto &g : m_globals) {
+                    if (g.name == name && g.address && isWeakGlobalType(g.typeRef))
+                        g.typeRef = useType;
+                }
+            }
+        }
+        m_globals.push_back({name, addr, useType, isStatic, srcIdx >= 0 ? srcIdx : m_unit});
         if (addr) m_globalByAddr[addr].push_back(m_globals.size() - 1);
     }
 
@@ -318,10 +345,6 @@ public:
 
         case StabsTypeKind::Pointer: {
             auto *tgt = resolveType(t->targetType);
-            // Pointer to anonymous struct/union → void *
-            if (tgt && (tgt->kind == StabsTypeKind::Struct || tgt->kind == StabsTypeKind::Union) &&
-                tgt->name.find("$_") == 0)
-                return "void *";
             std::string inner = formatType(t->targetType, depth + 1);
             // Check if target is a function pointer
             auto *rawTgt = getType(t->targetType);
@@ -827,9 +850,22 @@ public:
         const StabsGlobalVar *best = nullptr;
         for (auto &g : m_globals) {
             if (g.name != name) continue;
-            if (cuIdx >= 0 && g.sourceFileIdx == cuIdx && g.typeRef != NullType)
-                return &g;  // exact CU match — best possible
-            if (!best || (best->typeRef == NullType && g.typeRef != NullType))
+            if (name != "cl" && name != "clc") {
+                if (cuIdx >= 0 && g.sourceFileIdx == cuIdx && g.typeRef != NullType)
+                    return &g;
+                if (!best || (best->typeRef == NullType && g.typeRef != NullType))
+                    best = &g;
+                continue;
+            }
+            auto score = [&](const StabsGlobalVar &gv) {
+                int s = 0;
+                if (cuIdx >= 0 && gv.sourceFileIdx == cuIdx) s += 100;
+                if (!isWeakGlobalType(gv.typeRef)) s += 40;
+                else if (gv.typeRef != NullType) s += 10;
+                if (gv.address) s += 20;
+                return s;
+            };
+            if (!best || score(g) > score(*best))
                 best = &g;
         }
         return best;

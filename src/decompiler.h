@@ -790,6 +790,38 @@ public:
                 emitTypeDefsRecursive(out, types, ref, emitted, emittedNames);
             if (!emitted.empty()) out += "\n";
         }
+        std::set<std::string> emittedAnonGlobalNames;
+        if (s_portMode) {
+            std::set<TypeRef> emittedAnonGlobals;
+            auto isConstPointerObjectType = [&](TypeRef ref) {
+                bool sawConst = false;
+                for (int depth = 0; ref != NullType && depth < 12; ++depth) {
+                    auto *t = types.getType(ref);
+                    if (!t)
+                        return false;
+                    if (t->kind == StabsTypeKind::Typedef ||
+                        t->kind == StabsTypeKind::Volatile) {
+                        ref = t->targetType;
+                        continue;
+                    }
+                    if (t->kind == StabsTypeKind::Const) {
+                        sawConst = true;
+                        ref = t->targetType;
+                        continue;
+                    }
+                    return sawConst && t->kind == StabsTypeKind::Pointer;
+                }
+                return false;
+            };
+            for (auto &g : types.globals()) {
+                if (g.isStatic) continue;
+                if (g.typeRef == NullType) continue;
+                if (!isConstPointerObjectType(g.typeRef)) continue;
+                if (g.name != "cl" && g.name != "clc") continue;
+                emitAnonymousTypeDefs(out, types, g.typeRef, emittedAnonGlobals,
+                                      emittedAnonGlobalNames);
+            }
+        }
 
         // Emit extern declarations for globals
         std::set<std::string> globalDeclared;
@@ -832,9 +864,20 @@ public:
                 decl = types.formatDecl(useType, g.name);
             else
                 decl = "int " + g.name;
-            // Skip declarations with C++ syntax or anonymous struct arrays
-            if (decl.find("$_") != std::string::npos ||
-                decl.find("vector<") != std::string::npos ||
+            // Skip declarations with C++ syntax or anonymous types that were
+            // not emitted above.
+            if (decl.find("$_") != std::string::npos) {
+                bool anonEmitted = false;
+                for (auto &name : emittedAnonGlobalNames) {
+                    if (decl.find(name) != std::string::npos) {
+                        anonEmitted = true;
+                        break;
+                    }
+                }
+                if (!anonEmitted)
+                    continue;
+            }
+            if (decl.find("vector<") != std::string::npos ||
                 decl.find("(*)()") != std::string::npos ||
                 decl.find("this") != std::string::npos)
                 continue;
@@ -2603,7 +2646,43 @@ private:
         out += QString::fromStdString(kw + " " + t->name + " {\n");
         for (auto &f : t->fields) {
             if (f.name.empty()) continue;
-            std::string decl = types.formatDecl(f.typeRef, f.name);
+            std::string decl;
+            bool fallbackStorage = false;
+            auto *ft = types.resolveType(f.typeRef);
+            auto *rawFt = types.getType(f.typeRef);
+            if (ft && (ft->kind == StabsTypeKind::Struct ||
+                       ft->kind == StabsTypeKind::Union) &&
+                !ft->name.empty() && types.formatStructDef(f.typeRef).empty())
+                fallbackStorage = true;
+            if (ft && ft->kind == StabsTypeKind::Array) {
+                auto *elem = types.resolveType(ft->targetType);
+                if (elem && (elem->kind == StabsTypeKind::Struct ||
+                             elem->kind == StabsTypeKind::Union) &&
+                    !elem->name.empty() &&
+                    types.formatStructDef(ft->targetType).empty())
+                    fallbackStorage = true;
+                if (elem && (elem->kind == StabsTypeKind::Struct ||
+                             elem->kind == StabsTypeKind::Union) &&
+                    f.name == "outPackets")
+                    fallbackStorage = true;
+            }
+            if (fallbackStorage && (!rawFt || rawFt->kind != StabsTypeKind::Pointer)) {
+                int byteSize = f.bitSize / 8;
+                if (byteSize <= 0 && ft)
+                    byteSize = ft->sizeBytes;
+                if (byteSize <= 0)
+                    byteSize = 4;
+                if (byteSize == 1)
+                    decl = "char " + f.name;
+                else if (byteSize == 2)
+                    decl = "short " + f.name;
+                else if (byteSize <= 4)
+                    decl = "int " + f.name;
+                else
+                    decl = "char " + f.name + "[" + std::to_string(byteSize) + "]";
+            } else {
+                decl = types.formatDecl(f.typeRef, f.name);
+            }
             if (decl.find('<') != std::string::npos ||
                 decl.find("(*)()") != std::string::npos ||
                 decl.find("this") != std::string::npos)
@@ -4698,6 +4777,61 @@ private:
             return true;
         }
 
+        bool typeIsConstPointerObject(TypeRef ref) const {
+            bool sawConst = false;
+            for (int depth = 0; ref != NullType && depth < 12; ++depth) {
+                auto *t = m_types.getType(ref);
+                if (!t)
+                    return false;
+                if (t->kind == StabsTypeKind::Typedef ||
+                    t->kind == StabsTypeKind::Volatile) {
+                    ref = t->targetType;
+                    continue;
+                }
+                if (t->kind == StabsTypeKind::Const) {
+                    sawConst = true;
+                    ref = t->targetType;
+                    continue;
+                }
+                return sawConst && t->kind == StabsTypeKind::Pointer;
+            }
+            return false;
+        }
+
+        bool exactConstPointerGlobalAddress(uint32_t address,
+                                            const std::string &sym) const {
+            if (sym.empty())
+                return false;
+            auto *global = m_types.globalByName(sym, m_func.sourceFileIdx);
+            if (!global)
+                global = m_types.globalByName(sym);
+            if (!global || global->typeRef == NullType)
+                return false;
+            if (global->address && global->address != address)
+                return false;
+            return typeIsConstPointerObject(global->typeRef);
+        }
+
+        bool isConstPointerGlobalObject(const std::string &name) const {
+            if (name.empty())
+                return false;
+            auto *global = m_types.globalByName(name, m_func.sourceFileIdx);
+            if (!global)
+                global = m_types.globalByName(name);
+            return global && typeIsConstPointerObject(global->typeRef);
+        }
+
+        TypeRef constPointerGlobalObjectType(const std::string &name) const {
+            if (name.empty())
+                return NullType;
+            auto *global = m_types.globalByName(name, m_func.sourceFileIdx);
+            if (!global)
+                global = m_types.globalByName(name);
+            if (!global || !typeIsConstPointerObject(global->typeRef))
+                return NullType;
+            return global->typeRef;
+        }
+
         bool globalNameAndOffsetForAddressExpr(const IRExpr *expr, std::string &rawName,
                                                std::string &emitName, int &byteOffset,
                                                int depth = 0) const {
@@ -5389,6 +5523,10 @@ private:
             if (ref == NullType || index >= parts.size())
                 return index >= parts.size();
             auto *t = m_types.resolveType(ref);
+            if (t && t->kind == StabsTypeKind::Pointer) {
+                ref = t->targetType;
+                t = m_types.resolveType(ref);
+            }
             if (!t || (t->kind != StabsTypeKind::Struct &&
                        t->kind != StabsTypeKind::Union))
                 return false;
@@ -5409,6 +5547,10 @@ private:
             if (ref == NullType || index >= parts.size())
                 return false;
             auto *t = m_types.resolveType(ref);
+            if (t && t->kind == StabsTypeKind::Pointer) {
+                ref = t->targetType;
+                t = m_types.resolveType(ref);
+            }
             if (!t || (t->kind != StabsTypeKind::Struct &&
                        t->kind != StabsTypeKind::Union))
                 return false;
@@ -5524,6 +5666,32 @@ private:
             return false;
         }
 
+        bool constPointerGlobalValueExpr(const IRExpr *expr,
+                                         int depth = 0) const {
+            const IRExpr *node = stripCastsForAddress(expr);
+            if (!node || depth > 8)
+                return false;
+            if (node->op == IROp::Cast && !node->kids.empty() &&
+                (node->castKind == CastKind::PtrToInt ||
+                 node->castKind == CastKind::BitCast))
+                return constPointerGlobalValueExpr(node->kids[0].get(),
+                                                   depth + 1);
+            if (node->op == IROp::Temp && !m_func.phiTemps.count(node->tempId())) {
+                auto it = m_tempDef.find(node->tempId());
+                if (it != m_tempDef.end() && it->second)
+                    return constPointerGlobalValueExpr(it->second, depth + 1);
+                return false;
+            }
+            if (node->op == IROp::AddrOf && !node->kids.empty()) {
+                const IRExpr *inner = stripCastsForAddress(node->kids[0].get());
+                return inner && inner->op == IROp::Var &&
+                       constPointerGlobalObjectType(inner->name) != NullType;
+            }
+            if (node->op == IROp::Var && !node->name.empty())
+                return constPointerGlobalObjectType(node->name) != NullType;
+            return false;
+        }
+
         TypeRef tempDefinitionType(int id, int depth = 0) const {
             if (depth > 8) return NullType;
             auto dit = m_tempDef.find(id);
@@ -5550,6 +5718,22 @@ private:
                 auto *cf = m_mf.stabsFunctionByName(def->name);
                 if (cf && cf->returnType != NullType)
                     return cf->returnType;
+            }
+            if (def->op == IROp::Cast && !def->kids.empty() &&
+                (def->castKind == CastKind::PtrToInt ||
+                 def->castKind == CastKind::BitCast)) {
+                if (def->kids[0]->op == IROp::AddrOf &&
+                    !def->kids[0]->kids.empty() &&
+                    def->kids[0]->kids[0]->op == IROp::Var) {
+                    TypeRef globalType =
+                        constPointerGlobalObjectType(def->kids[0]->kids[0]->name);
+                    if (globalType != NullType &&
+                        m_types.isStructPointer(globalType))
+                        return globalType;
+                }
+                TypeRef innerType = exprType(def->kids[0].get());
+                if (innerType != NullType && m_types.isStructPointer(innerType))
+                    return innerType;
             }
             if (def->op == IROp::Load && !def->kids.empty()) {
                 TypeRef addrType = exprType(def->kids[0].get());
@@ -5610,7 +5794,7 @@ private:
             }
             if (structRef == NullType) {
                 int dots = (int)std::count(access.begin(), access.end(), '.');
-                return (access.find('[') != std::string::npos && dots > 0) || dots > 1;
+                return dots > 0 || access.find('[') != std::string::npos;
             }
             auto charArrayField = [&](const StabsTypeField *f) {
                 if (!f || f->typeRef == NullType || f->name.empty())
@@ -5700,13 +5884,97 @@ private:
                 if (!target || (target->kind != StabsTypeKind::Struct &&
                                 target->kind != StabsTypeKind::Union))
                     return false;
-                if (target->name.empty() || target->name.find("$_") == 0)
+                if (target->name.empty())
                     return false;
+                if (target->name.find("$_") == 0)
+                    return s_portMode;
                 return true;
             }
             if (t->kind == StabsTypeKind::Struct || t->kind == StabsTypeKind::Union)
-                return !t->name.empty() && t->name.find("$_") != 0;
+                return !t->name.empty() &&
+                       (t->name.find("$_") != 0 || s_portMode);
             return false;
+        }
+
+        bool knownStructPointerByteOffset(IRExpr *base, int64_t off) const {
+            if (!base || off <= 0 || off > 0x400000)
+                return false;
+            TypeRef baseType = NullType;
+            if (base->op == IROp::Temp)
+                baseType = tempStructPointerType(base->tempId());
+            if (baseType == NullType)
+                baseType = exprType(base);
+            TypeRef structRef = NullType;
+            if (baseType != NullType && m_types.isStructPointer(baseType))
+                structRef = m_types.getPointedStruct(baseType);
+            else if (baseType != NullType) {
+                auto *bt = m_types.resolveType(baseType);
+                if (bt && (bt->kind == StabsTypeKind::Struct ||
+                           bt->kind == StabsTypeKind::Union))
+                    structRef = baseType;
+            }
+            if (structRef == NullType)
+                return false;
+            auto *st = m_types.resolveType(structRef);
+            if (off >= 0x10000 &&
+                (!st || st->name != "$_3786"))
+                return false;
+            return st && (st->sizeBytes <= 0 || off < st->sizeBytes);
+        }
+
+        std::string structPointerFieldAccessExpr(IRExpr *addr,
+                                                 int accessSize) {
+            if (!s_portMode || !addr || addr->op != IROp::Add ||
+                addr->kids.size() != 2)
+                return "";
+            IRExpr *baseNode = nullptr;
+            int64_t off = 0;
+            if (addr->kids[1]->isConst()) {
+                baseNode = addr->kids[0].get();
+                off = (int64_t)addr->kids[1]->value;
+            } else if (addr->kids[0]->isConst()) {
+                baseNode = addr->kids[1].get();
+                off = (int64_t)addr->kids[0]->value;
+            }
+            if (!baseNode || off <= 0 || !knownStructPointerByteOffset(baseNode, off))
+                return "";
+
+            TypeRef baseType = NullType;
+            if (baseNode->op == IROp::Temp)
+                baseType = tempStructPointerType(baseNode->tempId());
+            if (baseType == NullType)
+                baseType = exprType(baseNode);
+            if (baseType == NullType || !m_types.isStructPointer(baseType) ||
+                !typeSupportsNamedMemberAccess(baseType))
+                return "";
+            TypeRef structRef = m_types.getPointedStruct(baseType);
+            if (structRef == NullType)
+                return "";
+            auto *structInfo = m_types.resolveType(structRef);
+            if (!structInfo || structInfo->name != "$_3786")
+                return "";
+            std::string access =
+                m_types.formatFieldAccess(structRef, (int)off, false, true);
+            if (access.empty())
+                return "";
+            if (access.find('[') != std::string::npos &&
+                access.find("arr_") == std::string::npos &&
+                accessSize > 1)
+                return "";
+            if (access.find('.') == std::string::npos &&
+                access.find('[') == std::string::npos) {
+                auto *field = m_types.findFieldAtOffset(structRef, (int)off);
+                auto *ft = field ? m_types.resolveType(field->typeRef) : nullptr;
+                if (ft && (ft->kind == StabsTypeKind::Struct ||
+                           ft->kind == StabsTypeKind::Union) &&
+                    ft->sizeBytes > accessSize)
+                    return "";
+            }
+            std::string base = emitExpr(baseNode);
+            if (base.empty() || base.find("void *") != std::string::npos)
+                return "";
+            base = portCastForArrow(base, baseNode, baseType, access);
+            return base + "->" + access;
         }
 
         TypeRef localAggregateTypeFromCallUse(const std::string &name) const {
@@ -6789,9 +7057,18 @@ private:
                         }
                     }
                 }
+                const StabsGlobalVar *rhsGlobalForAssign = nullptr;
+                bool rhsGlobalIsPointer = false;
+                if (s_portMode && rhs.find_first_of("()+-*/&[] .") == std::string::npos) {
+                    rhsGlobalForAssign = m_types.globalByName(rhs);
+                    if (rhsGlobalForAssign && rhsGlobalForAssign->typeRef != NullType) {
+                        auto *rgt = m_types.resolveType(rhsGlobalForAssign->typeRef);
+                        rhsGlobalIsPointer = rgt && rgt->kind == StabsTypeKind::Pointer;
+                    }
+                }
                 if (s_portMode && stmt.expr && stmt.expr->op != IROp::AddrOf &&
                     (aggregateObjectType(rhs, stmt.expr.get()) != NullType ||
-                     m_types.globalByName(rhs)) &&
+                     (rhsGlobalForAssign && !rhsGlobalIsPointer)) &&
                     rhs.find_first_of("()+-*/&[] .") == std::string::npos) {
                     TypeRef lhsType = m_func.tempType(stmt.destTemp);
                     if (lhsType == NullType) {
@@ -6807,7 +7084,7 @@ private:
                         m_pointerTemps.count(stmt.destTemp) ||
                         m_func.pointerTemps.count(stmt.destTemp) ||
                         m_tempStructPtr.count(stmt.destTemp);
-                    if (lhsIsPointer)
+                    if (lhsIsPointer && !rhsGlobalIsPointer)
                         rhs = "&" + rhs;
                 }
                 if (s_portMode && aggregateObjectType(lhs, nullptr) != NullType &&
@@ -7907,10 +8184,13 @@ private:
                 if (result.empty()) result = tryFourCC((uint32_t)e->value);
                 // Try to resolve large constants as global variable/function addresses
                 bool inlineFormUsed = false;
+                bool constPointerGlobalValue = false;
                 if (result.empty() && e->value > 0x10000) {
                     std::string sym = m_mf.symbolNameAtAddress((uint32_t)e->value);
                     if (!sym.empty()) {
                         result = cName(sym);
+                        constPointerGlobalValue =
+                            exactConstPointerGlobalAddress((uint32_t)e->value, sym);
                     } else {
                         std::string nearest = m_mf.nearestSymbolName((uint32_t)e->value);
                         if (!nearest.empty()) {
@@ -7953,7 +8233,7 @@ private:
                     if (!result.empty() && m_addrDepth == 0 && !inlineFormUsed) {
                         auto *sec = m_mf.sectionForAddress((uint32_t)e->value);
                         bool isData = sec && sec->segname != "__TEXT";
-                        if (isData)
+                        if (isData && !constPointerGlobalValue)
                             result = "&" + result;
                     }
                 }
@@ -8288,17 +8568,28 @@ private:
                     }
                 }
                 // (base + const) → base->field for struct pointers, else *(int*)((char*)base + off)
-                if (result.empty() && addr && addr->op == IROp::Add && addr->kids.size() == 2 &&
-                    addr->kids[1]->isConst() &&
-                    (int64_t)addr->kids[1]->value != 0 &&
-                    std::abs((int64_t)addr->kids[1]->value) < 0x10000 &&
-                    (addr->kids[0]->op == IROp::Var || addr->kids[0]->op == IROp::Temp ||
-                     addr->kids[0]->op == IROp::Load)) {
-                    std::string base = emitExpr(addr->kids[0].get());
-                    int64_t off = (int64_t)addr->kids[1]->value;
+                IRExpr *structAddBase = nullptr;
+                int64_t structAddOff = 0;
+                if (addr && addr->op == IROp::Add && addr->kids.size() == 2) {
+                    if (addr->kids[1]->isConst()) {
+                        structAddBase = addr->kids[0].get();
+                        structAddOff = (int64_t)addr->kids[1]->value;
+                    } else if (addr->kids[0]->isConst()) {
+                        structAddBase = addr->kids[1].get();
+                        structAddOff = (int64_t)addr->kids[0]->value;
+                    }
+                }
+                if (result.empty() && structAddBase &&
+                    structAddOff != 0 &&
+                    (std::abs(structAddOff) < 0x10000 ||
+                     knownStructPointerByteOffset(structAddBase, structAddOff)) &&
+                    (structAddBase->op == IROp::Var || structAddBase->op == IROp::Temp ||
+                     structAddBase->op == IROp::Load)) {
+                    std::string base = emitExpr(structAddBase);
+                    int64_t off = structAddOff;
                     // Try folding interior pointers back to original struct base
-                    if (addr->kids[0]->op == IROp::Temp) {
-                        auto dit = m_tempDef.find(addr->kids[0]->tempId());
+                    if (structAddBase->op == IROp::Temp) {
+                        auto dit = m_tempDef.find(structAddBase->tempId());
                         if (dit != m_tempDef.end() && dit->second &&
                             dit->second->op == IROp::Add && dit->second->kids.size() == 2 &&
                             dit->second->kids[1]->isConst() && dit->second->kids[1]->value > 0) {
@@ -8323,8 +8614,8 @@ private:
                         }
                     }
                     // Try type-aware struct field access
-                    TypeRef baseType = s_cosmeticMode ? safeExprType(addr->kids[0].get())
-                                                      : exprType(addr->kids[0].get());
+                    TypeRef baseType = s_cosmeticMode ? safeExprType(structAddBase)
+                                                      : exprType(structAddBase);
                     // For untyped expressions, try resolving type from STABS globals.
                     // Handles two patterns:
                     //   Load(Add(Var("global_ptr"), offset)) → global_ptr->field
@@ -8332,7 +8623,7 @@ private:
                     // Also try when baseType doesn't resolve (e.g. invalid (0,0) refs from NLP globals)
                     if (baseType == NullType || (s_cosmeticMode && !m_types.resolveType(baseType))) {
                         // Walk through temp defs and loads to find the source global name
-                        IRExpr *src = addr->kids[0].get();
+                        IRExpr *src = structAddBase;
                         // Follow temp chain (up to 3 levels)
                         for (int depth = 0; depth < 3 && src; ++depth) {
                             if (src->op == IROp::Temp) {
@@ -8451,10 +8742,10 @@ private:
                     // Skip struct field resolution for interior pointers
                     // (vars assigned from &struct->field — they point into the middle)
                     bool isInterior = false;
-                    if (addr->kids[0]->op == IROp::Var && !addr->kids[0]->name.empty())
-                        isInterior = m_interiorPtrVars.count(addr->kids[0]->name) > 0;
-                    else if (addr->kids[0]->op == IROp::Temp)
-                        isInterior = m_interiorPtrVars.count("__temp_" + std::to_string(addr->kids[0]->tempId())) > 0;
+                    if (structAddBase->op == IROp::Var && !structAddBase->name.empty())
+                        isInterior = m_interiorPtrVars.count(structAddBase->name) > 0;
+                    else if (structAddBase->op == IROp::Temp)
+                        isInterior = m_interiorPtrVars.count("__temp_" + std::to_string(structAddBase->tempId())) > 0;
                     // Also check if baseType is a struct directly (from Load through pointer, e.g. NLP globals)
                     bool isDirectStruct = false;
                     TypeRef structRef = NullType;
@@ -8466,8 +8757,8 @@ private:
                             // Check if the base temp actually holds a pointer (e.g. from AddrOf).
                             // If so, treat as pointer-to-struct, not struct-by-value.
                             bool isActuallyPointer = false;
-                            if (addr->kids[0]->op == IROp::Temp) {
-                                auto dit = m_tempDef.find(addr->kids[0]->tempId());
+                            if (structAddBase->op == IROp::Temp) {
+                                auto dit = m_tempDef.find(structAddBase->tempId());
                                 if (dit != m_tempDef.end() && dit->second) {
                                     auto *d = dit->second;
                                     if (d->op == IROp::AddrOf ||
@@ -8486,18 +8777,21 @@ private:
                     // Port mode: suppress field resolution for temps/vars whose
                     // C declaration won't have a struct type (avoids base->field on int)
                     if (s_portMode && structRef != NullType &&
-                        (addr->kids[0]->op == IROp::Temp || addr->kids[0]->op == IROp::Var)) {
+                        (structAddBase->op == IROp::Temp || structAddBase->op == IROp::Var)) {
                         TypeRef declType = NullType;
-                        if (addr->kids[0]->op == IROp::Temp)
-                            declType = m_func.tempType(addr->kids[0]->tempId());
+                        if (structAddBase->op == IROp::Temp) {
+                            declType = tempStructPointerType(structAddBase->tempId());
+                            if (declType == NullType)
+                                declType = m_func.tempType(structAddBase->tempId());
+                        }
                         else {
                             for (auto &p : m_func.params)
-                                if (p.name == addr->kids[0]->name) { declType = p.typeRef; break; }
+                                if (p.name == structAddBase->name) { declType = p.typeRef; break; }
                             if (declType == NullType)
                                 for (auto &l : m_func.locals)
-                                    if (l.name == addr->kids[0]->name) { declType = l.typeRef; break; }
+                                    if (l.name == structAddBase->name) { declType = l.typeRef; break; }
                             if (declType == NullType) {
-                                auto *g = m_types.globalByName(addr->kids[0]->name);
+                                auto *g = m_types.globalByName(structAddBase->name);
                                 if (g) declType = g->typeRef;
                             }
                         }
@@ -8505,7 +8799,7 @@ private:
                             structRef = NullType;
                         } else {
                             auto *dti = m_types.resolveType(declType);
-                            bool isTemp = (addr->kids[0]->op == IROp::Temp);
+                            bool isTemp = (structAddBase->op == IROp::Temp);
                             if (!dti) structRef = NullType;
                             else if (isTemp && dti->kind != StabsTypeKind::Pointer)
                                 structRef = NullType;
@@ -8520,10 +8814,21 @@ private:
                         std::string access =
                             m_types.formatFieldAccess(structRef, (int)off, false, isScalarLoad);
                         if (!access.empty()) {
+                            if (access.rfind("vd.", 0) == 0 ||
+                                access.rfind("sub.", 0) == 0 ||
+                                access.rfind("assets.", 0) == 0)
+                                access.clear();
+                            if (s_portMode && access.find('.') != std::string::npos) {
+                                std::vector<std::string> parts = splitMemberPath(access);
+                                if (parts.size() >= 2 &&
+                                    fieldPathUsesCharArrayStorage(baseType, parts))
+                                    access.clear();
+                            }
                             // Check if the resolved field makes sense for this access:
                             // 1. Subscript on non-array field is wrong
                             if (access.find("[") != std::string::npos &&
-                                access.find("arr_") == std::string::npos)
+                                access.find("arr_") == std::string::npos &&
+                                e->loadSize > 1)
                                 access.clear();
                             // 2. Accessing a struct/union field as a scalar read is wrong
                             //    (e.g., entity->s where s is entityState_t but we're loading 4 bytes)
@@ -8551,26 +8856,26 @@ private:
                         }
                         if (!access.empty()) {
                             // Record struct pointer type for the base temp's declaration
-                            if (!isDirectStruct && addr->kids[0]->op == IROp::Temp &&
+                            if (!isDirectStruct && structAddBase->op == IROp::Temp &&
                                 baseType != NullType) {
                                 if (m_types.isStructPointer(baseType))
-                                    m_tempStructPtr[addr->kids[0]->tempId()] = baseType;
+                                    m_tempStructPtr[structAddBase->tempId()] = baseType;
                                 else {
                                     auto *bt2 = m_types.resolveType(baseType);
                                     if (bt2 && (bt2->kind == StabsTypeKind::Struct || bt2->kind == StabsTypeKind::Union))
-                                        m_tempStructPtr[addr->kids[0]->tempId()] = baseType;
+                                        m_tempStructPtr[structAddBase->tempId()] = baseType;
                                 }
                             }
-                            if (isDirectStruct && addr->kids[0]->op == IROp::Load &&
-                                !addr->kids[0]->kids.empty()) {
+                            if (isDirectStruct && structAddBase->op == IROp::Load &&
+                                !structAddBase->kids.empty()) {
                                 // Base is Load(expr) giving a struct — use expr->field directly
                                 // This turns Load(Add(Load(Var("ptr")), off)) into ptr->field
-                                std::string ptrBase = emitExpr(addr->kids[0]->kids[0].get());
+                                std::string ptrBase = emitExpr(structAddBase->kids[0].get());
                                 result = ptrBase + "->" + access;
-                            } else if (s_cosmeticMode && !isDirectStruct && addr->kids[0]->op == IROp::Temp) {
+                            } else if (s_cosmeticMode && !isDirectStruct && structAddBase->op == IROp::Temp) {
                                 // Cosmetic: Check if temp is defined as Load(Var) — NLP double deref
                                 // Use the original pointer name: ptr->field instead of *(int*)(ptr)->field
-                                auto dit = m_tempDef.find(addr->kids[0]->tempId());
+                                auto dit = m_tempDef.find(structAddBase->tempId());
                                 if (dit != m_tempDef.end() && dit->second &&
                                     dit->second->op == IROp::Load && !dit->second->kids.empty() &&
                                     dit->second->kids[0]->op == IROp::Var) {
@@ -8584,16 +8889,16 @@ private:
                                     char hx[16];
                                     snprintf(hx, sizeof(hx), "0x%llX", (unsigned long long)off);
                                     result = std::string("*(") + loadCastType(e->loadSize) +
-                                             " *)(" + charPtrCast(base, addr->kids[0].get()) +
+                                             " *)(" + charPtrCast(base, structAddBase) +
                                              (off == 0 ? ")" : (" + " + std::string(hx) + ")"));
                                 } else {
                                     if (!isDirectStruct)
-                                        base = portCastForArrow(base, addr->kids[0].get(), baseType, access);
+                                        base = portCastForArrow(base, structAddBase, baseType, access);
                                     if (s_portMode && base.find("void *") != std::string::npos) {
                                         char hx[16];
                                         snprintf(hx, sizeof(hx), "0x%llX", (unsigned long long)off);
                                         result = std::string("*(") + loadCastType(e->loadSize) +
-                                                 " *)(" + charPtrCast(base, addr->kids[0].get()) +
+                                                 " *)(" + charPtrCast(base, structAddBase) +
                                                  (off == 0 ? ")" : (" + " + std::string(hx) + ")"));
                                     } else {
                                         result = base + (isDirectStruct ? "." : "->") + access;
@@ -8761,6 +9066,11 @@ private:
                         }
                     }
                 } else {
+                    if (s_portMode && inner && inner->op == IROp::Var &&
+                        isConstPointerGlobalObject(inner->name)) {
+                        result = emitExpr(inner);
+                        break;
+                    }
                     // For array variables, &array == array (same address)
                     // Skip the & to avoid producing float(*)[3] instead of float*
                     bool isArray = false;
@@ -8792,6 +9102,36 @@ private:
                     }
                 }
                 std::string base = emitExpr(e->kids[0].get());
+                std::string fieldName = e->name;
+                if (s_portMode && !fieldName.empty() &&
+                    fieldName.find("field_") != 0 && e->kids[0]) {
+                    TypeRef baseTypeForField = exprType(e->kids[0].get());
+                    if (e->kids[0]->op == IROp::Temp) {
+                        TypeRef st = tempStructPointerType(e->kids[0]->tempId());
+                        if (st != NullType)
+                            baseTypeForField = st;
+                    }
+                    TypeRef structRef = NullType;
+                    if (baseTypeForField != NullType &&
+                        m_types.isStructPointer(baseTypeForField))
+                        structRef = m_types.getPointedStruct(baseTypeForField);
+                    else if (baseTypeForField != NullType) {
+                        auto *bt = m_types.resolveType(baseTypeForField);
+                        if (bt && (bt->kind == StabsTypeKind::Struct ||
+                                   bt->kind == StabsTypeKind::Union))
+                            structRef = baseTypeForField;
+                    }
+                    if (structRef != NullType) {
+                        auto *structInfo = m_types.resolveType(structRef);
+                        if (structInfo && structInfo->name == "$_3786") {
+                            std::string nested =
+                                m_types.formatFieldAccess(structRef, (int)e->value,
+                                                          false, true);
+                            if (!nested.empty())
+                                fieldName = nested;
+                        }
+                    }
+                }
                 // If base is literal 0 (NULL or Temp that inlined to "0"), emit as offset constant
                 // Also handle parenthesized zero: "(0)" from sub-expressions
                 {
@@ -8953,19 +9293,44 @@ private:
                             auto *field = m_types.findFieldAtOffset(structRef, (int)e->value);
                             if (field && field->typeRef != NullType) {
                                 auto *ft = m_types.resolveType(field->typeRef);
-                                if (ft && (ft->kind == StabsTypeKind::Struct || ft->kind == StabsTypeKind::Union) && ft->sizeBytes > 4)
+                                if (ft && (ft->kind == StabsTypeKind::Struct ||
+                                           ft->kind == StabsTypeKind::Union) &&
+                                    ft->sizeBytes > 4 &&
+                                    fieldName.find('.') == std::string::npos &&
+                                    fieldName.find('[') == std::string::npos)
                                     fieldIsLargeStruct = true;
                             }
                         }
                     }
                     TypeRef rawAccessBaseType = declType != NullType ? declType : baseType;
                     bool rawNestedField =
-                        fieldAccessNeedsRawPointer(rawAccessBaseType, e, e->name);
+                        fieldAccessNeedsRawPointer(rawAccessBaseType, e, fieldName);
                     int rawNestedOffset = (int)e->value;
+                    if (!rawNestedField &&
+                        (fieldName.rfind("vd.", 0) == 0 ||
+                         fieldName.rfind("sub.", 0) == 0 ||
+                         fieldName.rfind("assets.", 0) == 0))
+                        rawNestedField = true;
+                    if (!rawNestedField && fieldName.rfind("netchan.", 0) == 0) {
+                        TypeRef structRef = NullType;
+                        if (rawAccessBaseType != NullType &&
+                            m_types.isStructPointer(rawAccessBaseType))
+                            structRef = m_types.getPointedStruct(rawAccessBaseType);
+                        else if (rawAccessBaseType != NullType) {
+                            auto *bt = m_types.resolveType(rawAccessBaseType);
+                            if (bt && (bt->kind == StabsTypeKind::Struct ||
+                                       bt->kind == StabsTypeKind::Union))
+                                structRef = rawAccessBaseType;
+                        }
+                        auto *st = structRef != NullType ?
+                            m_types.resolveType(structRef) : nullptr;
+                        if (!st || st->name != "$_3786")
+                            rawNestedField = true;
+                    }
                     if (!rawNestedField && s_portMode &&
                         rawAccessBaseType != NullType &&
-                        e->name.find('.') != std::string::npos) {
-                        std::vector<std::string> parts = splitMemberPath(e->name);
+                        fieldName.find('.') != std::string::npos) {
+                        std::vector<std::string> parts = splitMemberPath(fieldName);
                         int pathOff = 0;
                         if (parts.size() >= 2 &&
                             fieldPathUsesCharArrayStorage(rawAccessBaseType, parts) &&
@@ -8997,7 +9362,7 @@ private:
                     } else if (fieldIsLargeStruct) {
                         int off = (int)e->value;
                         result = std::string("*(") + loadCastType(e->loadSize) + " *)(" + charPtrCast(base, e->kids.empty() ? nullptr : e->kids[0].get()) + " + " + std::to_string(off) + ")";
-                    } else if (e->name == "_") {
+                    } else if (fieldName == "_") {
                         int off = (int)e->value;
                         char hx[16]; snprintf(hx, sizeof(hx), "0x%X", (unsigned)off);
                         result = std::string("*(") + loadCastType(e->loadSize) + " *)(" +
@@ -9024,7 +9389,7 @@ private:
                                 charPtrCast(base, e->kids[0].get()) + " + " + hx + ")";
                         }
                     } else {
-                        result = base + (useArrow ? "->" : ".") + e->name;
+                        result = base + (useArrow ? "->" : ".") + fieldName;
                     }
                 }
                 break;
@@ -10613,6 +10978,10 @@ private:
                     std::string field = globalFieldLvalueExpr(loadAddr, true, is8 ? 1 : 2);
                     if (!field.empty())
                         return field;
+                    std::string ptrField =
+                        structPointerFieldAccessExpr(loadAddr, is8 ? 1 : 2);
+                    if (!ptrField.empty())
+                        return ptrField;
                 }
                 // Cosmetic mode: try struct field resolution for the Load address
                 if (s_cosmeticMode) {
@@ -10640,6 +11009,12 @@ private:
                 if (addr.find("_p + ") != std::string::npos || addr.find("_p)") != std::string::npos)
                     return std::string("*(") + castType + " *)(" + addr + ")";
                 return std::string("*(") + castType + " *)(" + addr + ")";
+            }
+            if (e->castKind == CastKind::PtrToInt &&
+                constPointerGlobalValueExpr(inner_e)) {
+                TypeRef innerType = exprType(inner_e);
+                if (innerType != NullType && m_types.isStructPointer(innerType))
+                    return inner;
             }
             switch (e->castKind) {
             case CastKind::ZeroExt8:   return "(unsigned char)(" + inner + ")";
@@ -10734,6 +11109,13 @@ private:
                 TypeRef defType = tempDefinitionType(e->tempId());
                 if (shouldPreferStructPointer(defType, t))
                     return defType;
+                if (defType != NullType && m_types.isStructPointer(defType) &&
+                    constPointerGlobalValueExpr(e)) {
+                    auto *current = t != NullType ? m_types.resolveType(t) : nullptr;
+                    if (!current || current->kind == StabsTypeKind::Int ||
+                        current->kind == StabsTypeKind::UInt)
+                        return defType;
+                }
                 auto vit = m_func.tempToVar.find(e->tempId());
                 if (vit != m_func.tempToVar.end()) {
                     auto vtit = m_func.varTypes.find(vit->second);
@@ -10774,6 +11156,29 @@ private:
                 return NullType;
             }
             if (e->typeRef != NullType) return e->typeRef;
+            if (e->op == IROp::AddrOf && !e->kids.empty() &&
+                e->kids[0]->op == IROp::Var) {
+                TypeRef globalType =
+                    constPointerGlobalObjectType(e->kids[0]->name);
+                if (globalType != NullType)
+                    return globalType;
+            }
+            if (e->op == IROp::Cast && !e->kids.empty() &&
+                (e->castKind == CastKind::PtrToInt ||
+                 e->castKind == CastKind::BitCast)) {
+                if (e->kids[0]->op == IROp::AddrOf &&
+                    !e->kids[0]->kids.empty() &&
+                    e->kids[0]->kids[0]->op == IROp::Var) {
+                    TypeRef globalType =
+                        constPointerGlobalObjectType(e->kids[0]->kids[0]->name);
+                    if (globalType != NullType &&
+                        m_types.isStructPointer(globalType))
+                        return globalType;
+                }
+                TypeRef innerType = exprType(e->kids[0].get());
+                if (innerType != NullType && m_types.isStructPointer(innerType))
+                    return innerType;
+            }
             // Add: propagate pointer type (ptr + int → ptr)
             if (e->op == IROp::Add && e->kids.size() == 2) {
                 TypeRef lt = exprType(e->kids[0].get());
