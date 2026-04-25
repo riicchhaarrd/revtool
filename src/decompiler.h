@@ -6,10 +6,10 @@
 #include "type_infer.h"
 #include "coalesce.h"
 #include "type_recovery.h"
+#include "port_ir_fixes.h"
 #include "struct_infer.h"
 #include "simplify.h"
 #include "macho.h"
-#include "port_emission_fixes.h"
 #include <QString>
 #include <QProcess>
 #include <QRegularExpression>
@@ -51,8 +51,10 @@ public:
             IRSimplifier().simplify(func);
             TypeInferer().infer(func, mf.typeTable(), &mf);
         }
-        if (s_portMode)
+        if (s_portMode) {
             TypeRecovery().run(func, mf.typeTable());
+            PortIrFixes::run(func, mf.typeTable());
+        }
         VarCoalescer().coalesce(func, mf.typeTable());
 
         CfgStructurer structurer;
@@ -4160,74 +4162,6 @@ private:
             return false;
         }
 
-        std::string portOpaqueGlobalFieldZeroAddress(const IRExpr *baseExpr,
-                                                     const std::string &fieldName,
-                                                     int64_t fieldOffset) const {
-            if (!s_portMode || fieldOffset != 0 || !baseExpr)
-                return "";
-            const IRExpr *node = baseExpr;
-            for (int depth = 0; depth < 8 && node; ++depth) {
-                if (node->op == IROp::Cast && !node->kids.empty()) {
-                    node = node->kids[0].get();
-                    continue;
-                }
-                break;
-            }
-            if (!node || node->op != IROp::Var || node->name.empty())
-                return "";
-            if (!PortEmissionFixes::isOpaqueStorageField(node->name, fieldName))
-                return "";
-            auto *g = m_types.globalByName(node->name);
-            if (!g || g->typeRef == NullType)
-                return "";
-
-            auto *gt = m_types.resolveType(g->typeRef);
-            bool isOpaquePointer = false;
-            if (gt && gt->kind == StabsTypeKind::Pointer) {
-                auto *target = m_types.resolveType(gt->targetType);
-                if (!target || (target->kind == StabsTypeKind::Void) ||
-                    ((target->kind == StabsTypeKind::Struct ||
-                      target->kind == StabsTypeKind::Union) &&
-                     (target->name.empty() || target->name.find("$_") == 0)))
-                    isOpaquePointer = true;
-            }
-            std::string formatted = m_types.formatType(g->typeRef);
-            if (formatted.find("void *") != std::string::npos)
-                isOpaquePointer = true;
-            if (!isOpaquePointer)
-                return "";
-
-            // These STABS globals are opaque in the type table but are used by
-            // the binary as fixed storage objects.  Field zero is therefore the
-            // object base address, not a C member dereference through void *.
-            return PortEmissionFixes::opaqueStorageFieldZeroAddress(node->name, fieldName);
-        }
-
-        std::string portOpaqueGlobalFieldZeroAddressFromText(const std::string &base,
-                                                             const std::string &field) const {
-            if (!s_portMode)
-                return "";
-            auto extract = [&](const std::string &prefix) -> std::string {
-                if (base.compare(0, prefix.size(), prefix) != 0 || base.size() <= prefix.size() + 1)
-                    return "";
-                if (base.back() != ')')
-                    return "";
-                return base.substr(prefix.size(), base.size() - prefix.size() - 1);
-            };
-            std::string name = extract("((void *)");
-            if (name.empty())
-                name = extract("((const void *)");
-            if (name.empty())
-                return "";
-            return PortEmissionFixes::opaqueStorageFieldZeroAddress(name, field);
-        }
-
-        std::string rewritePortOpaqueStorageFieldExpr(std::string expr) const {
-            if (!s_portMode)
-                return expr;
-            return PortEmissionFixes::rewriteOpaqueStorageFieldExpr(expr);
-        }
-
         bool typeSupportsNamedMemberAccess(TypeRef ref) const {
             if (ref == NullType)
                 return false;
@@ -7140,23 +7074,6 @@ private:
 
             case IROp::Field: {
                 std::string base = emitExpr(e->kids[0].get());
-                if (s_portMode) {
-                    std::string opaqueBase =
-                        portOpaqueGlobalFieldZeroAddressFromText(base, e->name);
-                    if (!opaqueBase.empty()) {
-                        result = opaqueBase;
-                        break;
-                    }
-                }
-                if (s_portMode && e->kids[0]) {
-                    std::string opaqueBase =
-                        portOpaqueGlobalFieldZeroAddress(e->kids[0].get(), e->name,
-                                                         (int64_t)e->value);
-                    if (!opaqueBase.empty()) {
-                        result = opaqueBase;
-                        break;
-                    }
-                }
                 // If base is literal 0 (NULL or Temp that inlined to "0"), emit as offset constant
                 // Also handle parenthesized zero: "(0)" from sub-expressions
                 {
@@ -8467,9 +8384,6 @@ private:
                 else result = "0";
             }
 
-            if (s_portMode)
-                result = rewritePortOpaqueStorageFieldExpr(result);
-
             if (negate && !result.empty()) {
                 if (result[0] == '!') return result.substr(1);
                 return "!(" + result + ")";
@@ -8680,7 +8594,9 @@ private:
             // Float operations → float
             if (e->op == IROp::Const && !tryFloatConst((uint32_t)e->value).empty()) return "float";
             if (e->op == IROp::Cast &&
-                (e->castKind == CastKind::IntToFloat || e->castKind == CastKind::FloatToInt))
+                (e->castKind == CastKind::IntToFloat ||
+                 e->castKind == CastKind::FloatToInt ||
+                 e->castKind == CastKind::PtrToInt))
                 return e->castKind == CastKind::IntToFloat ? "float" : "int";
             if (e->op == IROp::Var) {
                 // Float literal names
@@ -8940,6 +8856,7 @@ private:
                 return "(short)(" + inner + ")";
             case CastKind::IntToFloat: return "(float)(" + inner + ")";
             case CastKind::FloatToInt: return "(int)(" + inner + ")";
+            case CastKind::PtrToInt:   return "(int)(" + inner + ")";
             case CastKind::BitCast:    return inner;
             default: return inner;
             }

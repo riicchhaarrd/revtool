@@ -55,6 +55,7 @@ enum class CastKind {
     SignExt8, SignExt16,    // signed widening
     Trunc8, Trunc16,       // narrowing
     IntToFloat, FloatToInt,
+    PtrToInt,
     BitCast,
 };
 
