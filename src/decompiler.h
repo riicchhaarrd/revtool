@@ -2816,6 +2816,7 @@ private:
             for (auto &bb : func.blocks)
                 for (auto &stmt : bb.stmts)
                     countTempUses(stmt);
+            inferSourceGlobalElementPointers();
             // Force-declare temps whose def and use are in different blocks
             // (cross-block inlining is unsafe because the defining expr's context may differ)
             forceDeclCrossBlockTemps();
@@ -4525,6 +4526,12 @@ private:
             LinearOffsetExpr offset;
         };
 
+        struct SourceGlobalElementPtr {
+            std::string rawName;
+            TypeRef elemType = NullType;
+            int elemSize = 0;
+        };
+
         const IRExpr *stripCastsForAddress(const IRExpr *expr) const {
             const IRExpr *node = expr;
             for (int depth = 0; depth < 8 && node; ++depth) {
@@ -4855,6 +4862,148 @@ private:
             if (access.empty())
                 return "";
             return arrayAddr.emitName + "[" + elementIndex + "]." + access;
+        }
+
+        bool sourceGlobalElementPtrForExpr(const IRExpr *expr,
+                                           SourceGlobalElementPtr &out) const {
+            const IRExpr *node = stripCastsForAddress(expr);
+            if (!node)
+                return false;
+
+            SourceGlobalArrayAddress arrayAddr;
+            if (sourceGlobalArrayAddressExpr(node, arrayAddr) &&
+                arrayAddr.elemSize > 0) {
+                if (arrayAddr.offset.constant % arrayAddr.elemSize != 0)
+                    return false;
+                out.rawName = arrayAddr.rawName;
+                out.elemType = arrayAddr.elemType;
+                out.elemSize = arrayAddr.elemSize;
+                return true;
+            }
+
+            if (node->op == IROp::Temp) {
+                int tid = node->tempId();
+                if (m_invalidSourceGlobalElementPtrs.count(tid))
+                    return false;
+                auto it = m_sourceGlobalElementPtrs.find(tid);
+                if (it == m_sourceGlobalElementPtrs.end())
+                    return false;
+                out = it->second;
+                return true;
+            }
+
+            if ((node->op == IROp::Add || node->op == IROp::Sub) &&
+                node->kids.size() == 2) {
+                const IRExpr *lhs = stripCastsForAddress(node->kids[0].get());
+                const IRExpr *rhs = stripCastsForAddress(node->kids[1].get());
+                if (!lhs || !rhs || lhs->op != IROp::Temp || !rhs->isConst())
+                    return false;
+                int tid = lhs->tempId();
+                if (m_invalidSourceGlobalElementPtrs.count(tid))
+                    return false;
+                auto it = m_sourceGlobalElementPtrs.find(tid);
+                if (it == m_sourceGlobalElementPtrs.end())
+                    return false;
+                int64_t delta = rhs->value;
+                if (node->op == IROp::Sub)
+                    delta = -delta;
+                if (it->second.elemSize <= 0 ||
+                    delta % it->second.elemSize != 0)
+                    return false;
+                out = it->second;
+                return true;
+            }
+
+            return false;
+        }
+
+        void inferSourceGlobalElementPointers() {
+            bool changed = true;
+            for (int iter = 0; iter < 4 && changed; ++iter) {
+                changed = false;
+                for (auto &bb : m_func.blocks) {
+                    for (auto &stmt : bb.stmts) {
+                        if (stmt.kind != IRStmtKind::Assign ||
+                            stmt.destTemp < 0 || !stmt.expr)
+                            continue;
+
+                        SourceGlobalElementPtr ptr;
+                        if (sourceGlobalElementPtrForExpr(stmt.expr.get(), ptr)) {
+                            if (!m_invalidSourceGlobalElementPtrs.count(stmt.destTemp) &&
+                                (!m_sourceGlobalElementPtrs.count(stmt.destTemp) ||
+                                 m_sourceGlobalElementPtrs[stmt.destTemp].rawName != ptr.rawName)) {
+                                m_sourceGlobalElementPtrs[stmt.destTemp] = ptr;
+                                changed = true;
+                            }
+                            continue;
+                        }
+
+                        const IRExpr *node = stripCastsForAddress(stmt.expr.get());
+                        if (node && (node->op == IROp::Add || node->op == IROp::Sub) &&
+                            node->kids.size() == 2) {
+                            const IRExpr *lhs = stripCastsForAddress(node->kids[0].get());
+                            const IRExpr *rhs = stripCastsForAddress(node->kids[1].get());
+                            if (lhs && rhs && lhs->op == IROp::Temp && rhs->isConst()) {
+                                auto it = m_sourceGlobalElementPtrs.find(lhs->tempId());
+                                if (it != m_sourceGlobalElementPtrs.end() &&
+                                    it->second.elemSize > 0 &&
+                                    rhs->value % it->second.elemSize != 0) {
+                                    m_sourceGlobalElementPtrs.erase(stmt.destTemp);
+                                    if (!m_invalidSourceGlobalElementPtrs.count(stmt.destTemp)) {
+                                        m_invalidSourceGlobalElementPtrs.insert(stmt.destTemp);
+                                        changed = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        std::string sourceGlobalElementPtrLvalueExpr(const IRExpr *addr,
+                                                     int accessSize = 0) {
+            const IRExpr *node = stripCastsForAddress(addr);
+            if (!node)
+                return "";
+            const IRExpr *base = node;
+            int64_t fieldOffset = 0;
+            if ((node->op == IROp::Add || node->op == IROp::Sub) &&
+                node->kids.size() == 2) {
+                const IRExpr *lhs = stripCastsForAddress(node->kids[0].get());
+                const IRExpr *rhs = stripCastsForAddress(node->kids[1].get());
+                if (!lhs || !rhs || lhs->op != IROp::Temp || !rhs->isConst())
+                    return "";
+                base = lhs;
+                fieldOffset = rhs->value;
+                if (node->op == IROp::Sub)
+                    fieldOffset = -fieldOffset;
+            }
+            if (!base || base->op != IROp::Temp)
+                return "";
+
+            int baseTemp = base->tempId();
+            auto it = m_sourceGlobalElementPtrs.find(baseTemp);
+            if (it == m_sourceGlobalElementPtrs.end() ||
+                m_invalidSourceGlobalElementPtrs.count(baseTemp) ||
+                it->second.elemType == NullType || it->second.elemSize <= 0)
+                return "";
+            if (fieldOffset < 0 || fieldOffset >= it->second.elemSize)
+                return "";
+
+            LinearOffsetExpr emptyInner;
+            std::string access = sourceGlobalArrayFieldAccess(
+                it->second.elemType, (int)fieldOffset, emptyInner, accessSize);
+            if (access.empty())
+                return "";
+            if (access.find('[') != std::string::npos)
+                return "";
+
+            std::string typeName = m_types.formatType(it->second.elemType);
+            if (typeName.empty())
+                return "";
+            std::string baseExpr = emitExpr(const_cast<IRExpr *>(base));
+            return "((" + typeName + " *)" + baseExpr + ")->" + access;
         }
 
         static std::vector<std::string> splitMemberPath(const std::string &path) {
@@ -5279,6 +5428,8 @@ private:
         std::set<int>         m_loadAddrTemps;    // temps used in Load address expressions
         std::map<int, TypeRef> m_cosmeticTypes;    // cosmetic: inferred types for temps/vars
         std::map<std::string, TypeRef> m_cosmeticVarTypes; // cosmetic: inferred types for named vars
+        std::map<int, SourceGlobalElementPtr> m_sourceGlobalElementPtrs;
+        std::set<int> m_invalidSourceGlobalElementPtrs;
 
         // Force temps with cross-block def/use to be declared (not inlined)
         void forceDeclCrossBlockTemps() {
@@ -6217,6 +6368,12 @@ private:
                 else if (stmt.storeSize == 5) storeCast = "float";
                 else if (stmt.storeSize == 9) storeCast = "double";
                 if (s_portMode) {
+                    std::string elemField =
+                        sourceGlobalElementPtrLvalueExpr(a, stmt.storeSize);
+                    if (!elemField.empty()) {
+                        out += pad(indent) + QString::fromStdString(elemField + " = " + val) + ";\n";
+                        break;
+                    }
                     std::string arrayField = sourceGlobalArrayLvalueExpr(a, stmt.storeSize);
                     if (!arrayField.empty()) {
                         out += pad(indent) + QString::fromStdString(arrayField + " = " + val) + ";\n";
@@ -7431,6 +7588,12 @@ private:
                     }
                 }
                 if (s_portMode && addr) {
+                    std::string elemField =
+                        sourceGlobalElementPtrLvalueExpr(addr, e->loadSize);
+                    if (!elemField.empty()) {
+                        result = elemField;
+                        break;
+                    }
                     std::string arrayField = sourceGlobalArrayLvalueExpr(addr, e->loadSize);
                     if (!arrayField.empty()) {
                         result = arrayField;
@@ -9857,6 +10020,10 @@ private:
                 if (s_portMode && loadAddr) {
                     bool is8 = (e->castKind == CastKind::ZeroExt8 ||
                                 e->castKind == CastKind::Trunc8);
+                    std::string elemField =
+                        sourceGlobalElementPtrLvalueExpr(loadAddr, is8 ? 1 : 2);
+                    if (!elemField.empty())
+                        return elemField;
                     std::string arrayField =
                         sourceGlobalArrayLvalueExpr(loadAddr, is8 ? 1 : 2);
                     if (!arrayField.empty())
