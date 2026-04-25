@@ -3787,7 +3787,7 @@ private:
                 }
                 if (tname.empty())
                     tname = "t" + std::to_string(id);
-                if (declared.count(tname)) continue;
+                if (declared.count(tname) || paramNames.count(tname)) continue;
                 declared.insert(tname);
                 std::string itype = inferTempType(id);
                 // Override float type for vars with float/pointer conflict

@@ -1054,6 +1054,197 @@ public:
             }
         }
 
+        // ── Pass 7c: fix GP register conflicts at non-loop joins ───
+        // Forward joins can be reached before all address-later predecessors
+        // have been lifted.  In that case the join block is emitted using one
+        // predecessor's register temps, and equivalent temps from later
+        // predecessors look unused.  Materialize a phi-like temp at the end of
+        // each predecessor and use it inside the join block.
+        {
+            auto insertBeforeTerminator = [](BasicBlock &predBlock, IRStmt copy) {
+                if (!predBlock.stmts.empty()) {
+                    auto k = predBlock.stmts.back().kind;
+                    if (k == IRStmtKind::Branch || k == IRStmtKind::Jump ||
+                        k == IRStmtKind::Switch || k == IRStmtKind::Return)
+                        predBlock.stmts.insert(predBlock.stmts.end() - 1, std::move(copy));
+                    else
+                        predBlock.stmts.push_back(std::move(copy));
+                } else {
+                    predBlock.stmts.push_back(std::move(copy));
+                }
+            };
+            auto exprUsesAnyTemp = [](const IRExpr *e, const std::set<int> &temps) -> bool {
+                if (!e) return false;
+                std::vector<const IRExpr*> stk = {e};
+                while (!stk.empty()) {
+                    auto *n = stk.back();
+                    stk.pop_back();
+                    if (n->op == IROp::Temp && temps.count(n->tempId()))
+                        return true;
+                    for (auto &k : n->kids)
+                        if (k) stk.push_back(k.get());
+                }
+                return false;
+            };
+            auto replaceTemps = [](std::unique_ptr<IRExpr> &e,
+                                   const std::set<int> &oldTemps,
+                                   int newTemp, TypeRef newType) {
+                if (!e) return;
+                if (e->op == IROp::Temp && oldTemps.count(e->tempId())) {
+                    e = IRExpr::mkTemp(newTemp, newType);
+                    return;
+                }
+                std::vector<IRExpr*> stk = {e.get()};
+                while (!stk.empty()) {
+                    auto *n = stk.back();
+                    stk.pop_back();
+                    for (auto &k : n->kids) {
+                        if (k && k->op == IROp::Temp &&
+                            oldTemps.count(k->tempId()))
+                            k = IRExpr::mkTemp(newTemp, newType);
+                        else if (k)
+                            stk.push_back(k.get());
+                    }
+                }
+            };
+            auto tempIsAggregateValue = [&](int tid) -> bool {
+                bool hasDrilledFieldDef = false;
+                for (auto &pb : func.blocks) {
+                    for (auto &s : pb.stmts) {
+                        if (s.kind == IRStmtKind::Assign && s.destTemp == tid &&
+                            s.expr && s.expr->op == IROp::Field &&
+                            (s.expr->name.find('.') != std::string::npos ||
+                             s.expr->name.find('[') != std::string::npos)) {
+                            hasDrilledFieldDef = true;
+                            break;
+                        }
+                    }
+                    if (hasDrilledFieldDef)
+                        break;
+                }
+                if (hasDrilledFieldDef)
+                    return false;
+                TypeRef tr = func.tempType(tid);
+                if (tr != NullType) {
+                    auto *tt = m_types.resolveType(tr);
+                    if (tt && (tt->kind == StabsTypeKind::Struct ||
+                               tt->kind == StabsTypeKind::Union ||
+                               tt->kind == StabsTypeKind::Array))
+                        return true;
+                }
+                for (auto &pb : func.blocks) {
+                    for (auto &s : pb.stmts) {
+                        if (s.kind != IRStmtKind::Assign || s.destTemp != tid ||
+                            !s.expr)
+                            continue;
+                        TypeRef et = s.expr->typeRef;
+                        if (et == NullType && s.expr->op == IROp::Var) {
+                            if (auto *g = m_types.globalByName(s.expr->name))
+                                et = g->typeRef;
+                            if (et == NullType) {
+                                for (auto &p : func.params)
+                                    if (p.name == s.expr->name) { et = p.typeRef; break; }
+                            }
+                            if (et == NullType) {
+                                for (auto &l : func.locals)
+                                    if (l.name == s.expr->name) { et = l.typeRef; break; }
+                            }
+                        }
+                        if (et != NullType) {
+                            auto *etInfo = m_types.resolveType(et);
+                            if (etInfo && (etInfo->kind == StabsTypeKind::Struct ||
+                                           etInfo->kind == StabsTypeKind::Union ||
+                                           etInfo->kind == StabsTypeKind::Array))
+                                return true;
+                        }
+                    }
+                }
+                return false;
+            };
+
+            static const x86_reg gpRegs[] = {
+                X86_REG_EAX, X86_REG_EBX, X86_REG_ECX,
+                X86_REG_EDX, X86_REG_ESI, X86_REG_EDI
+            };
+            for (auto &bb : func.blocks) {
+                if (bb.preds.size() < 2 || bb.isLoopHeader ||
+                    domLoopHeaders.count(bb.id) ||
+                    loopHeaderAddrs.count(bb.startAddr))
+                    continue;
+                for (x86_reg reg : gpRegs) {
+                    std::map<int, int> predTempForReg;
+                    int firstTemp = -1;
+                    bool hasConflict = false;
+                    bool missingPred = false;
+                    for (int pid : bb.preds) {
+                        auto bit = blockEndRegs.find(pid);
+                        if (bit == blockEndRegs.end()) { missingPred = true; break; }
+                        auto rit = bit->second.find(reg);
+                        if (rit == bit->second.end()) { missingPred = true; break; }
+                        predTempForReg[pid] = rit->second;
+                        if (firstTemp < 0)
+                            firstTemp = rit->second;
+                        else if (rit->second != firstTemp)
+                            hasConflict = true;
+                    }
+                    if (missingPred || !hasConflict)
+                        continue;
+
+                    std::set<int> sourceTemps;
+                    for (auto &[pid, tid] : predTempForReg)
+                        sourceTemps.insert(tid);
+                    bool hasAggregateSource = false;
+                    for (int tid : sourceTemps) {
+                        if (tempIsAggregateValue(tid)) {
+                            hasAggregateSource = true;
+                            break;
+                        }
+                    }
+                    if (hasAggregateSource)
+                        continue;
+
+                    bool usedInJoin = false;
+                    for (auto &stmt : bb.stmts) {
+                        if (exprUsesAnyTemp(stmt.expr.get(), sourceTemps) ||
+                            exprUsesAnyTemp(stmt.addr.get(), sourceTemps)) {
+                            usedInJoin = true;
+                            break;
+                        }
+                        for (auto &a : stmt.args) {
+                            if (exprUsesAnyTemp(a.get(), sourceTemps)) {
+                                usedInJoin = true;
+                                break;
+                            }
+                        }
+                        if (usedInJoin)
+                            break;
+                    }
+                    if (!usedInJoin)
+                        continue;
+
+                    TypeRef phiType = func.tempType(firstTemp);
+                    int phiTemp = func.newTemp(phiType);
+                    func.phiTemps.insert(phiTemp);
+                    for (auto &[pid, tid] : predTempForReg) {
+                        if (pid < 0 || pid >= (int)func.blocks.size())
+                            continue;
+                        auto copy = IRStmt::mkAssign(
+                            phiTemp, IRExpr::mkTemp(tid, func.tempType(tid)),
+                            func.tempType(tid));
+                        insertBeforeTerminator(func.blocks[pid], std::move(copy));
+                        blockEndRegs[pid][reg] = phiTemp;
+                    }
+
+                    for (auto &stmt : bb.stmts) {
+                        replaceTemps(stmt.expr, sourceTemps, phiTemp, phiType);
+                        replaceTemps(stmt.addr, sourceTemps, phiTemp, phiType);
+                        for (auto &a : stmt.args)
+                            replaceTemps(a, sourceTemps, phiTemp, phiType);
+                    }
+                }
+            }
+        }
+
         // ── Pass 8: fix loop-carried register state ────────────────
         if ((int)func.blocks.size() >= 3) {
             // Compute dominators

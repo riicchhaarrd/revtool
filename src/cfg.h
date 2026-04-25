@@ -1230,6 +1230,7 @@ private:
                 if (x < 0 || x >= n || reachA[x]) continue;
                 reachA[x] = true;
                 if (reachB[x]) return x;
+                if (x == regionEnd) continue;
                 for (int s : m_func->blocks[x].succs)
                     if (s >= 0 && s < n && (!visited[s] || s == regionEnd)) nextA.push_back(s);
             }
@@ -1237,6 +1238,7 @@ private:
                 if (x < 0 || x >= n || reachB[x]) continue;
                 reachB[x] = true;
                 if (reachA[x]) return x;
+                if (x == regionEnd) continue;
                 for (int s : m_func->blocks[x].succs)
                     if (s >= 0 && s < n && (!visited[s] || s == regionEnd)) nextB.push_back(s);
             }
