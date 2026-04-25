@@ -17,6 +17,8 @@
 #include <map>
 #include <set>
 #include <vector>
+#include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <cstring>
 #include <functional>
@@ -127,6 +129,8 @@ public:
 
         // Emit global/static variables and extern declarations.
         std::set<std::string> emittedGlobals;
+        std::set<TypeRef> emittedAnonGlobals;
+        std::set<std::string> emittedAnonGlobalNames;
         // Emit globals and build cross-file global map
         std::map<std::string, const StabsGlobalVar*> globalByName;
         bool anyGlobals = false;
@@ -135,12 +139,6 @@ public:
             if (g.sourceFileIdx != srcIdx) continue;
             if (emittedGlobals.count(g.name)) continue;
             if (s_portMode && !g.isStatic) continue;
-            if (s_portMode) {
-                auto *gt = types.resolveType(g.typeRef);
-                if (!gt || (gt->kind != StabsTypeKind::Struct && gt->kind != StabsTypeKind::Union) ||
-                    gt->name.find("$_") != 0)
-                    continue;
-            }
             emittedGlobals.insert(g.name);
 
             std::string decl = types.formatDecl(g.typeRef, g.name);
@@ -150,8 +148,8 @@ public:
                 continue;
 
             if (s_portMode) {
-                std::set<TypeRef> emittedAnon;
-                emitAnonymousTypeDefs(out, types, g.typeRef, emittedAnon);
+                emitAnonymousTypeDefs(out, types, g.typeRef, emittedAnonGlobals,
+                                      emittedAnonGlobalNames);
             }
             out += QString::fromStdString(
                 (g.isStatic ? "static " : "") + decl) + ";\n";
@@ -259,27 +257,24 @@ public:
 
         // Emit forward declarations only for static functions
         // (needed when a static func is referenced before its definition)
-        // Skip in port mode — types header may have conflicting non-static decl
-        if (!s_portMode) {
-            for (size_t fi : sorted) {
-                auto &fn = mf.stabsFunctions()[fi];
-                if (fn.address == 0 || fn.isGlobal) continue; // only static functions
-                std::string cname = fn.name;
-                { size_t p = 0; while ((p = cname.find("::", p)) != std::string::npos)
-                    { cname.replace(p, 2, "__"); p += 2; } }
-                { size_t p = 0; while ((p = cname.find("~", p)) != std::string::npos)
-                    cname.replace(p, 1, "dtor_"); }
-                { size_t p = 0; while ((p = cname.find(" ", p)) != std::string::npos)
-                    cname.replace(p, 1, "_"); }
-                // Skip names with C++ template characters
-                if (cname.find('<') != std::string::npos || cname.find('>') != std::string::npos)
-                    continue;
-                std::string retStr = fn.returnType != NullType ?
-                    types.formatType(fn.returnType) : "int";
-                out += QString::fromStdString("static " + retStr + " " + cname + "();\n");
-            }
-            out += "\n";
+        for (size_t fi : sorted) {
+            auto &fn = mf.stabsFunctions()[fi];
+            if (fn.address == 0 || fn.isGlobal) continue; // only static functions
+            std::string cname = fn.name;
+            { size_t p = 0; while ((p = cname.find("::", p)) != std::string::npos)
+                { cname.replace(p, 2, "__"); p += 2; } }
+            { size_t p = 0; while ((p = cname.find("~", p)) != std::string::npos)
+                cname.replace(p, 1, "dtor_"); }
+            { size_t p = 0; while ((p = cname.find(" ", p)) != std::string::npos)
+                cname.replace(p, 1, "_"); }
+            // Skip names with C++ template characters
+            if (cname.find('<') != std::string::npos || cname.find('>') != std::string::npos)
+                continue;
+            std::string retStr = fn.returnType != NullType ?
+                types.formatType(fn.returnType) : "int";
+            out += QString::fromStdString("static " + retStr + " " + cname + "();\n");
         }
+        out += "\n";
 
         QString funcBodies;
         std::set<uint32_t> emittedAddrs; // track to avoid duplicate function definitions
@@ -324,6 +319,138 @@ public:
                 }
             }
             if (anyExterns) out += "\n";
+        }
+
+        // Port mode keeps generated STABS globals out of the shared header when
+        // they have file-local linkage.  Some local data symbols are only present
+        // in the nlist table, so recover declarations for referenced symbols here.
+        if (s_portMode) {
+            std::string body = funcBodies.toStdString();
+            std::string bodyForIdentifiers = body;
+            bool inString = false;
+            bool inChar = false;
+            bool escaped = false;
+            for (char &c : bodyForIdentifiers) {
+                if (escaped) {
+                    if (inString || inChar) c = ' ';
+                    escaped = false;
+                    continue;
+                }
+                if ((inString || inChar) && c == '\\') {
+                    c = ' ';
+                    escaped = true;
+                    continue;
+                }
+                if (!inChar && c == '"') {
+                    inString = !inString;
+                    c = ' ';
+                    continue;
+                }
+                if (!inString && c == '\'') {
+                    inChar = !inChar;
+                    c = ' ';
+                    continue;
+                }
+                if (inString || inChar) c = ' ';
+            }
+
+            std::set<std::string> knownNames = emittedGlobals;
+            std::set<std::string> externGlobalNames;
+            std::set<std::string> headerStaticGlobalNames;
+            for (auto &g : types.globals()) {
+                if (g.isStatic && !g.name.empty())
+                    headerStaticGlobalNames.insert(g.name);
+            }
+            for (auto &g : types.globals()) {
+                if (!g.isStatic && !g.name.empty() && !headerStaticGlobalNames.count(g.name))
+                    externGlobalNames.insert(g.name);
+            }
+            for (size_t fi : sorted) {
+                auto &fn = mf.stabsFunctions()[fi];
+                knownNames.insert(fn.name);
+                for (auto &p : fn.params) knownNames.insert(p.name);
+                for (auto &l : fn.locals) knownNames.insert(l.name);
+            }
+
+            auto isIdentChar = [](char c) {
+                return std::isalnum((unsigned char)c) || c == '_';
+            };
+            auto isCIdent = [&](const std::string &name) {
+                if (name.empty()) return false;
+                if (!std::isalpha((unsigned char)name[0]) && name[0] != '_') return false;
+                for (char c : name)
+                    if (!isIdentChar(c)) return false;
+                return true;
+            };
+            auto containsIdentifier = [&](const std::string &name) {
+                size_t p = 0;
+                while ((p = bodyForIdentifiers.find(name, p)) != std::string::npos) {
+                    bool before = (p == 0) || !isIdentChar(bodyForIdentifiers[p - 1]);
+                    size_t e = p + name.size();
+                    bool after = (e >= bodyForIdentifiers.size()) || !isIdentChar(bodyForIdentifiers[e]);
+                    if (before && after) return true;
+                    p = e;
+                }
+                return false;
+            };
+
+            struct LocalDataSymbol {
+                std::string name;
+                uint32_t address = 0;
+                uint32_t sectionEnd = 0;
+            };
+            std::vector<LocalDataSymbol> localData;
+            for (auto &sym : mf.symbols()) {
+                if (sym.n_value == 0 || sym.name.empty()) continue;
+                if (sym.n_type & N_STAB) continue;
+                if ((sym.n_type & N_TYPE) != N_SECT) continue;
+                if (sym.n_type & N_EXT) continue;
+                auto *sec = mf.sectionForAddress(sym.n_value);
+                if (!sec || sec->segname != "__DATA") continue;
+                std::string name = sym.name;
+                if (!name.empty() && name[0] == '_') name = name.substr(1);
+                if (name.find(':') != std::string::npos) continue;
+                std::string demangled = demangleNameOnly(sym.name);
+                if (!demangled.empty() && demangled != sym.name) {
+                    name = demangled;
+                    auto paren = name.find('(');
+                    auto scope = name.rfind("::");
+                    if (paren != std::string::npos && scope != std::string::npos &&
+                        paren < scope && scope + 2 < name.size())
+                        name = name.substr(scope + 2);
+                }
+                if (!isCIdent(name)) continue;
+                localData.push_back({name, sym.n_value, sec->addr + sec->size});
+            }
+            std::sort(localData.begin(), localData.end(),
+                      [](const LocalDataSymbol &a, const LocalDataSymbol &b) {
+                          return a.address < b.address;
+                      });
+
+            bool anyLocalData = false;
+            for (size_t i = 0; i < localData.size(); ++i) {
+                auto &sym = localData[i];
+                if (sym.name.size() < 3) continue;
+                if (knownNames.count(sym.name) || emittedGlobals.count(sym.name)) continue;
+                if (externGlobalNames.count(sym.name)) continue;
+                if (!containsIdentifier(sym.name)) continue;
+
+                uint32_t nextAddr = sym.sectionEnd;
+                for (size_t j = i + 1; j < localData.size(); ++j) {
+                    if (localData[j].address > sym.address && localData[j].address < nextAddr) {
+                        nextAddr = localData[j].address;
+                        break;
+                    }
+                }
+                uint32_t size = nextAddr > sym.address ? nextAddr - sym.address : 4;
+                if (size == 0 || size > 65536) size = 4;
+                emittedGlobals.insert(sym.name);
+                knownNames.insert(sym.name);
+                out += QString::fromStdString("static char " + sym.name + "[" +
+                                               std::to_string(size) + "];\n");
+                anyLocalData = true;
+            }
+            if (anyLocalData) out += "\n";
         }
 
         // Also scan for named variables used but not declared anywhere
@@ -665,10 +792,17 @@ public:
 
         // Emit extern declarations for globals
         std::set<std::string> globalDeclared;
+        std::set<std::string> staticGlobalNames;
+        if (s_portMode) {
+            for (auto &g : types.globals())
+                if (g.isStatic && !g.name.empty())
+                    staticGlobalNames.insert(g.name);
+        }
         // Build best-type map: prefer non-int, non-null types for each global name
         std::map<std::string, TypeRef> bestGlobalType;
         for (auto &g : types.globals()) {
             if (g.name.empty()) continue;
+            if (s_portMode && (g.isStatic || staticGlobalNames.count(g.name))) continue;
             auto it = bestGlobalType.find(g.name);
             if (it == bestGlobalType.end()) {
                 bestGlobalType[g.name] = g.typeRef;
@@ -682,6 +816,7 @@ public:
         }
         for (auto &g : types.globals()) {
             if (g.address == 0 || g.name.empty()) continue;
+            if (s_portMode && (g.isStatic || staticGlobalNames.count(g.name))) continue;
             if (globalDeclared.count(g.name)) continue;
             // Use the best type for this global name
             if (g.name.find('<') != std::string::npos) continue;
@@ -735,11 +870,22 @@ public:
         // Emit function prototypes
         out += "\n/* Function prototypes */\n";
         std::set<std::string> protoDeclared;
+        std::set<std::string> staticFunctionNames;
+        if (s_portMode) {
+            for (auto &fn : mf.stabsFunctions()) {
+                if (fn.address == 0 || fn.name.empty() || fn.isGlobal) continue;
+                std::string cname = fn.name;
+                { size_t p = 0; while ((p = cname.find("::", p)) != std::string::npos) { cname.replace(p, 2, "__"); p += 2; } }
+                { size_t p = 0; while ((p = cname.find("~", p)) != std::string::npos) cname.replace(p, 1, "dtor_"); }
+                staticFunctionNames.insert(cname);
+            }
+        }
         for (auto &fn : mf.stabsFunctions()) {
             if (fn.address == 0 || fn.name.empty()) continue;
             std::string cname = fn.name;
             { size_t p = 0; while ((p = cname.find("::", p)) != std::string::npos) { cname.replace(p, 2, "__"); p += 2; } }
             { size_t p = 0; while ((p = cname.find("~", p)) != std::string::npos) cname.replace(p, 1, "dtor_"); }
+            if (s_portMode && (!fn.isGlobal || staticFunctionNames.count(cname))) continue;
             if (protoDeclared.count(cname)) continue;
             if (cname.find('<') != std::string::npos) continue;
             // Skip names with spaces (C++ constructor/destructor stubs)
@@ -2428,8 +2574,9 @@ private:
         if (!emitted.empty()) out += "\n";
     }
 
-    static void emitAnonymousTypeDefs(QString &out, const StabsTypeTable &types,
-                                      TypeRef ref, std::set<TypeRef> &emitted) {
+    static void emitAnonymousTypeDefs(QString &out, const StabsTypeTable &types, TypeRef ref,
+                                      std::set<TypeRef> &emitted,
+                                      std::set<std::string> &emittedNames) {
         if (ref == NullType || emitted.count(ref)) return;
         emitted.insert(ref);
 
@@ -2439,15 +2586,17 @@ private:
             t->kind == StabsTypeKind::Volatile || t->kind == StabsTypeKind::Array ||
             t->kind == StabsTypeKind::Pointer || t->kind == StabsTypeKind::Reference) {
             if (t->targetType != NullType)
-                emitAnonymousTypeDefs(out, types, t->targetType, emitted);
+                emitAnonymousTypeDefs(out, types, t->targetType, emitted, emittedNames);
             return;
         }
         if ((t->kind != StabsTypeKind::Struct && t->kind != StabsTypeKind::Union) ||
             t->name.find("$_") != 0 || t->fields.empty())
             return;
+        if (emittedNames.count(t->name)) return;
+        emittedNames.insert(t->name);
 
         for (auto &f : t->fields)
-            emitAnonymousTypeDefs(out, types, f.typeRef, emitted);
+            emitAnonymousTypeDefs(out, types, f.typeRef, emitted, emittedNames);
 
         std::string kw = (t->kind == StabsTypeKind::Union) ? "union" : "struct";
         out += QString::fromStdString(kw + " " + t->name + " {\n");
@@ -2683,8 +2832,7 @@ private:
                 retType = m_types.formatType(m_func.returnType);
             m_emittedRetVoid = (retType == "void");
 
-            // In port mode, skip "static" to avoid conflicts with types header
-            std::string qual = (m_func.isStatic && !s_portMode) ? "static " : "";
+            std::string qual = m_func.isStatic ? "static " : "";
             std::string funcName = cName(m_func.name);
             out += QString::fromStdString(qual + retType) + " " +
                    QString::fromStdString(funcName) + "(";
