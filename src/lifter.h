@@ -1958,6 +1958,29 @@ private:
         return IRExpr::mkConst(imm);
     }
 
+    static std::pair<std::string, int> syntheticStackSlot(int disp) {
+        char buf[32];
+        if (disp > 0) {
+            snprintf(buf, sizeof(buf), "arg_%x", (disp - 8) / 4);
+            return {buf, 0};
+        }
+        int q = -disp;
+        int slot = (q + 3) / 4;
+        int baseQ = slot * 4;
+        int byteOffset = baseQ - q;
+        snprintf(buf, sizeof(buf), "var_%x", slot);
+        return {buf, byteOffset};
+    }
+
+    static std::unique_ptr<IRExpr> syntheticStackAddress(const std::string &name,
+                                                        int byteOffset) {
+        auto addr = IRExpr::mkAddrOf(IRExpr::mkVar(name));
+        if (byteOffset == 0)
+            return addr;
+        return IRExpr::mkBinary(IROp::Add, std::move(addr),
+                                IRExpr::mkConst(byteOffset));
+    }
+
     std::unique_ptr<IRExpr> readMem(x86_op_mem &m, int accessSize = 4) {
         // EBP-relative: param or local
         if (m.base == X86_REG_EBP && m.index == X86_REG_INVALID) {
@@ -1986,10 +2009,12 @@ private:
                 }
             }
             // Unnamed stack slot
-            char buf[32];
-            if (d > 0) snprintf(buf, sizeof(buf), "arg_%x", (d - 8) / 4);
-            else snprintf(buf, sizeof(buf), "var_%x", (-d) / 4);
-            return IRExpr::mkVar(buf);
+            auto [name, byteOffset] = syntheticStackSlot(d);
+            if (byteOffset == 0)
+                return IRExpr::mkVar(name);
+            auto load = IRExpr::mkLoad(syntheticStackAddress(name, byteOffset));
+            load->loadSize = accessSize;
+            return load;
         }
 
         StackArrayAccess indexedAccess;
@@ -2244,10 +2269,14 @@ private:
                     return;
                 }
             }
-            char buf[32];
-            if (d > 0) snprintf(buf, sizeof(buf), "arg_%x", (d - 8) / 4);
-            else snprintf(buf, sizeof(buf), "var_%x", (-d) / 4);
-            bb.stmts.push_back(IRStmt::mkVarSet(buf, std::move(val)));
+            auto [name, byteOffset] = syntheticStackSlot(d);
+            if (byteOffset == 0 && storeSize == 4) {
+                bb.stmts.push_back(IRStmt::mkVarSet(name, std::move(val)));
+            } else {
+                bb.stmts.push_back(IRStmt::mkStore(
+                    syntheticStackAddress(name, byteOffset), std::move(val),
+                    storeSize));
+            }
             return;
         }
         if (auto addr = stackIndexedArrayAddress(m, storeSize)) {

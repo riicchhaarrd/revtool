@@ -3745,6 +3745,57 @@ private:
             for (auto &bb : m_func.blocks)
                 for (auto &stmt : bb.stmts)
                     collectSynthVars(stmt, synthVars);
+            auto syntheticVarHasRealPointerUse =
+                [&](const std::string &name) -> bool {
+                    std::function<bool(const IRExpr *, bool)> scan =
+                        [&](const IRExpr *e, bool underAddrOf) -> bool {
+                            if (!e)
+                                return false;
+                            if (e->op == IROp::AddrOf) {
+                                for (auto &k : e->kids)
+                                    if (scan(k.get(), true))
+                                        return true;
+                                return false;
+                            }
+                            if (!underAddrOf && e->op == IROp::Var &&
+                                e->name == name)
+                                return true;
+                            for (auto &k : e->kids)
+                                if (scan(k.get(), underAddrOf))
+                                    return true;
+                            return false;
+                        };
+                    auto scanAddress = [&](const IRExpr *addr) -> bool {
+                        return scan(addr, false);
+                    };
+                    for (auto &bb : m_func.blocks) {
+                        for (auto &stmt : bb.stmts) {
+                            if (stmt.kind == IRStmtKind::Store &&
+                                scanAddress(stmt.addr.get()))
+                                return true;
+                            std::function<bool(const IRExpr *)> scanLoads =
+                                [&](const IRExpr *e) -> bool {
+                                    if (!e)
+                                        return false;
+                                    if (e->op == IROp::Load &&
+                                        !e->kids.empty() &&
+                                        scanAddress(e->kids[0].get()))
+                                        return true;
+                                    for (auto &k : e->kids)
+                                        if (scanLoads(k.get()))
+                                            return true;
+                                    return false;
+                                };
+                            if (scanLoads(stmt.expr.get()) ||
+                                scanLoads(stmt.addr.get()))
+                                return true;
+                            for (auto &a : stmt.args)
+                                if (scanLoads(a.get()))
+                                    return true;
+                        }
+                    }
+                    return false;
+                };
             // Detect variables that should be short: ALL assignments have Trunc16 cast
             std::map<std::string, int> varTrunc16;  // name → count of Trunc16 assigns
             std::map<std::string, int> varAnyAssign; // name → count of any assigns
@@ -3766,7 +3817,8 @@ private:
                                 varTrunc16[name] == varAnyAssign[name] && varTrunc16[name] > 0);
                 if (isShort)
                     out += "    short " + QString::fromStdString(name) + ";\n";
-                else if (m_pointerVars.count(name))
+                else if (m_pointerVars.count(name) &&
+                         syntheticVarHasRealPointerUse(name))
                     out += "    char *" + QString::fromStdString(name) + ";\n";
                 else
                     out += "    int " + QString::fromStdString(name) + ";\n";
@@ -4195,6 +4247,67 @@ private:
             for (auto &l : m_func.locals)
                 if (l.name == name && l.typeRef != NullType) return l.typeRef;
             return global ? global->typeRef : NullType;
+        }
+
+        TypeRef printedObjectType(const std::string &name) const {
+            if (name.empty())
+                return NullType;
+            auto *global = m_types.globalByName(name);
+            if (global && global->typeRef != NullType)
+                return global->typeRef;
+            for (auto &p : m_func.params)
+                if ((p.name == name || cName(p.name) == name) && p.typeRef != NullType)
+                    return p.typeRef;
+            for (auto &l : m_func.locals)
+                if ((l.name == name || cName(l.name) == name) && l.typeRef != NullType)
+                    return l.typeRef;
+            return global ? global->typeRef : NullType;
+        }
+
+        TypeRef printedArrayDesignatorType(const std::string &printed) const {
+            std::string s = stripOuterParens(printed);
+            if (s.empty() ||
+                !(std::isalpha((unsigned char)s[0]) || s[0] == '_'))
+                return NullType;
+            size_t pos = 1;
+            while (pos < s.size() &&
+                   (std::isalnum((unsigned char)s[pos]) || s[pos] == '_'))
+                pos++;
+            if (pos == s.size() || s[pos] != '[')
+                return NullType;
+            TypeRef ref = printedObjectType(s.substr(0, pos));
+            bool sawSubscript = false;
+            while (pos < s.size()) {
+                if (s[pos] != '[')
+                    return NullType;
+                pos++;
+                if (pos >= s.size())
+                    return NullType;
+                while (pos < s.size() && s[pos] != ']') {
+                    if (s[pos] == '[')
+                        return NullType;
+                    pos++;
+                }
+                if (pos >= s.size() || s[pos] != ']')
+                    return NullType;
+                pos++;
+                sawSubscript = true;
+                auto *t = ref != NullType ? m_types.resolveType(ref) : nullptr;
+                if (!t)
+                    return NullType;
+                if (t->kind == StabsTypeKind::Array ||
+                    t->kind == StabsTypeKind::Pointer)
+                    ref = t->targetType;
+                else
+                    return NullType;
+            }
+            return sawSubscript ? ref : NullType;
+        }
+
+        bool printedArrayDesignatorHasArrayType(const std::string &printed) const {
+            TypeRef ref = printedArrayDesignatorType(printed);
+            auto *t = ref != NullType ? m_types.resolveType(ref) : nullptr;
+            return t && t->kind == StabsTypeKind::Array;
         }
 
         TypeRef aggregateObjectType(const std::string &printed, const IRExpr *expr) {
@@ -5555,6 +5668,53 @@ private:
             }
             return "(char *)(" + base + ")";
         }
+
+        std::string byteAddressExpr(IRExpr *addr) {
+            if (!addr)
+                return "0";
+            auto unwrapAddressCast = [](IRExpr *base) -> IRExpr * {
+                if (base && base->op == IROp::Cast &&
+                    (base->castKind == CastKind::PtrToInt ||
+                     base->castKind == CastKind::FloatToInt) &&
+                    !base->kids.empty() && base->kids[0])
+                    return base->kids[0].get();
+                return base;
+            };
+            auto formatAddrOfBase = [&](IRExpr *base) -> std::string {
+                std::string s = emitExpr(base);
+                if (base && base->op == IROp::AddrOf && !s.empty() && s[0] == '&')
+                    return "(char *)" + s;
+                return charPtrCast(s, base);
+            };
+            auto formatOffset = [](int64_t off) -> std::string {
+                return std::to_string(off < 0 ? -off : off);
+            };
+            if (addr->op == IROp::AddrOf)
+                return formatAddrOfBase(addr);
+            IRExpr *base = nullptr;
+            int64_t off = 0;
+            if ((addr->op == IROp::Add || addr->op == IROp::Sub) &&
+                addr->kids.size() == 2) {
+                if (addr->kids[1] && addr->kids[1]->isConst()) {
+                    base = unwrapAddressCast(addr->kids[0].get());
+                    off = (int64_t)addr->kids[1]->value;
+                    if (addr->op == IROp::Sub)
+                        off = -off;
+                } else if (addr->op == IROp::Add &&
+                           addr->kids[0] && addr->kids[0]->isConst()) {
+                    base = unwrapAddressCast(addr->kids[1].get());
+                    off = (int64_t)addr->kids[0]->value;
+                }
+            }
+            if (base && base->op == IROp::AddrOf) {
+                std::string basePtr = formatAddrOfBase(base);
+                if (off == 0)
+                    return basePtr;
+                return "(" + basePtr + (off < 0 ? " - " : " + ") +
+                       formatOffset(off) + ")";
+            }
+            return charPtrCast(emitExpr(addr), addr);
+        }
         // If the base is a struct/union-valued global or var, prepend `&` so it can
         // participate in pointer arithmetic. Used by Store/Load emission paths that
         // build `*(T *)((char *)BASE + N)` manually. Without this, GCC rejects
@@ -6533,6 +6693,8 @@ private:
                     if (vti && vti->kind == StabsTypeKind::Array)
                         val += "[0]";
                 }
+                if (s_portMode && printedArrayDesignatorHasArrayType(val))
+                    val += "[0]";
                 // Cast small (≤4 byte) struct/union RHS to int when storing
                 // to a generic pointer / int slot.  The x86 ABI passes these
                 // as 4-byte values; without the cast C rejects the assignment.
@@ -6900,7 +7062,7 @@ private:
                     } else {
                         // No Mul pattern found — emit general pointer store
                         out += pad(indent) + QString::fromStdString(
-                            "*(" + storeCast + " *)(" + charPtrCast(emitExpr(a), a) + ") = " + val) + ";\n";
+                            "*(" + storeCast + " *)(" + byteAddressExpr(a) + ") = " + val) + ";\n";
                     }
                 }
                 // Add(Add(base, Mul(idx, scale)), const) → base->arr_NN[idx] = val
@@ -6990,7 +7152,7 @@ private:
                     }
                     if (!resolved)
                         out += pad(indent) + QString::fromStdString(
-                            "*(" + storeCast + " *)(" + charPtrCast(emitExpr(a), a) + ") = " + val) + ";\n";
+                            "*(" + storeCast + " *)(" + byteAddressExpr(a) + ") = " + val) + ";\n";
                 }
                 else if (a->op == IROp::Var || a->op == IROp::Temp) {
                     std::string addrS = emitExpr(a);
@@ -7064,12 +7226,11 @@ private:
                                 "*(" + storeCast + " *)(&" + addrS + ") = " + val) + ";\n";
                     } else {
                         out += pad(indent) + QString::fromStdString(
-                            "*(" + storeCast + " *)(" + charPtrCast(addrS, a) + ") = " + val) + ";\n";
+                            "*(" + storeCast + " *)(" + byteAddressExpr(a) + ") = " + val) + ";\n";
                     }
                 } else {
-                    std::string addrS = emitExpr(a);
                     out += pad(indent) + QString::fromStdString(
-                        "*(" + storeCast + " *)(" + charPtrCast(addrS, a) + ") = " + val) + ";\n";
+                        "*(" + storeCast + " *)(" + byteAddressExpr(a) + ") = " + val) + ";\n";
                 }
                 break;
             }
@@ -7080,6 +7241,8 @@ private:
                     auto *vsti = m_types.resolveType(stmt.expr->typeRef);
                     if (vsti && vsti->kind == StabsTypeKind::Array) val += "[0]";
                 }
+                if (s_portMode && printedArrayDesignatorHasArrayType(val))
+                    val += "[0]";
                 std::string dest = stmt.destVar;
                 // Compound dest (array-subscript "a[4]" or dotted "a.b") is already a
                 // valid C expression — don't run it through cName or the brackets/dot
@@ -8312,7 +8475,7 @@ private:
                 // General Add/Sub expression → *(int *)((char *)(expr))
                 else if (addr && (addr->op == IROp::Add || addr->op == IROp::Sub) &&
                          addr->kids.size() == 2) {
-                    result = std::string("*(") + loadCastType(e->loadSize) + " *)(" + charPtrCast(emitExpr(addr), addr) + ")";
+                    result = std::string("*(") + loadCastType(e->loadSize) + " *)(" + byteAddressExpr(addr) + ")";
                 }
                 // bare pointer dereference of a simple var/temp: Load(Var) = *var
                 // For pointer types, this just reads the pointer value — no field access.
@@ -8381,7 +8544,7 @@ private:
                             result = std::string("*(") + lct + " *)(&" + addrStr + ")";
                     }
                     else
-                        result = std::string("*(") + lct + " *)(" + charPtrCast(addrStr, addr) + ")";
+                        result = std::string("*(") + lct + " *)(" + byteAddressExpr(addr) + ")";
                 }
                 // m_addrDepth decremented by LoadDepthGuard RAII
                 break;
@@ -8866,6 +9029,8 @@ private:
                                 }
                             }
                         }
+                        if (printedArrayDesignatorHasArrayType(s))
+                            s += "[0]";
                     }
                     return s;
                 };
@@ -10316,14 +10481,11 @@ private:
                 bool is8 = (e->castKind == CastKind::ZeroExt8 || e->castKind == CastKind::Trunc8);
                 const char *castType = is8 ? "unsigned char" : "unsigned short";
                 m_addrDepth++;
-                std::string addr = emitExpr(inner_e->kids[0].get());
+                std::string addr = byteAddressExpr(inner_e->kids[0].get());
                 m_addrDepth--;
                 if (addr.find("_p + ") != std::string::npos || addr.find("_p)") != std::string::npos)
                     return std::string("*(") + castType + " *)(" + addr + ")";
-                // For struct-valued global/var at the address, prepend `&` so
-                // `(char *)<struct>` compiles (GCC rejects casting a struct value).
-                std::string addrForCast = structAddrOf(addr, inner_e->kids[0].get());
-                return std::string("*(") + castType + " *)((char *)" + addrForCast + ")";
+                return std::string("*(") + castType + " *)(" + addr + ")";
             }
             switch (e->castKind) {
             case CastKind::ZeroExt8:   return "(unsigned char)(" + inner + ")";
