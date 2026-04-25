@@ -3317,6 +3317,19 @@ private:
                             if (v2 == vid) groupTemps.insert(t2);
                     }
                     bool found = false;
+                    std::function<bool(const IRExpr *, int)> isScalarWordValue =
+                        [&](const IRExpr *e, int depth) -> bool {
+                            if (!e || depth > 8)
+                                return false;
+                            if (e->op == IROp::Temp) {
+                                auto dit = m_tempDef.find(e->tempId());
+                                if (dit != m_tempDef.end() && dit->second)
+                                    return isScalarWordValue(dit->second, depth + 1);
+                            }
+                            if (e->op == IROp::Cast && !e->kids.empty())
+                                return isScalarWordValue(e->kids[0].get(), depth + 1);
+                            return e->op == IROp::Load && e->loadSize <= 4;
+                        };
                     std::function<void(const IRExpr *)> scan =
                         [&](const IRExpr *e) {
                             if (!e || found)
@@ -3352,8 +3365,7 @@ private:
                                 (s2.kind == IRStmtKind::VarSet &&
                                  s2.destVar == tname);
                             if (assignsThisTemp &&
-                                s2.expr->op == IROp::Load &&
-                                s2.expr->loadSize <= 4) {
+                                isScalarWordValue(s2.expr.get(), 0)) {
                                 found = true;
                                 break;
                             }
