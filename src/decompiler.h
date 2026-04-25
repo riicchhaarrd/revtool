@@ -4363,6 +4363,145 @@ private:
             return "*(int *)(&" + value + ")";
         }
 
+        bool scalarPackFieldType(TypeRef ref) const {
+            auto *t = ref != NullType ? m_types.resolveType(ref) : nullptr;
+            if (!t)
+                return false;
+            switch (t->kind) {
+            case StabsTypeKind::Int:
+            case StabsTypeKind::UInt:
+            case StabsTypeKind::Char:
+            case StabsTypeKind::UChar:
+            case StabsTypeKind::Bool:
+            case StabsTypeKind::Short:
+            case StabsTypeKind::UShort:
+            case StabsTypeKind::Long:
+            case StabsTypeKind::ULong:
+            case StabsTypeKind::Enum:
+            case StabsTypeKind::Pointer:
+                return true;
+            default:
+                return false;
+            }
+        }
+
+        bool integerLikePackWord(IRExpr *expr, const std::string &printed) const {
+            TypeRef ref = exprType(expr);
+            if (ref == NullType)
+                ref = printedObjectType(printed);
+            if (ref == NullType)
+                return true;
+            auto *t = m_types.resolveType(ref);
+            if (!t)
+                return false;
+            switch (t->kind) {
+            case StabsTypeKind::Int:
+            case StabsTypeKind::UInt:
+            case StabsTypeKind::Char:
+            case StabsTypeKind::UChar:
+            case StabsTypeKind::Bool:
+            case StabsTypeKind::Short:
+            case StabsTypeKind::UShort:
+            case StabsTypeKind::Long:
+            case StabsTypeKind::ULong:
+            case StabsTypeKind::Enum:
+                return true;
+            default:
+                return false;
+            }
+        }
+
+        std::string shiftPackedWord(const std::string &word, int byteOffset) const {
+            if (byteOffset == 0)
+                return word;
+            return "(" + word + " >> " + std::to_string(byteOffset * 8) + ")";
+        }
+
+        std::string castPackedScalar(TypeRef ref, const std::string &value) const {
+            auto *t = ref != NullType ? m_types.resolveType(ref) : nullptr;
+            if (t && t->kind == StabsTypeKind::Enum)
+                return "(int)(" + value + ")";
+            std::string typeName = m_types.formatType(ref);
+            if (typeName.empty())
+                return value;
+            return "(" + typeName + ")(" + value + ")";
+        }
+
+        std::string emitPackedStructLiteral(IRExpr *e) {
+            if (!e || e->typeRef == NullType)
+                return "";
+            auto *st = m_types.resolveType(e->typeRef);
+            if (!st || st->kind != StabsTypeKind::Struct || st->fields.empty())
+                return "";
+            std::string typeStr = m_types.formatType(e->typeRef);
+            if (typeStr.empty() || typeStr.find('*') != std::string::npos)
+                return "";
+            std::vector<std::string> inits;
+            for (auto &field : st->fields) {
+                if (field.name.empty())
+                    return "";
+                if (field.name.find("_pad") == 0)
+                    continue;
+                if ((field.bitOffset % 8) != 0 || (field.bitSize % 8) != 0)
+                    return "";
+                int byteOffset = field.bitOffset / 8;
+                int byteSize = field.bitSize / 8;
+                if (byteSize <= 0)
+                    return "";
+                int wordIndex = byteOffset / 4;
+                int wordByte = byteOffset % 4;
+                if (wordIndex < 0 || (size_t)wordIndex >= e->kids.size() ||
+                    wordByte + byteSize > 4)
+                    return "";
+                std::string word = emitExpr(e->kids[(size_t)wordIndex].get());
+                auto *ft = field.typeRef != NullType ? m_types.resolveType(field.typeRef) : nullptr;
+                if (!ft)
+                    return "";
+                std::string init = "." + field.name + " = ";
+                if (ft->kind == StabsTypeKind::Array) {
+                    if (!integerLikePackWord(e->kids[(size_t)wordIndex].get(), word))
+                        return "";
+                    auto *elem = ft->targetType != NullType ? m_types.resolveType(ft->targetType) : nullptr;
+                    if (!elem || elem->sizeBytes != 1)
+                        return "";
+                    int count = ft->arrayHigh >= ft->arrayLow ?
+                        (ft->arrayHigh - ft->arrayLow + 1) : byteSize;
+                    if (count <= 0 || count > byteSize || wordByte + count > 4)
+                        return "";
+                    std::string elemType = m_types.formatType(ft->targetType);
+                    if (elemType.empty())
+                        return "";
+                    init += "{";
+                    for (int i = 0; i < count; ++i) {
+                        if (i)
+                            init += ", ";
+                        init += "(" + elemType + ")(" +
+                                shiftPackedWord(word, wordByte + i) + ")";
+                    }
+                    init += "}";
+                } else if (scalarPackFieldType(field.typeRef)) {
+                    if (ft->kind != StabsTypeKind::Pointer &&
+                        !integerLikePackWord(e->kids[(size_t)wordIndex].get(), word))
+                        return "";
+                    init += castPackedScalar(field.typeRef,
+                                             shiftPackedWord(word, wordByte));
+                } else {
+                    return "";
+                }
+                inits.push_back(init);
+            }
+            if (inits.empty())
+                return "";
+            std::string out = "(" + typeStr + "){";
+            for (size_t i = 0; i < inits.size(); ++i) {
+                if (i)
+                    out += ", ";
+                out += inits[i];
+            }
+            out += "}";
+            return out;
+        }
+
         TypeRef fieldTypeFromBase(const IRExpr *fieldExpr) const {
             if (!fieldExpr || fieldExpr->op != IROp::Field || fieldExpr->kids.empty() ||
                 !fieldExpr->kids[0])
@@ -9749,12 +9888,15 @@ private:
             case IROp::Call: {
                 // Struct-by-value arg synthesized by the lifter: each kid is
                 // one 4-byte word of the struct.  Emit as a compound literal
-                // that packs the words into an int array and reinterprets it
-                // as the struct type.  The union variant is well-defined for
-                // type-punning; the cast variant is simpler and accepted by
-                // GCC with -fno-strict-aliasing (which the port uses).  Using
-                // the cast form keeps the output short.
+                // that packs the words into named fields when the STABS layout
+                // is simple enough, otherwise fall back to the byte-for-byte
+                // int-array reinterpretation.
                 if (e->name == "__pack_struct" && e->typeRef != NullType) {
+                    std::string designated = emitPackedStructLiteral(e);
+                    if (!designated.empty()) {
+                        result = designated;
+                        break;
+                    }
                     std::string typeStr = m_types.formatType(e->typeRef);
                     std::string inner = "*(" + typeStr + " *)(int[]){";
                     for (size_t i = 0; i < e->kids.size(); ++i) {
