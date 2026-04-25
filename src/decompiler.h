@@ -8417,6 +8417,14 @@ private:
                              (b1->op == IROp::Temp && b1->value == b2->value)))
                             return {b1, m1 + m2};
                     }
+                    if (expr->op == IROp::Sub && expr->kids.size() == 2) {
+                        auto [b1, m1] = evalMul(expr->kids[0].get());
+                        auto [b2, m2] = evalMul(expr->kids[1].get());
+                        if (b1 && b2 && b1->op == b2->op &&
+                            ((b1->op == IROp::Var && b1->name == b2->name) ||
+                             (b1->op == IROp::Temp && b1->value == b2->value)))
+                            return {b1, m1 - m2};
+                    }
                     return {nullptr, 0};
                 };
                 {
