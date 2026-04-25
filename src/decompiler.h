@@ -1169,28 +1169,6 @@ public:
                 ++p;
             }
             cleaned.replace("(int)&(int)&", "(int)&");
-            auto fixClientVoidField0 = [&](const QString &name, const QString &field) {
-                const QString addr = "&" + name;
-                for (const QString &qual : {QString("void"), QString("const void")}) {
-                    QString member = "((" + qual + " *)" + name + ")->" + field;
-                    cleaned.replace("((char *)(" + member + "))", "((char *)" + addr + ")");
-                    cleaned.replace("((char *)" + member, "((char *)" + addr);
-                    cleaned.replace("((char *)(" + member + ")", "((char *)" + addr);
-
-                    QRegularExpression assignRe(
-                        "(=\\s*)\\(\\(" + QRegularExpression::escape(qual) +
-                        "\\s+\\*\\)" + QRegularExpression::escape(name) +
-                        "\\)->" + QRegularExpression::escape(field) + "\\s*;");
-                    cleaned.replace(assignRe, "\\1(int)" + addr + ";");
-
-                    cleaned.replace("((" + qual + " *)" + name + ")->" + field,
-                                    "*(int *)((char *)" + addr + ")");
-                }
-            };
-            // STABS exposes the client globals as void*, but the generated code
-            // uses field zero as an address base.  Preserve that address use in C.
-            fixClientVoidField0("clc", "state");
-            fixClientVoidField0("cl", "active");
         }
         // Pre-pass: fix &EXPR->field_X patterns → (EXPR + 0xX)
         // &0->field_X → 0xX
@@ -4181,6 +4159,110 @@ private:
             return false;
         }
 
+        std::string portOpaqueGlobalFieldZeroAddress(const IRExpr *baseExpr,
+                                                     const std::string &fieldName,
+                                                     int64_t fieldOffset) const {
+            if (!s_portMode || fieldOffset != 0 || !baseExpr)
+                return "";
+            const IRExpr *node = baseExpr;
+            for (int depth = 0; depth < 8 && node; ++depth) {
+                if (node->op == IROp::Cast && !node->kids.empty()) {
+                    node = node->kids[0].get();
+                    continue;
+                }
+                break;
+            }
+            if (!node || node->op != IROp::Var || node->name.empty())
+                return "";
+            if (!((node->name == "clc" && fieldName == "state") ||
+                  (node->name == "cl" && fieldName == "active")))
+                return "";
+            auto *g = m_types.globalByName(node->name);
+            if (!g || g->typeRef == NullType)
+                return "";
+
+            auto *gt = m_types.resolveType(g->typeRef);
+            bool isOpaquePointer = false;
+            if (gt && gt->kind == StabsTypeKind::Pointer) {
+                auto *target = m_types.resolveType(gt->targetType);
+                if (!target || (target->kind == StabsTypeKind::Void) ||
+                    ((target->kind == StabsTypeKind::Struct ||
+                      target->kind == StabsTypeKind::Union) &&
+                     (target->name.empty() || target->name.find("$_") == 0)))
+                    isOpaquePointer = true;
+            }
+            std::string formatted = m_types.formatType(g->typeRef);
+            if (formatted.find("void *") != std::string::npos)
+                isOpaquePointer = true;
+            if (!isOpaquePointer)
+                return "";
+
+            // These STABS globals are opaque in the type table but are used by
+            // the binary as fixed storage objects.  Field zero is therefore the
+            // object base address, not a C member dereference through void *.
+            return "(int)&" + node->name;
+        }
+
+        std::string portOpaqueGlobalFieldZeroAddressFromText(const std::string &base,
+                                                             const std::string &field) const {
+            if (!s_portMode)
+                return "";
+            auto extract = [&](const std::string &prefix) -> std::string {
+                if (base.compare(0, prefix.size(), prefix) != 0 || base.size() <= prefix.size() + 1)
+                    return "";
+                if (base.back() != ')')
+                    return "";
+                return base.substr(prefix.size(), base.size() - prefix.size() - 1);
+            };
+            std::string name = extract("((void *)");
+            if (name.empty())
+                name = extract("((const void *)");
+            if (name.empty())
+                return "";
+            if ((name == "clc" && field == "state") ||
+                (name == "cl" && field == "active"))
+                return "(int)&" + name;
+            return "";
+        }
+
+        static void replaceAll(std::string &text, const std::string &from,
+                               const std::string &to) {
+            if (from.empty())
+                return;
+            size_t pos = 0;
+            while ((pos = text.find(from, pos)) != std::string::npos) {
+                text.replace(pos, from.size(), to);
+                pos += to.size();
+            }
+        }
+
+        std::string rewritePortOpaqueStorageFieldExpr(std::string expr) const {
+            if (!s_portMode || expr.empty())
+                return expr;
+
+            auto rewrite = [&](const std::string &name, const std::string &field) {
+                const std::string addr = "&" + name;
+                for (const std::string &qual : {"void", "const void"}) {
+                    const std::string member = "((" + qual + " *)" + name + ")->" + field;
+
+                    replaceAll(expr, "((char *)(" + member + "))",
+                               "((char *)" + addr + ")");
+                    replaceAll(expr, "((char *)(" + member + ")",
+                               "((char *)" + addr);
+                    replaceAll(expr, "((char *)" + member,
+                               "((char *)" + addr);
+                    replaceAll(expr, member, "(int)" + addr);
+                }
+            };
+
+            // STABS exposes these client globals as pointers, but offset-zero
+            // use in the binary is storage-relative. Keep the correction local
+            // to expression emission instead of whole-file preprocessing.
+            rewrite("clc", "state");
+            rewrite("cl", "active");
+            return expr;
+        }
+
         bool typeSupportsNamedMemberAccess(TypeRef ref) const {
             if (ref == NullType)
                 return false;
@@ -7093,6 +7175,23 @@ private:
 
             case IROp::Field: {
                 std::string base = emitExpr(e->kids[0].get());
+                if (s_portMode) {
+                    std::string opaqueBase =
+                        portOpaqueGlobalFieldZeroAddressFromText(base, e->name);
+                    if (!opaqueBase.empty()) {
+                        result = opaqueBase;
+                        break;
+                    }
+                }
+                if (s_portMode && e->kids[0]) {
+                    std::string opaqueBase =
+                        portOpaqueGlobalFieldZeroAddress(e->kids[0].get(), e->name,
+                                                         (int64_t)e->value);
+                    if (!opaqueBase.empty()) {
+                        result = opaqueBase;
+                        break;
+                    }
+                }
                 // If base is literal 0 (NULL or Temp that inlined to "0"), emit as offset constant
                 // Also handle parenthesized zero: "(0)" from sub-expressions
                 {
@@ -8402,6 +8501,9 @@ private:
                 else if (e->op == IROp::Var) result = e->name.empty() ? "0" : e->name;
                 else result = "0";
             }
+
+            if (s_portMode)
+                result = rewritePortOpaqueStorageFieldExpr(result);
 
             if (negate && !result.empty()) {
                 if (result[0] == '!') return result.substr(1);
