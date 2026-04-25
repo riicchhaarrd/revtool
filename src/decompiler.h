@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <functional>
 
@@ -4198,6 +4199,390 @@ private:
             return field ? field->typeRef : NullType;
         }
 
+        bool usableFieldName(const StabsTypeField &field) const {
+            if (field.name.empty()) return false;
+            if (field.name[0] == '!' || field.name[0] == '/' ||
+                field.name[0] == '~' || field.name[0] == '#' || field.name[0] == '$')
+                return false;
+            if (field.name.find("::") != std::string::npos ||
+                field.name.find("(") != std::string::npos ||
+                field.name.find("<") != std::string::npos ||
+                field.name.find("operator") == 0)
+                return false;
+            return field.name != "_";
+        }
+
+        std::string addressableFieldAccess(TypeRef ref, int byteOffset,
+                                           bool scalarAccess = false,
+                                           int depth = 0) const {
+            if (ref == NullType || byteOffset < 0 || depth > 8)
+                return "";
+            auto *t = m_types.resolveType(ref);
+            if (!t || (t->kind != StabsTypeKind::Struct &&
+                       t->kind != StabsTypeKind::Union))
+                return "";
+
+            int bitTarget = byteOffset * 8;
+            for (auto &field : t->fields) {
+                if (!usableFieldName(field)) continue;
+                if (field.bitOffset == bitTarget || field.bitOffset / 8 == byteOffset) {
+                    if (scalarAccess) {
+                        auto *fieldType = m_types.resolveType(field.typeRef);
+                        if (fieldType && (fieldType->kind == StabsTypeKind::Array ||
+                                          fieldType->kind == StabsTypeKind::Struct ||
+                                          fieldType->kind == StabsTypeKind::Union)) {
+                            std::string scalar =
+                                m_types.formatFieldAccess(ref, byteOffset, false, true);
+                            if (!scalar.empty())
+                                return scalar;
+                        }
+                    }
+                    return field.name;
+                }
+            }
+
+            for (auto &field : t->fields) {
+                if (!usableFieldName(field)) continue;
+                int bitSize = m_types.fieldBitSize(field);
+                if (bitSize <= 0 || bitTarget <= field.bitOffset ||
+                    bitTarget >= field.bitOffset + bitSize)
+                    continue;
+
+                int subOffset = byteOffset - (field.bitOffset / 8);
+                auto *rawType = m_types.getType(field.typeRef);
+                auto *resolvedType = m_types.resolveType(field.typeRef);
+
+                if (rawType && rawType->kind == StabsTypeKind::Array) {
+                    auto *elemType = m_types.resolveType(rawType->targetType);
+                    int elemSize = elemType ? elemType->sizeBytes : 0;
+                    if (elemSize <= 0) elemSize = 1;
+                    int idx = subOffset / elemSize;
+                    int elemOffset = subOffset % elemSize;
+                    if (elemOffset == 0)
+                        return field.name + "[" + std::to_string(idx) + "]";
+                    std::string nested =
+                        addressableFieldAccess(rawType->targetType, elemOffset,
+                                               scalarAccess, depth + 1);
+                    if (!nested.empty())
+                        return field.name + "[" + std::to_string(idx) + "]." + nested;
+                    return field.name + "[" + std::to_string(idx) + "]";
+                }
+
+                if (resolvedType && (resolvedType->kind == StabsTypeKind::Struct ||
+                                     resolvedType->kind == StabsTypeKind::Union)) {
+                    std::string nested =
+                        addressableFieldAccess(field.typeRef, subOffset,
+                                               scalarAccess, depth + 1);
+                    if (!nested.empty())
+                        return field.name + "." + nested;
+                }
+            }
+            return "";
+        }
+
+        std::string globalFieldAddressExpr(const std::string &rawName,
+                                           const std::string &emitName,
+                                           int byteOffset) const {
+            if (byteOffset < 0) return "";
+            auto *global = m_types.globalByName(rawName);
+            if (!global || global->typeRef == NullType) return "";
+            if (!global->isStatic || global->sourceFileIdx != m_func.sourceFileIdx)
+                return "";
+            auto *globalType = m_types.resolveType(global->typeRef);
+            if (!globalType || (globalType->kind != StabsTypeKind::Struct &&
+                                globalType->kind != StabsTypeKind::Union))
+                return "";
+
+            bool addressOfArrayElement = false;
+            if (auto *field = m_types.findFieldAtOffset(global->typeRef, byteOffset)) {
+                if (field->bitOffset == byteOffset * 8) {
+                    auto *fieldType = m_types.resolveType(field->typeRef);
+                    addressOfArrayElement =
+                        fieldType && fieldType->kind == StabsTypeKind::Array;
+                }
+            }
+            std::string access =
+                addressableFieldAccess(global->typeRef, byteOffset,
+                                       addressOfArrayElement);
+            if (access.empty()) return "";
+            std::vector<std::string> parts = splitMemberPath(access);
+            if (parts.size() >= 2 &&
+                fieldPathUsesCharArrayStorage(global->typeRef, parts))
+                return "";
+            return "&" + emitName + "." + access;
+        }
+
+        bool globalNameAndOffsetForAddress(uint32_t address, std::string &rawName,
+                                           std::string &emitName, int &byteOffset) const {
+            std::string exact = m_mf.symbolNameAtAddress(address);
+            if (!exact.empty()) {
+                rawName = exact;
+                emitName = cName(exact);
+                byteOffset = 0;
+                return true;
+            }
+
+            std::string nearest = m_mf.nearestSymbolName(address);
+            size_t plus = nearest.find(" + 0x");
+            if (nearest.empty() || plus == std::string::npos ||
+                nearest.front() != '(' || nearest.back() != ')')
+                return false;
+
+            rawName = nearest.substr(1, plus - 1);
+            emitName = cName(rawName);
+            std::string offstr = nearest.substr(plus + 3, nearest.size() - plus - 4);
+            char *end = nullptr;
+            unsigned long off = std::strtoul(offstr.c_str(), &end, 0);
+            if (!end || *end != '\0') return false;
+            byteOffset = (int)off;
+            return true;
+        }
+
+        bool globalNameAndOffsetForAddressExpr(const IRExpr *expr, std::string &rawName,
+                                               std::string &emitName, int &byteOffset,
+                                               int depth = 0) const {
+            if (!expr || depth > 8)
+                return false;
+
+            if (expr->op == IROp::Const)
+                return globalNameAndOffsetForAddress((uint32_t)expr->value,
+                                                     rawName, emitName, byteOffset);
+
+            if (expr->op == IROp::Cast && !expr->kids.empty())
+                return globalNameAndOffsetForAddressExpr(expr->kids[0].get(),
+                                                         rawName, emitName,
+                                                         byteOffset, depth + 1);
+
+            if (expr->op == IROp::Temp) {
+                auto dit = m_tempDef.find(expr->tempId());
+                if (dit != m_tempDef.end() && dit->second &&
+                    (dit->second->op == IROp::AddrOf ||
+                     dit->second->op == IROp::Add ||
+                     dit->second->op == IROp::Sub ||
+                     dit->second->op == IROp::Const))
+                    return globalNameAndOffsetForAddressExpr(dit->second,
+                                                             rawName, emitName,
+                                                             byteOffset, depth + 1);
+                return false;
+            }
+
+            if (expr->op == IROp::Var && !expr->name.empty()) {
+                auto *global = m_types.globalByName(expr->name);
+                if (!global || global->typeRef == NullType)
+                    return false;
+                auto *globalType = m_types.resolveType(global->typeRef);
+                if (!globalType || (globalType->kind != StabsTypeKind::Struct &&
+                                    globalType->kind != StabsTypeKind::Union))
+                    return false;
+                rawName = expr->name;
+                emitName = cName(expr->name);
+                byteOffset = 0;
+                return true;
+            }
+
+            if (expr->op == IROp::AddrOf && !expr->kids.empty()) {
+                const IRExpr *inner = expr->kids[0].get();
+                if (!inner)
+                    return false;
+                if (inner->op == IROp::Field && !inner->kids.empty()) {
+                    if (!globalNameAndOffsetForAddressExpr(inner->kids[0].get(),
+                                                           rawName, emitName,
+                                                           byteOffset, depth + 1))
+                        return false;
+                    byteOffset += (int)inner->value;
+                    return byteOffset >= 0;
+                }
+                return globalNameAndOffsetForAddressExpr(inner, rawName, emitName,
+                                                         byteOffset, depth + 1);
+            }
+
+            if ((expr->op == IROp::Add || expr->op == IROp::Sub) &&
+                expr->kids.size() == 2) {
+                if (expr->kids[0]->isConst() && expr->kids[1]->isConst()) {
+                    int64_t combined = (int64_t)expr->kids[0]->value +
+                        (expr->op == IROp::Sub ? -(int64_t)expr->kids[1]->value
+                                                : (int64_t)expr->kids[1]->value);
+                    if (combined >= 0 && combined <= 0xffffffffll)
+                        return globalNameAndOffsetForAddress((uint32_t)combined,
+                                                             rawName, emitName,
+                                                             byteOffset);
+                    return false;
+                }
+                const IRExpr *base = nullptr;
+                int64_t delta = 0;
+                if (expr->op == IROp::Add) {
+                    if (expr->kids[0]->isConst()) {
+                        base = expr->kids[1].get();
+                        delta = (int64_t)expr->kids[0]->value;
+                    } else if (expr->kids[1]->isConst()) {
+                        base = expr->kids[0].get();
+                        delta = (int64_t)expr->kids[1]->value;
+                    }
+                } else if (expr->kids[1]->isConst()) {
+                    base = expr->kids[0].get();
+                    delta = -(int64_t)expr->kids[1]->value;
+                }
+                if (!base)
+                    return false;
+                if (!globalNameAndOffsetForAddressExpr(base, rawName, emitName,
+                                                       byteOffset, depth + 1))
+                    return false;
+                int64_t combined = (int64_t)byteOffset + delta;
+                if (combined < 0 || combined > 0x7fffffff)
+                    return false;
+                byteOffset = (int)combined;
+                return true;
+            }
+
+            return false;
+        }
+
+        std::string globalFieldLvalueExpr(const std::string &rawGlobalName,
+                                          const std::string &emitGlobalName,
+                                          int byteOffset,
+                                          bool scalarAccess,
+                                          int accessSize = 0) const {
+            if (byteOffset < 0)
+                return "";
+            auto *global = m_types.globalByName(rawGlobalName);
+            if (!global || global->typeRef == NullType) return "";
+            if (!global->isStatic || global->sourceFileIdx != m_func.sourceFileIdx)
+                return "";
+            auto *globalType = m_types.resolveType(global->typeRef);
+            if (!globalType || (globalType->kind != StabsTypeKind::Struct &&
+                                globalType->kind != StabsTypeKind::Union))
+                return "";
+
+            std::string access =
+                addressableFieldAccess(global->typeRef, byteOffset, scalarAccess);
+            if (access.empty()) return "";
+            std::vector<std::string> parts = splitMemberPath(access);
+            if (accessSize != 1 && parts.size() >= 2 &&
+                fieldPathUsesCharArrayStorage(global->typeRef, parts))
+                return "";
+            return emitGlobalName + "." + access;
+        }
+
+        std::string globalFieldLvalueExpr(uint32_t address, bool scalarAccess) const {
+            std::string rawName;
+            std::string emitName;
+            int byteOffset = 0;
+            if (!globalNameAndOffsetForAddress(address, rawName, emitName, byteOffset))
+                return "";
+            return globalFieldLvalueExpr(rawName, emitName, byteOffset, scalarAccess);
+        }
+
+        std::string globalFieldLvalueExpr(const IRExpr *addr, bool scalarAccess,
+                                          int accessSize = 0) const {
+            std::string rawName;
+            std::string emitName;
+            int byteOffset = 0;
+            const IRExpr *fieldExpr = nullptr;
+            if (addr && addr->op == IROp::Field && !addr->kids.empty())
+                fieldExpr = addr;
+            else if (addr && addr->op == IROp::AddrOf && !addr->kids.empty() &&
+                     addr->kids[0]->op == IROp::Field &&
+                     !addr->kids[0]->kids.empty())
+                fieldExpr = addr->kids[0].get();
+            if (addr && addr->op == IROp::Field && !addr->kids.empty()) {
+                if (!globalNameAndOffsetForAddressExpr(addr->kids[0].get(),
+                                                       rawName, emitName,
+                                                       byteOffset))
+                    return "";
+                byteOffset += (int)addr->value;
+                if (byteOffset < 0)
+                    return "";
+            } else if (!globalNameAndOffsetForAddressExpr(addr, rawName, emitName, byteOffset)) {
+                    return "";
+            }
+            std::string lvalue =
+                globalFieldLvalueExpr(rawName, emitName, byteOffset,
+                                      scalarAccess, accessSize);
+            if (fieldExpr && !lvalue.empty()) {
+                TypeRef baseType =
+                    exprType(const_cast<IRExpr *>(fieldExpr->kids[0].get()));
+                bool byteElementAccess =
+                    accessSize == 1 && lvalue.find('[') != std::string::npos;
+                if (!byteElementAccess &&
+                    fieldAccessNeedsRawPointer(baseType, fieldExpr, lvalue))
+                    return "";
+            }
+            return lvalue;
+        }
+
+        static std::vector<std::string> splitMemberPath(const std::string &path) {
+            std::vector<std::string> parts;
+            size_t start = 0;
+            while (start <= path.size()) {
+                size_t dot = path.find('.', start);
+                std::string part = path.substr(start, dot == std::string::npos ?
+                                               std::string::npos : dot - start);
+                size_t bracket = part.find('[');
+                if (bracket != std::string::npos)
+                    part = part.substr(0, bracket);
+                if (!part.empty())
+                    parts.push_back(part);
+                if (dot == std::string::npos)
+                    break;
+                start = dot + 1;
+            }
+            return parts;
+        }
+
+        bool fieldPathOffset(TypeRef ref, const std::vector<std::string> &parts,
+                             size_t index, int &byteOffset) const {
+            if (ref == NullType || index >= parts.size())
+                return index >= parts.size();
+            auto *t = m_types.resolveType(ref);
+            if (!t || (t->kind != StabsTypeKind::Struct &&
+                       t->kind != StabsTypeKind::Union))
+                return false;
+            for (auto &field : t->fields) {
+                if (field.name != parts[index])
+                    continue;
+                byteOffset += field.bitOffset / 8;
+                if (index + 1 == parts.size())
+                    return true;
+                return fieldPathOffset(field.typeRef, parts, index + 1, byteOffset);
+            }
+            return false;
+        }
+
+        bool fieldPathUsesCharArrayStorage(TypeRef ref,
+                                           const std::vector<std::string> &parts,
+                                           size_t index = 0) const {
+            if (ref == NullType || index >= parts.size())
+                return false;
+            auto *t = m_types.resolveType(ref);
+            if (!t || (t->kind != StabsTypeKind::Struct &&
+                       t->kind != StabsTypeKind::Union))
+                return false;
+            for (auto &field : t->fields) {
+                if (field.name != parts[index])
+                    continue;
+                std::string fieldDecl = m_types.formatDecl(field.typeRef, field.name);
+                while (!fieldDecl.empty() && fieldDecl.front() == ' ')
+                    fieldDecl.erase(fieldDecl.begin());
+                if (fieldDecl.compare(0, 6, "const ") == 0)
+                    fieldDecl = fieldDecl.substr(6);
+                if ((fieldDecl.compare(0, 5, "char ") == 0 ||
+                     fieldDecl.compare(0, 5, "byte ") == 0) &&
+                    fieldDecl.find('[') != std::string::npos)
+                    return true;
+                auto *ft = m_types.resolveType(field.typeRef);
+                if (ft && ft->kind == StabsTypeKind::Array) {
+                    auto *elem = m_types.resolveType(ft->targetType);
+                    std::string elemName = m_types.formatType(ft->targetType);
+                    if ((elem && (elem->kind == StabsTypeKind::Char ||
+                                  elem->kind == StabsTypeKind::UChar)) ||
+                        elemName == "char" || elemName == "byte")
+                        return true;
+                }
+                return fieldPathUsesCharArrayStorage(field.typeRef, parts, index + 1);
+            }
+            return false;
+        }
+
         TypeRef tempDefinitionType(int id, int depth = 0) const {
             if (depth > 8) return NullType;
             auto dit = m_tempDef.find(id);
@@ -4286,27 +4671,80 @@ private:
                 int dots = (int)std::count(access.begin(), access.end(), '.');
                 return (access.find('[') != std::string::npos && dots > 0) || dots > 1;
             }
+            auto charArrayField = [&](const StabsTypeField *f) {
+                if (!f || f->typeRef == NullType || f->name.empty())
+                    return false;
+                std::string fieldDecl = m_types.formatDecl(f->typeRef, f->name);
+                while (!fieldDecl.empty() && fieldDecl.front() == ' ')
+                    fieldDecl.erase(fieldDecl.begin());
+                if (fieldDecl.compare(0, 6, "const ") == 0)
+                    fieldDecl = fieldDecl.substr(6);
+                if ((fieldDecl.compare(0, 5, "char ") == 0 ||
+                     fieldDecl.compare(0, 5, "byte ") == 0) &&
+                    fieldDecl.find('[') != std::string::npos)
+                    return true;
+                auto *ft = m_types.resolveType(f->typeRef);
+                if (ft && ft->kind == StabsTypeKind::Array) {
+                    auto *elem = m_types.resolveType(ft->targetType);
+                    std::string elemName = m_types.formatType(ft->targetType);
+                    if ((elem && (elem->kind == StabsTypeKind::Char ||
+                                  elem->kind == StabsTypeKind::UChar)) ||
+                        elemName == "char" || elemName == "byte")
+                        return true;
+                }
+                return false;
+            };
+            if (auto *st = m_types.resolveType(structRef)) {
+                int bitTarget = (int)fieldExpr->value * 8;
+                std::string firstComponent = access;
+                size_t firstDot = firstComponent.find('.');
+                if (firstDot != std::string::npos)
+                    firstComponent = firstComponent.substr(0, firstDot);
+                for (auto &f : st->fields) {
+                    int bitSize = m_types.fieldBitSize(f);
+                    if (bitSize > 0 && bitTarget >= f.bitOffset &&
+                        bitTarget < f.bitOffset + bitSize &&
+                        charArrayField(&f))
+                        return true;
+                    if (bitSize > 0 && bitTarget >= f.bitOffset &&
+                        bitTarget < f.bitOffset + bitSize &&
+                        f.name == firstComponent) {
+                        auto *ft = m_types.resolveType(f.typeRef);
+                        if (ft && (ft->kind == StabsTypeKind::Struct ||
+                                   ft->kind == StabsTypeKind::Union) &&
+                            access.find('.') != std::string::npos &&
+                            m_types.formatStructDef(f.typeRef).empty())
+                            return true;
+                    }
+                }
+            }
+            size_t dot = access.find('.');
+            if (dot != std::string::npos) {
+                std::string first = access.substr(0, dot);
+                std::string second;
+                size_t dot2 = access.find('.', dot + 1);
+                if (dot2 != std::string::npos)
+                    second = access.substr(dot + 1, dot2 - dot - 1);
+                auto fieldByName = [&](const std::string &name) -> const StabsTypeField * {
+                    if (name.empty()) return nullptr;
+                    auto *st = m_types.resolveType(structRef);
+                    if (!st) return nullptr;
+                    for (auto &f : st->fields)
+                        if (f.name == name)
+                            return &f;
+                    return nullptr;
+                };
+                const StabsTypeField *named = fieldByName(first);
+                if (!named && !second.empty())
+                    named = fieldByName(second);
+                if (charArrayField(named))
+                    return true;
+            }
             auto *field = m_types.findFieldAtOffset(structRef, (int)fieldExpr->value);
             if (!field || field->typeRef == NullType || field->name.empty())
                 return false;
-            std::string fieldDecl = m_types.formatDecl(field->typeRef, field->name);
-            while (!fieldDecl.empty() && fieldDecl.front() == ' ')
-                fieldDecl.erase(fieldDecl.begin());
-            if (fieldDecl.compare(0, 6, "const ") == 0)
-                fieldDecl = fieldDecl.substr(6);
-            if ((fieldDecl.compare(0, 5, "char ") == 0 ||
-                 fieldDecl.compare(0, 5, "byte ") == 0) &&
-                fieldDecl.find('[') != std::string::npos)
+            if (charArrayField(field))
                 return true;
-            auto *ft = m_types.resolveType(field->typeRef);
-            if (ft && ft->kind == StabsTypeKind::Array) {
-                auto *elem = m_types.resolveType(ft->targetType);
-                std::string elemName = m_types.formatType(ft->targetType);
-                if ((elem && (elem->kind == StabsTypeKind::Char ||
-                              elem->kind == StabsTypeKind::UChar)) ||
-                    elemName == "char" || elemName == "byte")
-                    return true;
-            }
             return false;
         }
 
@@ -5420,6 +5858,13 @@ private:
                 else if (stmt.storeSize == 2) storeCast = "short";
                 else if (stmt.storeSize == 5) storeCast = "float";
                 else if (stmt.storeSize == 9) storeCast = "double";
+                if (s_portMode) {
+                    std::string field = globalFieldLvalueExpr(a, true, stmt.storeSize);
+                    if (!field.empty()) {
+                        out += pad(indent) + QString::fromStdString(field + " = " + val) + ";\n";
+                        break;
+                    }
+                }
                 // Field expression → base->field = val
                 if (a->op == IROp::Field) {
                     // Check if the Field base is an interior pointer (temp from Add(structPtr, const)).
@@ -6414,9 +6859,18 @@ private:
                             size_t plus = nearest.find(" + 0x");
                             if (plus != std::string::npos &&
                                 nearest.front() == '(' && nearest.back() == ')') {
-                                std::string gname = cName(nearest.substr(1, plus - 1));
+                                std::string rawName = nearest.substr(1, plus - 1);
+                                std::string gname = cName(rawName);
                                 std::string offstr = nearest.substr(plus + 3, nearest.size() - plus - 4);
-                                result = "((char *)&" + gname + " + " + offstr + ")";
+                                char *end = nullptr;
+                                unsigned long off = std::strtoul(offstr.c_str(), &end, 0);
+                                std::string fieldAddr;
+                                if (end && *end == '\0')
+                                    fieldAddr = globalFieldAddressExpr(rawName, gname, (int)off);
+                                if (!fieldAddr.empty())
+                                    result = fieldAddr;
+                                else
+                                    result = "((char *)&" + gname + " + " + offstr + ")";
                                 inlineFormUsed = true;
                             } else {
                                 result = cName(nearest);
@@ -6610,6 +7064,13 @@ private:
                         !innerStr.empty() &&
                         innerStr.find_first_of("()+-*/&[] .") == std::string::npos) {
                         result = "(int)&" + innerStr;
+                        break;
+                    }
+                }
+                if (s_portMode && addr) {
+                    std::string field = globalFieldLvalueExpr(addr, true, e->loadSize);
+                    if (!field.empty()) {
+                        result = field;
                         break;
                     }
                 }
@@ -7157,6 +7618,23 @@ private:
 
             case IROp::AddrOf: {
                 auto *inner = e->kids[0].get();
+                if (s_portMode && inner && inner->op == IROp::Field) {
+                    std::string rawName;
+                    std::string emitName;
+                    int byteOffset = 0;
+                    if (globalNameAndOffsetForAddressExpr(inner, rawName, emitName, byteOffset)) {
+                        std::string fieldAddr =
+                            globalFieldAddressExpr(rawName, emitName, byteOffset);
+                        if (!fieldAddr.empty()) {
+                            TypeRef baseType =
+                                exprType(const_cast<IRExpr *>(inner->kids[0].get()));
+                            if (!fieldAccessNeedsRawPointer(baseType, inner, fieldAddr)) {
+                                result = fieldAddr;
+                                break;
+                            }
+                        }
+                    }
+                }
                 if (inner && inner->op == IROp::Field && !inner->kids.empty()) {
                     // &(base->field_X) where field_X is synthetic = base + offset
                     if (inner->name.find("field_") == 0) {
@@ -7221,6 +7699,13 @@ private:
             }
 
             case IROp::Field: {
+                if (s_portMode) {
+                    std::string field = globalFieldLvalueExpr(e, true, e->loadSize);
+                    if (!field.empty()) {
+                        result = field;
+                        break;
+                    }
+                }
                 std::string base = emitExpr(e->kids[0].get());
                 // If base is literal 0 (NULL or Temp that inlined to "0"), emit as offset constant
                 // Also handle parenthesized zero: "(0)" from sub-expressions
@@ -7391,13 +7876,26 @@ private:
                     TypeRef rawAccessBaseType = declType != NullType ? declType : baseType;
                     bool rawNestedField =
                         fieldAccessNeedsRawPointer(rawAccessBaseType, e, e->name);
+                    int rawNestedOffset = (int)e->value;
+                    if (!rawNestedField && s_portMode &&
+                        rawAccessBaseType != NullType &&
+                        e->name.find('.') != std::string::npos) {
+                        std::vector<std::string> parts = splitMemberPath(e->name);
+                        int pathOff = 0;
+                        if (parts.size() >= 2 &&
+                            fieldPathUsesCharArrayStorage(rawAccessBaseType, parts) &&
+                            fieldPathOffset(rawAccessBaseType, parts, 0, pathOff)) {
+                            rawNestedField = true;
+                            rawNestedOffset = pathOff;
+                        }
+                    }
                     bool rawInvalidMemberBase =
                         s_portMode && e->kids[0] &&
                         (base.find("void *") != std::string::npos ||
                          (!typeSupportsNamedMemberAccess(rawAccessBaseType) &&
                           e->kids[0]->op == IROp::Cast));
                     if (rawNestedField) {
-                        int off = (int)e->value;
+                        int off = rawNestedOffset;
                         char hx[16]; snprintf(hx, sizeof(hx), "0x%X", (unsigned)off);
                         result = std::string("*(") + loadCastType(e->loadSize) + " *)(" +
                             charPtrCast(base, e->kids.empty() ? nullptr : e->kids[0].get()) +
@@ -8915,6 +9413,17 @@ private:
             if (inner.empty()) return "0";
             // Casting 0 to any type is still 0
             if (inner == "0") return "0";
+            if (s_portMode &&
+                (e->castKind == CastKind::ZeroExt8 ||
+                 e->castKind == CastKind::SignExt8 ||
+                 e->castKind == CastKind::Trunc8)) {
+                std::string field = globalFieldLvalueExpr(inner_e, true, 1);
+                if (!field.empty()) {
+                    if (e->castKind == CastKind::SignExt8)
+                        return "(signed char)(" + field + ")";
+                    return "(unsigned char)(" + field + ")";
+                }
+            }
             if (e->castKind == CastKind::FloatToInt &&
                 inner_e->op == IROp::AddrOf && !inner_e->kids.empty()) {
                 IRExpr *target = inner_e->kids[0].get();
@@ -8959,9 +9468,16 @@ private:
             if ((e->castKind == CastKind::ZeroExt8 || e->castKind == CastKind::Trunc8 ||
                  e->castKind == CastKind::ZeroExt16 || e->castKind == CastKind::Trunc16) &&
                 inner_e->op == IROp::Load && !inner_e->kids.empty()) {
+                auto *loadAddr = inner_e->kids[0].get();
+                if (s_portMode && loadAddr) {
+                    bool is8 = (e->castKind == CastKind::ZeroExt8 ||
+                                e->castKind == CastKind::Trunc8);
+                    std::string field = globalFieldLvalueExpr(loadAddr, true, is8 ? 1 : 2);
+                    if (!field.empty())
+                        return field;
+                }
                 // Cosmetic mode: try struct field resolution for the Load address
                 if (s_cosmeticMode) {
-                    auto *loadAddr = inner_e->kids[0].get();
                     if (loadAddr && loadAddr->op == IROp::Add && loadAddr->kids.size() == 2 &&
                         loadAddr->kids[1]->isConst() && loadAddr->kids[1]->value > 0 &&
                         loadAddr->kids[0]->op == IROp::Var) {
