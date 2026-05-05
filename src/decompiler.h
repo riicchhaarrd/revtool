@@ -132,6 +132,19 @@ public:
         std::set<std::string> emittedGlobals;
         std::set<TypeRef> emittedAnonGlobals;
         std::set<std::string> emittedAnonGlobalNames;
+        std::set<std::string> sourceAvailableTypeNames;
+        if (s_portMode) {
+            for (auto &[ref, info] : types.allTypes()) {
+                (void)info;
+                auto *t = types.resolveType(ref);
+                if (!t || t->name.empty())
+                    continue;
+                if (t->kind == StabsTypeKind::Struct ||
+                    t->kind == StabsTypeKind::Union ||
+                    t->kind == StabsTypeKind::Enum)
+                    sourceAvailableTypeNames.insert(t->name);
+            }
+        }
         // Emit globals and build cross-file global map
         std::map<std::string, const StabsGlobalVar*> globalByName;
         bool anyGlobals = false;
@@ -150,7 +163,8 @@ public:
 
             if (s_portMode) {
                 emitAnonymousTypeDefs(out, types, g.typeRef, emittedAnonGlobals,
-                                      emittedAnonGlobalNames);
+                                      emittedAnonGlobalNames,
+                                      sourceAvailableTypeNames);
             }
             out += QString::fromStdString(
                 (g.isStatic ? "static " : "") + decl) + ";\n";
@@ -783,43 +797,30 @@ public:
         if (!fwdDeclared.empty()) out += "\n";
 
         // Emit full type definitions (skip names already in platform typedefs)
+        std::set<std::string> emittedTypeNames(platformNames);
         {
             std::set<TypeRef> emitted;
-            std::set<std::string> emittedNames(platformNames);
             for (auto ref : allTypes)
-                emitTypeDefsRecursive(out, types, ref, emitted, emittedNames);
+                emitTypeDefsRecursive(out, types, ref, emitted, emittedTypeNames);
             if (!emitted.empty()) out += "\n";
         }
         std::set<std::string> emittedAnonGlobalNames;
         if (s_portMode) {
             std::set<TypeRef> emittedAnonGlobals;
-            auto isConstPointerObjectType = [&](TypeRef ref) {
-                bool sawConst = false;
-                for (int depth = 0; ref != NullType && depth < 12; ++depth) {
-                    auto *t = types.getType(ref);
-                    if (!t)
-                        return false;
-                    if (t->kind == StabsTypeKind::Typedef ||
-                        t->kind == StabsTypeKind::Volatile) {
-                        ref = t->targetType;
-                        continue;
-                    }
-                    if (t->kind == StabsTypeKind::Const) {
-                        sawConst = true;
-                        ref = t->targetType;
-                        continue;
-                    }
-                    return sawConst && t->kind == StabsTypeKind::Pointer;
-                }
-                return false;
-            };
             for (auto &g : types.globals()) {
                 if (g.isStatic) continue;
                 if (g.typeRef == NullType) continue;
-                if (!isConstPointerObjectType(g.typeRef)) continue;
-                if (g.name != "cl" && g.name != "clc") continue;
+                if (!types.isConstPointerGlobalType(g.typeRef)) continue;
+                bool hasAddressedGlobal = false;
+                for (auto &other : types.globals()) {
+                    if (other.name == g.name && other.address) {
+                        hasAddressedGlobal = true;
+                        break;
+                    }
+                }
+                if (!hasAddressedGlobal) continue;
                 emitAnonymousTypeDefs(out, types, g.typeRef, emittedAnonGlobals,
-                                      emittedAnonGlobalNames);
+                                      emittedAnonGlobalNames, emittedTypeNames);
             }
         }
 
@@ -2620,7 +2621,8 @@ private:
 
     static void emitAnonymousTypeDefs(QString &out, const StabsTypeTable &types, TypeRef ref,
                                       std::set<TypeRef> &emitted,
-                                      std::set<std::string> &emittedNames) {
+                                      std::set<std::string> &emittedNames,
+                                      const std::set<std::string> &availableTypeNames) {
         if (ref == NullType || emitted.count(ref)) return;
         emitted.insert(ref);
 
@@ -2630,7 +2632,8 @@ private:
             t->kind == StabsTypeKind::Volatile || t->kind == StabsTypeKind::Array ||
             t->kind == StabsTypeKind::Pointer || t->kind == StabsTypeKind::Reference) {
             if (t->targetType != NullType)
-                emitAnonymousTypeDefs(out, types, t->targetType, emitted, emittedNames);
+                emitAnonymousTypeDefs(out, types, t->targetType, emitted,
+                                      emittedNames, availableTypeNames);
             return;
         }
         if ((t->kind != StabsTypeKind::Struct && t->kind != StabsTypeKind::Union) ||
@@ -2640,7 +2643,8 @@ private:
         emittedNames.insert(t->name);
 
         for (auto &f : t->fields)
-            emitAnonymousTypeDefs(out, types, f.typeRef, emitted, emittedNames);
+            emitAnonymousTypeDefs(out, types, f.typeRef, emitted, emittedNames,
+                                  availableTypeNames);
 
         std::string kw = (t->kind == StabsTypeKind::Union) ? "union" : "struct";
         out += QString::fromStdString(kw + " " + t->name + " {\n");
@@ -2650,20 +2654,25 @@ private:
             bool fallbackStorage = false;
             auto *ft = types.resolveType(f.typeRef);
             auto *rawFt = types.getType(f.typeRef);
+            auto aggregateUnavailable = [&](const StabsTypeInfo *agg) {
+                if (!agg || agg->name.empty())
+                    return false;
+                if (agg->name.find("$_") == 0)
+                    return false;
+                return !emittedNames.count(agg->name) &&
+                       !availableTypeNames.count(agg->name);
+            };
             if (ft && (ft->kind == StabsTypeKind::Struct ||
                        ft->kind == StabsTypeKind::Union) &&
-                !ft->name.empty() && types.formatStructDef(f.typeRef).empty())
+                (types.formatStructDef(f.typeRef).empty() ||
+                 aggregateUnavailable(ft)))
                 fallbackStorage = true;
             if (ft && ft->kind == StabsTypeKind::Array) {
                 auto *elem = types.resolveType(ft->targetType);
                 if (elem && (elem->kind == StabsTypeKind::Struct ||
                              elem->kind == StabsTypeKind::Union) &&
-                    !elem->name.empty() &&
-                    types.formatStructDef(ft->targetType).empty())
-                    fallbackStorage = true;
-                if (elem && (elem->kind == StabsTypeKind::Struct ||
-                             elem->kind == StabsTypeKind::Union) &&
-                    f.name == "outPackets")
+                    (types.formatStructDef(ft->targetType).empty() ||
+                     aggregateUnavailable(elem)))
                     fallbackStorage = true;
             }
             if (fallbackStorage && (!rawFt || rawFt->kind != StabsTypeKind::Pointer)) {
@@ -4778,24 +4787,7 @@ private:
         }
 
         bool typeIsConstPointerObject(TypeRef ref) const {
-            bool sawConst = false;
-            for (int depth = 0; ref != NullType && depth < 12; ++depth) {
-                auto *t = m_types.getType(ref);
-                if (!t)
-                    return false;
-                if (t->kind == StabsTypeKind::Typedef ||
-                    t->kind == StabsTypeKind::Volatile) {
-                    ref = t->targetType;
-                    continue;
-                }
-                if (t->kind == StabsTypeKind::Const) {
-                    sawConst = true;
-                    ref = t->targetType;
-                    continue;
-                }
-                return sawConst && t->kind == StabsTypeKind::Pointer;
-            }
-            return false;
+            return m_types.isConstPointerGlobalType(ref);
         }
 
         bool exactConstPointerGlobalAddress(uint32_t address,
@@ -5575,6 +5567,12 @@ private:
                         elemName == "char" || elemName == "byte")
                         return true;
                 }
+                if (index + 1 < parts.size() &&
+                    ft && (ft->kind == StabsTypeKind::Struct ||
+                           ft->kind == StabsTypeKind::Union) &&
+                    (ft->name.empty() || ft->name.find("$_") == 0 ||
+                     m_types.formatStructDef(field.typeRef).empty()))
+                    return true;
                 return fieldPathUsesCharArrayStorage(field.typeRef, parts, index + 1);
             }
             return false;
@@ -5838,7 +5836,8 @@ private:
                         if (ft && (ft->kind == StabsTypeKind::Struct ||
                                    ft->kind == StabsTypeKind::Union) &&
                             access.find('.') != std::string::npos &&
-                            m_types.formatStructDef(f.typeRef).empty())
+                            (ft->name.empty() || ft->name.find("$_") == 0 ||
+                             m_types.formatStructDef(f.typeRef).empty()))
                             return true;
                     }
                 }
@@ -8821,7 +8820,7 @@ private:
                             if (s_portMode && access.find('.') != std::string::npos) {
                                 std::vector<std::string> parts = splitMemberPath(access);
                                 if (parts.size() >= 2 &&
-                                    fieldPathUsesCharArrayStorage(baseType, parts))
+                                    fieldPathUsesCharArrayStorage(structRef, parts))
                                     access.clear();
                             }
                             // Check if the resolved field makes sense for this access:

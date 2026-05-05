@@ -175,22 +175,41 @@ public:
                t->kind == StabsTypeKind::Void;
     }
 
+    bool isConstPointerGlobalType(TypeRef ref) const {
+        bool sawConst = false;
+        for (int depth = 0; ref != NullType && depth < 12; ++depth) {
+            auto *t = getType(ref);
+            if (!t)
+                return false;
+            if (t->kind == StabsTypeKind::Typedef ||
+                t->kind == StabsTypeKind::Volatile) {
+                ref = t->targetType;
+                continue;
+            }
+            if (t->kind == StabsTypeKind::Const) {
+                sawConst = true;
+                ref = t->targetType;
+                continue;
+            }
+            return sawConst && t->kind == StabsTypeKind::Pointer;
+        }
+        return false;
+    }
+
     // Register a global/static variable
     void addGlobal(const std::string &name, uint32_t addr, TypeRef type, bool isStatic, int srcIdx = -1) {
         TypeRef useType = type;
-        if (name == "cl" || name == "clc") {
-            if (addr && isWeakGlobalType(useType)) {
-                for (auto &g : m_globals) {
-                    if (g.name == name && !isWeakGlobalType(g.typeRef)) {
-                        useType = g.typeRef;
-                        break;
-                    }
+        if (addr && isWeakGlobalType(useType)) {
+            for (auto &g : m_globals) {
+                if (g.name == name && isConstPointerGlobalType(g.typeRef)) {
+                    useType = g.typeRef;
+                    break;
                 }
-            } else if (!addr && !isWeakGlobalType(useType)) {
-                for (auto &g : m_globals) {
-                    if (g.name == name && g.address && isWeakGlobalType(g.typeRef))
-                        g.typeRef = useType;
-                }
+            }
+        } else if (!addr && isConstPointerGlobalType(useType)) {
+            for (auto &g : m_globals) {
+                if (g.name == name && g.address && isWeakGlobalType(g.typeRef))
+                    g.typeRef = useType;
             }
         }
         m_globals.push_back({name, addr, useType, isStatic, srcIdx >= 0 ? srcIdx : m_unit});
@@ -848,9 +867,16 @@ public:
 
     const StabsGlobalVar* globalByName(const std::string &name, int cuIdx = -1) const {
         const StabsGlobalVar *best = nullptr;
+        bool hasConstPointerCandidate = false;
+        for (auto &g : m_globals) {
+            if (g.name == name && isConstPointerGlobalType(g.typeRef)) {
+                hasConstPointerCandidate = true;
+                break;
+            }
+        }
         for (auto &g : m_globals) {
             if (g.name != name) continue;
-            if (name != "cl" && name != "clc") {
+            if (!hasConstPointerCandidate) {
                 if (cuIdx >= 0 && g.sourceFileIdx == cuIdx && g.typeRef != NullType)
                     return &g;
                 if (!best || (best->typeRef == NullType && g.typeRef != NullType))
