@@ -59,7 +59,6 @@ public:
 
     static bool isKnownVariadicFunction(const std::string &name) {
         static const std::set<std::string> variadics = {
-            "Cbuf_AddText",
             "CG_Printf",
             "Com_BuildPlayerProfilePath",
             "Com_BuildPlayerProfilePathForPlayer",
