@@ -3332,6 +3332,52 @@ private:
                         for (auto &a : stmt.args) scanVars(a.get());
                     }
             }
+            auto localPointerToArrayElementType =
+                [&](TypeRef ref) -> TypeRef {
+                    auto *ptr = ref != NullType ? m_types.resolveType(ref) : nullptr;
+                    if (!ptr || ptr->kind != StabsTypeKind::Pointer)
+                        return NullType;
+                    auto *pointee = m_types.resolveType(ptr->targetType);
+                    if (!pointee || pointee->kind != StabsTypeKind::Array)
+                        return NullType;
+                    return pointee->targetType;
+                };
+            auto localUsedAsScalarArrayBase =
+                [&](const std::string &name) -> bool {
+                    std::function<bool(const IRExpr *)> scan =
+                        [&](const IRExpr *e) -> bool {
+                            if (!e)
+                                return false;
+                            if (e->op == IROp::Load && e->loadSize <= 4 &&
+                                !e->kids.empty()) {
+                                IRExpr *arrayBase = nullptr;
+                                IRExpr *indexExpr = nullptr;
+                                if (localArrayAddressIndex(
+                                        const_cast<IRExpr *>(e->kids[0].get()),
+                                        e->loadSize, arrayBase, indexExpr) &&
+                                    arrayBase) {
+                                    if (arrayBase->op == IROp::Var &&
+                                        arrayBase->name == name)
+                                        return true;
+                                    if (arrayBase->op == IROp::Temp &&
+                                        tempName(arrayBase->tempId()) == name)
+                                        return true;
+                                }
+                            }
+                            for (auto &k : e->kids)
+                                if (scan(k.get())) return true;
+                            return false;
+                        };
+                    for (auto &bb2 : m_func.blocks) {
+                        for (auto &s2 : bb2.stmts) {
+                            if (scan(s2.expr.get()) || scan(s2.addr.get()))
+                                return true;
+                            for (auto &a : s2.args)
+                                if (scan(a.get())) return true;
+                        }
+                    }
+                    return false;
+                };
             for (auto &l : m_func.locals) {
                 if (l.name.empty() || declared.count(l.name) || paramNames.count(l.name)) continue;
                 // Skip unused locals in port mode — dead declaration.
@@ -3351,6 +3397,11 @@ private:
                     if (s_portMode && decl.find("void *") == 0 &&
                         decl.find('*', 6) == std::string::npos)
                         decl = "int *" + l.name;
+                    if (s_portMode) {
+                        TypeRef elemType = localPointerToArrayElementType(l.typeRef);
+                        if (elemType != NullType && localUsedAsScalarArrayBase(l.name))
+                            decl = m_types.formatType(elemType) + " *" + l.name;
+                    }
                     // In port mode, replace struct/union by-value locals with int
                     // unless dataflow analysis says the local is genuinely used as
                     // a struct (`.field` or `&local.field` access, no scalar
@@ -3699,8 +3750,8 @@ private:
                 }
             }
 
-            auto tempHasScalarWordEvidence =
-                [&](int id, const std::string &tname) -> bool {
+            auto tempGroupFor =
+                [&](int id) {
                     std::set<int> groupTemps = {id};
                     auto vit = m_func.tempToVar.find(id);
                     if (vit != m_func.tempToVar.end()) {
@@ -3708,6 +3759,165 @@ private:
                         for (auto &[t2, v2] : m_func.tempToVar)
                             if (v2 == vid) groupTemps.insert(t2);
                     }
+                    return groupTemps;
+                };
+
+            auto exprUsesTempGroup =
+                [&](const IRExpr *expr, const std::set<int> &groupTemps) -> bool {
+                    std::function<bool(const IRExpr *)> scan =
+                        [&](const IRExpr *e) -> bool {
+                            if (!e)
+                                return false;
+                            if (e->op == IROp::Temp && groupTemps.count(e->tempId()))
+                                return true;
+                            for (auto &k : e->kids)
+                                if (scan(k.get())) return true;
+                            return false;
+                        };
+                    return scan(expr);
+                };
+
+            auto isScalarBitwiseRoot =
+                [&](const IRExpr *expr) -> bool {
+                    if (!expr)
+                        return false;
+                    return expr->op == IROp::Not ||
+                           expr->op == IROp::And || expr->op == IROp::Or ||
+                           expr->op == IROp::Xor || expr->op == IROp::Shl ||
+                           expr->op == IROp::Shr || expr->op == IROp::Sar;
+                };
+
+            auto tempGroupUsedInScalarBitwise =
+                [&](const std::set<int> &groupTemps) -> bool {
+                    bool found = false;
+                    std::function<void(const IRExpr *)> scan =
+                        [&](const IRExpr *e) {
+                            if (!e || found)
+                                return;
+                            if (isScalarBitwiseRoot(e) && exprUsesTempGroup(e, groupTemps)) {
+                                found = true;
+                                return;
+                            }
+                            for (auto &k : e->kids)
+                                scan(k.get());
+                        };
+                    for (auto &bb2 : m_func.blocks) {
+                        if (found) break;
+                        for (auto &s2 : bb2.stmts) {
+                            if (s2.kind == IRStmtKind::Assign &&
+                                groupTemps.count(s2.destTemp) &&
+                                isScalarBitwiseRoot(s2.expr.get())) {
+                                found = true;
+                                break;
+                            }
+                            scan(s2.expr.get());
+                            scan(s2.addr.get());
+                            for (auto &a : s2.args)
+                                scan(a.get());
+                            if (found) break;
+                        }
+                    }
+                    return found;
+                };
+
+            auto tempGroupUsedAsScalarArrayBase =
+                [&](const std::set<int> &groupTemps) -> bool {
+                    std::function<bool(const IRExpr *)> isGroupBase =
+                        [&](const IRExpr *e) -> bool {
+                            if (!e)
+                                return false;
+                            const IRExpr *node = stripCastsForAddress(e);
+                            if (!node)
+                                return false;
+                            if (node->op == IROp::Temp &&
+                                groupTemps.count(node->tempId()))
+                                return true;
+                            if (node->op == IROp::Add && node->kids.size() == 2) {
+                                for (int side = 0; side < 2; ++side) {
+                                    const IRExpr *kid =
+                                        stripCastsForAddress(node->kids[side].get());
+                                    if (kid && kid->op == IROp::Temp &&
+                                        groupTemps.count(kid->tempId()))
+                                        return true;
+                                }
+                            }
+                            return false;
+                        };
+                    std::function<bool(const IRExpr *)> scan =
+                        [&](const IRExpr *e) -> bool {
+                            if (!e)
+                                return false;
+                            if (e->op == IROp::Load && e->loadSize <= 4 &&
+                                !e->kids.empty()) {
+                                IRExpr *arrayBase = nullptr;
+                                IRExpr *indexExpr = nullptr;
+                                if (localArrayAddressIndex(
+                                        const_cast<IRExpr *>(e->kids[0].get()),
+                                        e->loadSize, arrayBase, indexExpr) &&
+                                    arrayBase && arrayBase->op == IROp::Temp &&
+                                    groupTemps.count(arrayBase->tempId()))
+                                    return true;
+                                if (isGroupBase(e->kids[0].get()))
+                                    return true;
+                            }
+                            for (auto &k : e->kids)
+                                if (scan(k.get())) return true;
+                            return false;
+                        };
+                    for (auto &bb2 : m_func.blocks) {
+                        for (auto &s2 : bb2.stmts) {
+                            if (scan(s2.expr.get()) || scan(s2.addr.get()))
+                                return true;
+                            for (auto &a : s2.args)
+                                if (scan(a.get())) return true;
+                        }
+                    }
+                    return false;
+                };
+
+            auto pointerToArrayElementType =
+                [&](TypeRef ref) -> TypeRef {
+                    auto *ptr = ref != NullType ? m_types.resolveType(ref) : nullptr;
+                    if (!ptr || ptr->kind != StabsTypeKind::Pointer)
+                        return NullType;
+                    auto *pointee = m_types.resolveType(ptr->targetType);
+                    if (!pointee || pointee->kind != StabsTypeKind::Array)
+                        return NullType;
+                    return pointee->targetType;
+                };
+
+            auto arrayElementPointerTypeName =
+                [&](std::string typeName) -> std::string {
+                    while (!typeName.empty() &&
+                           std::isspace((unsigned char)typeName.back()))
+                        typeName.pop_back();
+                    if (typeName.compare(0, 6, "const ") == 0)
+                        typeName = typeName.substr(6);
+                    if (typeName.compare(0, 9, "volatile ") == 0)
+                        typeName = typeName.substr(9);
+                    size_t star = typeName.find(" *");
+                    if (star == std::string::npos)
+                        return "";
+                    std::string base = typeName.substr(0, star);
+                    while (!base.empty() &&
+                           std::isspace((unsigned char)base.back()))
+                        base.pop_back();
+                    for (auto &[ref, ti] : m_types.allTypes()) {
+                        if (ti.name != base)
+                            continue;
+                        auto *rt = m_types.resolveType(ref);
+                        if (!rt || rt->kind != StabsTypeKind::Array)
+                            continue;
+                        std::string elem = m_types.formatType(rt->targetType);
+                        if (!elem.empty())
+                            return elem + " *";
+                    }
+                    return "";
+                };
+
+            auto tempHasScalarWordEvidence =
+                [&](int id, const std::string &tname) -> bool {
+                    std::set<int> groupTemps = tempGroupFor(id);
                     bool found = false;
                     std::function<bool(const IRExpr *, int)> isScalarWordValue =
                         [&](const IRExpr *e, int depth) -> bool {
@@ -3776,6 +3986,12 @@ private:
                     if (typeName.find('*') != std::string::npos &&
                         localAssignedOnlyScalars(tname))
                         return "int";
+                    if (typeName.find('*') != std::string::npos &&
+                        tempGroupUsedAsScalarArrayBase(tempGroupFor(id))) {
+                        std::string elemPtr = arrayElementPointerTypeName(typeName);
+                        if (!elemPtr.empty())
+                            typeName = elemPtr;
+                    }
                     if (typeName == "void *")
                         typeName = "int *";
                     if (typeName == "union" || typeName == "struct" ||
@@ -3801,6 +4017,7 @@ private:
                         if (declaredVarIds.count(vit->second)) continue;
                         declaredVarIds.insert(vit->second);
                     }
+                    std::set<int> groupTemps = tempGroupFor(id);
                     if (declared.count(tname) || paramNames.count(tname)) continue;
                     // Use coalesced var type, then tempTypes, then inferred
                     std::string ttype;
@@ -3817,6 +4034,10 @@ private:
                         // Array types decay to pointers when assigned to temps
                         if (rt && rt->kind == StabsTypeKind::Array)
                             ttype = m_types.formatType(rt->targetType) + " *";
+                        else if (TypeRef elemType = pointerToArrayElementType(resolvedType);
+                                 elemType != NullType &&
+                                 tempGroupUsedAsScalarArrayBase(groupTemps))
+                            ttype = m_types.formatType(elemType) + " *";
                         // Union/struct by value for a temp → use int
                         // (temps should never hold struct values; the type is from inference leakage)
                         else if (rt && (rt->kind == StabsTypeKind::Union ||
@@ -3851,16 +4072,9 @@ private:
                         ttype = "int *";
                     // If type is a pointer but the temp is used in multiplication,
                     // it's actually a scalar value (not a pointer)
-                    if (ttype.find("*") != std::string::npos && ttype.find("const") == std::string::npos) {
-                        // Collect all temps in this coalesced group
-                        std::set<int> groupTemps;
-                        if (vit != m_func.tempToVar.end()) {
-                            int vid = vit->second;
-                            for (auto &[t2, v2] : m_func.tempToVar)
-                                if (v2 == vid) groupTemps.insert(t2);
-                        }
-                        groupTemps.insert(id);
+                    if (ttype.find("*") != std::string::npos) {
                         bool usedInMul = false;
+                        bool usedInScalarBitwise = tempGroupUsedInScalarBitwise(groupTemps);
                         std::function<bool(const IRExpr*, int)> hasMulChild;
                         hasMulChild = [&](const IRExpr *e, int depth) -> bool {
                             if (!e || depth > 5) return false;
@@ -3931,10 +4145,14 @@ private:
                                 }
                             }
                         }
-                        if (usedInMul && !groupHasPointerDef) {
-                            size_t star = ttype.find(" *");
-                            if (star != std::string::npos)
-                                ttype = ttype.substr(0, star);
+                        if ((usedInMul || usedInScalarBitwise) && !groupHasPointerDef) {
+                            if (usedInScalarBitwise) {
+                                ttype = "int";
+                            } else {
+                                size_t star = ttype.find(" *");
+                                if (star != std::string::npos)
+                                    ttype = ttype.substr(0, star);
+                            }
                         }
                     }
                     // Override to struct pointer if temp is used with -> field access
@@ -8891,6 +9109,8 @@ private:
                         out += pad(indent) + "return 0;\n";
                     else
                         out += pad(indent) + "return;\n";
+                } else if (s_portMode && stmt.intrinsicName == "asm") {
+                    out += pad(indent) + "/* " + QString::fromStdString(text) + " */\n";
                 } else {
                     out += pad(indent) + QString::fromStdString(text) + ";\n";
                 }
@@ -9030,14 +9250,14 @@ private:
                 // constant is being used as a raw address — showing it as a
                 // float literal would emit `*(int *)(-2022.18f)` which the C
                 // compiler rejects ("cannot convert to a pointer type").
-                if (m_addrDepth == 0)
+                if (m_addrDepth == 0 && m_scalarDepth == 0)
                     result = tryFloatConst((uint32_t)e->value);
                 // Check for FourCC constants (4 printable ASCII bytes)
                 if (result.empty()) result = tryFourCC((uint32_t)e->value);
                 // Try to resolve large constants as global variable/function addresses
                 bool inlineFormUsed = false;
                 bool constPointerGlobalValue = false;
-                if (result.empty() && e->value > 0x10000) {
+                if (result.empty() && m_scalarDepth == 0 && e->value > 0x10000) {
                     std::string sym = m_mf.symbolNameAtAddress((uint32_t)e->value);
                     if (!sym.empty()) {
                         result = cName(sym);
@@ -9315,7 +9535,17 @@ private:
                     IRExpr *indexExpr = nullptr;
                     if (localArrayAddressIndex(addr, e->loadSize, arrayBase, indexExpr)) {
                         markIndexTemps(indexExpr);
-                        result = emitExpr(arrayBase) + "[" + emitExpr(indexExpr) + "]";
+                        std::string baseStr = emitExpr(arrayBase);
+                        std::string indexStr = emitExpr(indexExpr);
+                        TypeRef baseType = exprType(arrayBase);
+                        auto *basePtr = baseType != NullType ?
+                            m_types.resolveType(baseType) : nullptr;
+                        auto *pointee = (basePtr && basePtr->kind == StabsTypeKind::Pointer) ?
+                            m_types.resolveType(basePtr->targetType) : nullptr;
+                        if (pointee && pointee->kind == StabsTypeKind::Array)
+                            result = "(*" + baseStr + ")[" + indexStr + "]";
+                        else
+                            result = baseStr + "[" + indexStr + "]";
                         break;
                     }
                 }
@@ -9406,6 +9636,7 @@ private:
                         // For pointer-to-struct with size != 4, base[idx] strides by sizeof(struct)
                         // which is wrong — fall through to *(int*)((char*)base + idx*4).
                         bool okToSubscript = true;
+                        bool pointerToArraySubscript = false;
                         TypeRef bty = s_cosmeticMode ? safeExprType(arrBase) : exprType(arrBase);
                         if (bty != NullType) {
                             auto *bti = m_types.resolveType(bty);
@@ -9418,6 +9649,8 @@ private:
                                             tgt->kind == StabsTypeKind::Union ||
                                             tgt->kind == StabsTypeKind::ForwardRef))
                                     okToSubscript = false;
+                                else if (tgt && tgt->kind == StabsTypeKind::Array)
+                                    pointerToArraySubscript = true;
                                 else if (tgt && tgt->sizeBytes > 0 && tgt->sizeBytes != 4 &&
                                          tgt->kind != StabsTypeKind::Array)
                                     okToSubscript = false;
@@ -9442,6 +9675,8 @@ private:
                             if (arrBase->op == IROp::Const) {
                                 std::string ct = loadCastType(e->loadSize);
                                 result = "((" + ct + " *)" + bs + ")[" + is + "]";
+                            } else if (pointerToArraySubscript) {
+                                result = "(*" + bs + ")[" + is + "]";
                             } else {
                                 result = bs + "[" + is + "]";
                             }
@@ -10268,6 +10503,8 @@ private:
                 // Simplify ~~x → x
                 if (e->kids[0] && e->kids[0]->op == IROp::Not && !e->kids[0]->kids.empty())
                     result = emitExpr(e->kids[0]->kids[0].get(), negate);
+                else if (s_portMode)
+                    result = "~(int)(" + emitExpr(e->kids[0].get()) + ")";
                 else
                     result = "~" + emitExpr(e->kids[0].get());
                 break;
@@ -10303,7 +10540,10 @@ private:
                     if (folded) {
                         // Don't show folded value as float if inside an address
                         // expression — `*(int *)(-2022.18f)` is invalid C.
-                        if (m_addrDepth == 0)
+                        if (m_addrDepth == 0 && m_scalarDepth == 0 &&
+                            e->op != IROp::And && e->op != IROp::Or &&
+                            e->op != IROp::Xor && e->op != IROp::Shl &&
+                            e->op != IROp::Shr && e->op != IROp::Sar)
                             result = tryFloatConst((uint32_t)r);
                         if (result.empty()) result = std::to_string(r);
                         break;
