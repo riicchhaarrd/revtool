@@ -4730,12 +4730,12 @@ private:
         TypeRef aggregateObjectType(const std::string &printed, const IRExpr *expr) {
             TypeRef ref = NullType;
             if (expr) {
+                std::string strippedPrinted = stripOuterParens(printed);
                 if (expr->op == IROp::Temp) {
                     if (m_pointerTemps.count(expr->tempId()) ||
                         m_func.pointerTemps.count(expr->tempId()) ||
                         m_tempStructPtr.count(expr->tempId()))
                         return NullType;
-                    std::string strippedPrinted = stripOuterParens(printed);
                     if (!strippedPrinted.empty() &&
                         strippedPrinted.find_first_of("()+-*/[] .") != std::string::npos)
                         return NullType;
@@ -4749,6 +4749,9 @@ private:
                         }
                     }
                 }
+                if (expr->op == IROp::Var && !strippedPrinted.empty() &&
+                    strippedPrinted.find_first_of("()+-*/[] .") != std::string::npos)
+                    return NullType;
                 bool objectLikeExpr =
                     expr->op == IROp::Var || expr->op == IROp::Temp ||
                     expr->op == IROp::Field || expr->op == IROp::Load;
@@ -4775,9 +4778,80 @@ private:
 
         std::string aggregateFirstWord(const std::string &value) const {
             std::string stripped = stripOuterParens(value);
+            std::string base = stripped;
+            if (!base.empty() && base[0] == '&')
+                base = stripOuterParens(base.substr(1));
+            if (!base.empty() &&
+                base.find_first_of("()+-*/&[] .") == std::string::npos) {
+                auto *global = m_types.globalByName(base);
+                TypeRef ref = global ? global->typeRef : NullType;
+                auto *t = ref != NullType ? m_types.resolveType(ref) : nullptr;
+                if (t && (t->kind == StabsTypeKind::Struct ||
+                          t->kind == StabsTypeKind::Union)) {
+                    std::string field0 = addressableFieldAccess(ref, 0, true);
+                    if (!field0.empty())
+                        return base + "." + field0;
+                }
+            }
             if (!stripped.empty() && stripped[0] == '&')
                 return "*(int *)(" + stripped + ")";
             return "*(int *)(&" + value + ")";
+        }
+
+        std::string scalarAddressedFirstFieldValue(const std::string &value) const {
+            std::string stripped = stripOuterParens(value);
+            const char *casts[] = {"(int)", "(unsigned)"};
+            for (const char *cast : casts) {
+                std::string prefix(cast);
+                if (stripped.rfind(prefix, 0) == 0) {
+                    stripped = stripOuterParens(stripped.substr(prefix.size()));
+                    break;
+                }
+            }
+            if (stripped.empty() || stripped[0] != '&')
+                return "";
+            std::string target = stripOuterParens(stripped.substr(1));
+            size_t dot = target.find('.');
+            if (dot == 0)
+                return "";
+            std::string base = dot == std::string::npos ? target : target.substr(0, dot);
+            if (base.find_first_of("()+-*/&[] ") != std::string::npos)
+                return "";
+            auto *global = m_types.globalByName(base);
+            TypeRef ref = global ? global->typeRef : NullType;
+            auto *t = ref != NullType ? m_types.resolveType(ref) : nullptr;
+            if (!t || (t->kind != StabsTypeKind::Struct &&
+                       t->kind != StabsTypeKind::Union))
+                return "";
+            std::string field0 = addressableFieldAccess(ref, 0, true);
+            if (!field0.empty() && dot == std::string::npos)
+                return base + "." + field0;
+            if (!field0.empty() && target == base + "." + field0)
+                return target;
+            return "";
+        }
+
+        std::string scalarAggregatePointerLoadValue(const std::string &value) const {
+            std::string stripped = stripOuterParens(value);
+            const char *prefixes[] = {"*(int *)(&", "*(int*)(&"};
+            std::string name;
+            for (const char *prefix : prefixes) {
+                std::string p(prefix);
+                if (stripped.rfind(p, 0) == 0 && stripped.size() > p.size() &&
+                    stripped.back() == ')') {
+                    name = stripped.substr(p.size(), stripped.size() - p.size() - 1);
+                    break;
+                }
+            }
+            if (name.empty() || name.find_first_of("()+-*/&[] .") != std::string::npos)
+                return "";
+            auto *global = m_types.globalByName(name);
+            TypeRef ref = global ? global->typeRef : NullType;
+            auto *t = ref != NullType ? m_types.resolveType(ref) : nullptr;
+            if (!t || (t->kind != StabsTypeKind::Struct &&
+                       t->kind != StabsTypeKind::Union))
+                return "";
+            return aggregateFirstWord(name);
         }
 
         bool scalarPackFieldType(TypeRef ref) const {
@@ -6898,6 +6972,7 @@ private:
         std::set<int>         m_inliningTemps;    // cycle guard for temp inlining in emitExpr
         bool                  m_emittedRetVoid = true; // true if function signature says void
         int                   m_addrDepth = 0;     // >0 when emitting Load/Store address sub-exprs
+        int                   m_scalarDepth = 0;   // >0 when emitting operands for integer scalar ops
         std::set<int>         m_loadAddrTemps;    // temps used in Load address expressions
         std::set<int>         m_indexTemps;       // temps emitted as array subscripts
         std::set<std::string> m_indexVars;        // locals emitted as array subscripts
@@ -7838,10 +7913,8 @@ private:
                                    rt->kind == StabsTypeKind::Union) &&
                             rt->sizeBytes > 0) {
                             // 4-byte store: the original asm stored the first
-                            // word of the struct.  `*(int *)&val` reads the
-                            // first int from the struct's storage — same bytes
-                            // regardless of struct size.
-                            val = "*(int *)(&" + val + ")";
+                            // word of the struct.
+                            val = aggregateFirstWord(val);
                         }
                     }
                 }
@@ -8638,7 +8711,8 @@ private:
                             }
                             if (valIsAggregate)
                                 out += pad(indent) + QString::fromStdString(
-                                    "*(int *)(&" + cNameOrKeep(dest) + ") = *(int *)(&" + val + ")") + ";\n";
+                                    "*(int *)(&" + cNameOrKeep(dest) + ") = " +
+                                    aggregateFirstWord(val)) + ";\n";
                             else
                                 out += pad(indent) + QString::fromStdString(
                                     "*(int *)(&" + cNameOrKeep(dest) + ") = (int)" + val) + ";\n";
@@ -8690,7 +8764,7 @@ private:
                     }
                     if (srcIsStruct)
                         out += pad(indent) + QString::fromStdString(
-                            cNameOrKeep(dest) + " = *(int *)(&" + val + ")") + ";\n";
+                            cNameOrKeep(dest) + " = " + aggregateFirstWord(val)) + ";\n";
                     else {
                         // Also check: is the DEST a struct/union global?
                         // If so, use *(int*)(&dest) = val instead of dest = val
@@ -8729,6 +8803,31 @@ private:
                         else
                             out += pad(indent) + "return;\n";
                     } else {
+                        if (s_portMode && stmt.expr) {
+                            bool scalarReturn = true;
+                            if (m_func.returnType != NullType) {
+                                auto *rt = m_types.resolveType(m_func.returnType);
+                                if (rt) {
+                                    switch (rt->kind) {
+                                    case StabsTypeKind::Void:
+                                    case StabsTypeKind::Pointer:
+                                    case StabsTypeKind::Reference:
+                                    case StabsTypeKind::Struct:
+                                    case StabsTypeKind::Union:
+                                    case StabsTypeKind::Array:
+                                    case StabsTypeKind::Function:
+                                    case StabsTypeKind::ForwardRef:
+                                        scalarReturn = false;
+                                        break;
+                                    default:
+                                        break;
+                                    }
+                                }
+                            }
+                            if (scalarReturn &&
+                                aggregateObjectType(val, stmt.expr.get()) != NullType)
+                                val = aggregateFirstWord(val);
+                        }
                         // If the function returns a small (≤4 byte) struct/union
                         // by value and the expression is a scalar primitive
                         // (Temp/Var/Const), cast via a compound literal.  Skip
@@ -9180,6 +9279,12 @@ private:
                     std::string innerStr = emitExpr(inner);
                     TypeRef innerType = aggregateObjectType(innerStr, inner);
                     auto *it = innerType != NullType ? m_types.resolveType(innerType) : nullptr;
+                    if (it && (it->kind == StabsTypeKind::Struct ||
+                               it->kind == StabsTypeKind::Union) &&
+                        (e->loadSize == 4 || e->loadSize == 0)) {
+                        result = aggregateFirstWord(innerStr);
+                        break;
+                    }
                     if (it && it->kind == StabsTypeKind::Array &&
                         !innerStr.empty() &&
                         innerStr.find_first_of("()+-*/&[] .") == std::string::npos) {
@@ -9761,7 +9866,13 @@ private:
                     if (isPtr)
                         result = std::string("*(") + lct + " *)(" + addrStr + ")";
                     else if (isAggregate) {
-                        if (!addrStr.empty() && addrStr[0] == '&')
+                        std::string firstWord =
+                            (e->loadSize == 4 || e->loadSize == 0)
+                                ? aggregateFirstWord(addrStr)
+                                : "";
+                        if (!firstWord.empty() && firstWord.find("*(int *)") != 0) {
+                            result = firstWord;
+                        } else if (!addrStr.empty() && addrStr[0] == '&')
                             result = std::string("*(") + lct + " *)(" + addrStr + ")";
                         else
                             result = std::string("*(") + lct + " *)(&" + addrStr + ")";
@@ -10307,10 +10418,24 @@ private:
                     }
                     return s;
                 };
-                auto emitChild = [&](IRExpr *child) -> std::string {
+                auto emitChildValue = [&](IRExpr *child) -> std::string {
                     auto [mb, mf] = evalMul(child);
                     if (mb && mf > 1) return "(" + emitScalar(mb) + " * " + std::to_string(mf) + ")";
                     return emitScalar(child);
+                };
+                auto emitChild = [&](IRExpr *child) -> std::string {
+                    bool scalarChild =
+                        e->op == IROp::And || e->op == IROp::Or ||
+                        e->op == IROp::Xor || e->op == IROp::Shl ||
+                        e->op == IROp::Shr || e->op == IROp::Sar;
+                    if (!scalarChild)
+                        return emitChildValue(child);
+                    struct ScalarGuard {
+                        int &d;
+                        ScalarGuard(int &d) : d(d) { d++; }
+                        ~ScalarGuard() { d--; }
+                    } _sg(m_scalarDepth);
+                    return emitChildValue(child);
                 };
                 std::string lhs = emitChild(e->kids[0].get());
                 // (base + const) in expression context → &base->field_XX (pointer base)
@@ -10383,14 +10508,19 @@ private:
                             result = "&" + lhs + "->" + fname;
                             handledStructAdd = true;
                         } else if (isStruct && !skipStructField) {
-                            if (!access.empty()) {
+                            if (m_scalarDepth > 0) {
+                                result = "(" + aggregateFirstWord(lhs) + " + " + std::to_string(off) + ")";
+                            } else if (!access.empty()) {
                                 result = "&" + lhs + "." + access;
                             } else {
                                 result = "((char *)&" + lhs + " + " + std::to_string(off) + ")";
                             }
                             handledStructAdd = true;
                         } else if (!aggregateAddr.empty()) {
-                            result = "((char *)" + aggregateAddr + " + " + std::to_string(off) + ")";
+                            if (m_scalarDepth > 0)
+                                result = "(" + aggregateFirstWord(lhs) + " + " + std::to_string(off) + ")";
+                            else
+                                result = "((char *)" + aggregateAddr + " + " + std::to_string(off) + ")";
                             handledStructAdd = true;
                         }
                         if (handledStructAdd)
@@ -10412,6 +10542,14 @@ private:
                     auto [rb, rf] = evalMul(e->kids[1].get());
                     if (rb && rf > 1)
                         rhs = "(" + emitExpr(rb) + " * " + std::to_string(rf) + ")";
+                }
+                if (s_portMode) {
+                    std::string scalar = scalarAddressedFirstFieldValue(lhs);
+                    if (!scalar.empty())
+                        lhs = scalar;
+                    scalar = scalarAddressedFirstFieldValue(rhs);
+                    if (!scalar.empty())
+                        rhs = scalar;
                 }
                 // Wrap struct/union operands — can't use aggregates in arithmetic
                 {
@@ -10436,6 +10574,14 @@ private:
                     };
                     wrapAggregate(lhs, e->kids[0].get());
                     wrapAggregate(rhs, e->kids[1].get());
+                    if (s_portMode) {
+                        std::string scalar = scalarAddressedFirstFieldValue(lhs);
+                        if (!scalar.empty())
+                            lhs = scalar;
+                        scalar = scalarAddressedFirstFieldValue(rhs);
+                        if (!scalar.empty())
+                            rhs = scalar;
+                    }
                 }
                 // String-level dead-code simplifications
                 if (lhs == "0" && rhs == "0" && e->op == IROp::Sub) { result = "0"; break; }
@@ -10666,6 +10812,10 @@ private:
                     // cast to (char*) to prevent pointer arithmetic scaling.
                     // Returns 0=no cast, 1=has & already, 2=struct/union/array (needs &)
                     auto needsCast = [&](const std::string &s, IRExpr *kid) -> int {
+                        std::string stripped = stripOuterParens(s);
+                        if (stripped.find('.') != std::string::npos ||
+                            stripped.find('[') != std::string::npos)
+                            return 0;
                         if (!s.empty() && s[0] == '&') return 1;
                         if (!s.empty() && s[0] == '(' && s.size() > 1 && s[1] == '&') return 1;
                         if (aggregateObjectType(s, kid) != NullType) return 2;
@@ -11250,6 +11400,12 @@ private:
                 if (e->op == IROp::Temp) result = tempName(e->tempId());
                 else if (e->op == IROp::Var) result = e->name.empty() ? "0" : e->name;
                 else result = "0";
+            }
+
+            if (s_portMode) {
+                std::string scalar = scalarAggregatePointerLoadValue(result);
+                if (!scalar.empty())
+                    result = scalar;
             }
 
             if (negate && !result.empty()) {
