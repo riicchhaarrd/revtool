@@ -57,6 +57,30 @@ public:
         return guard;
     }
 
+    static bool isKnownVariadicFunction(const std::string &name) {
+        static const std::set<std::string> variadics = {
+            "Cbuf_AddText",
+            "CG_Printf",
+            "Com_BuildPlayerProfilePath",
+            "Com_BuildPlayerProfilePathForPlayer",
+            "Com_DPrintf",
+            "Com_Error",
+            "Com_Printf",
+            "Com_ScriptError",
+            "Com_ScriptWarning",
+            "Com_sprintf",
+            "G_Printf",
+            "NET_OutOfBandPrint",
+            "Scr_Error",
+            "Scr_ParamError",
+            "SV_SendServerCommand",
+            "Sys_Error",
+            "dprintf",
+            "va",
+        };
+        return variadics.count(name) != 0;
+    }
+
     // Decompile a single function
     static QString decompile(const MachOFile &mf, uint32_t funcAddr, bool format = true) {
         Lifter lifter(mf);
@@ -287,13 +311,7 @@ public:
                     }
                 }
                 // Detect variadic functions: format string param followed by args
-                static const std::set<std::string> variadicFuncs = {
-                    "Com_Printf", "Com_DPrintf", "Com_Error", "Com_sprintf",
-                    "va", "Cbuf_AddText", "dprintf", "Sys_Error",
-                    "Scr_Error", "Scr_ParamError", "CG_Printf", "SV_SendServerCommand",
-                    "NET_OutOfBandPrint", "MSG_WriteString"
-                };
-                if (variadicFuncs.count(calleeName)) {
+                if (isKnownVariadicFunction(calleeName)) {
                     if (proto.back() != '(' && !callee->params.empty())
                         proto += ", ...";
                     else
@@ -1065,8 +1083,13 @@ public:
                 continue;
             protoDeclared.insert(cname);
             out += QString::fromStdString(retStr + " " + cname + "(");
+            bool variadic = isKnownVariadicFunction(fn.name) ||
+                            isKnownVariadicFunction(cname);
             if (fn.params.empty()) {
-                out += "void";
+                if (variadic)
+                    out += "...";
+                else
+                    out += "void";
             } else {
                 bool paramOk = true;
                 QString params;
@@ -1083,16 +1106,9 @@ public:
                 }
                 if (!paramOk) continue;
                 out += params;
+                if (variadic)
+                    out += ", ...";
             }
-            // Add variadic markers for known variadic functions
-            static const std::set<std::string> variadicProtos = {
-                "Com_Printf", "Com_DPrintf", "Com_Error", "Com_sprintf",
-                "va", "Cbuf_AddText", "Sys_Error", "CG_Printf", "G_Printf",
-                "Scr_Error", "Scr_ParamError", "SV_SendServerCommand",
-                "NET_OutOfBandPrint"
-            };
-            if (variadicProtos.count(fn.name))
-                out += ", ...";
             out += ");\n";
         }
 
@@ -11119,13 +11135,7 @@ private:
                     const StabsFunction *calledFn2 = m_mf.stabsFunctionByName(e->name);
                     if (calledFn2 && !calledFn2->params.empty() &&
                         calledFn2->params.size() < argCount) {
-                        // Check it's not a variadic function
-                        static const std::set<std::string> variadics = {
-                            "Com_Printf", "Com_Error", "Com_DPrintf", "Com_sprintf",
-                            "va", "Sys_Error", "CG_Printf", "G_Printf",
-                            "Scr_Error", "Scr_ParamError"
-                        };
-                        if (!variadics.count(e->name))
+                        if (!Decompiler::isKnownVariadicFunction(e->name))
                             argCount = calledFn2->params.size();
                     }
                     int builtinLimit = builtinFunctionArgLimit(e->name);
@@ -11136,12 +11146,7 @@ private:
                     size_t protoArgCount = argCount;
                     if (s_portMode && calledFn2 && !calledFn2->params.empty() &&
                         calledFn2->params.size() > argCount) {
-                        static const std::set<std::string> variadics2 = {
-                            "Com_Printf", "Com_Error", "Com_DPrintf", "Com_sprintf",
-                            "va", "Sys_Error", "CG_Printf", "G_Printf",
-                            "Scr_Error", "Scr_ParamError"
-                        };
-                        if (!variadics2.count(e->name))
+                        if (!Decompiler::isKnownVariadicFunction(e->name))
                             protoArgCount = calledFn2->params.size();
                     }
                     result = funcName + "(";
