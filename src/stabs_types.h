@@ -6,6 +6,7 @@
 #include <map>
 #include <unordered_map>
 #include <algorithm>
+#include <functional>
 
 // ── STABS type system parser ─────────────────────────────────────────
 // Parses STABS debug type encoding strings into structured type info.
@@ -918,73 +919,72 @@ public:
         std::string out = kw;
         if (!t->name.empty()) out += " " + t->name;
         out += " {\n";
-        for (auto &f : t->fields) {
-            if (f.name.empty() || f.name[0] == '/') continue; // skip C++ visibility markers
-            // Skip C++ method stubs and inheritance specs
-            if (f.name.find("::") != std::string::npos) continue;
-            if (f.name.find("(") != std::string::npos) continue;
-            if (f.name[0] == '!' || f.name[0] == '#' || f.name[0] == '$') continue;
-            if (f.name[0] == '~') continue; // destructor
-            if (f.name.find("_vptr$") != std::string::npos) continue;
-            if (f.name.find("operator") == 0) continue; // operator overloads
-            // Skip names with C++ template or reference artifacts
-            if (f.name.find("<") != std::string::npos) continue;
-            if (f.name.find("&") != std::string::npos) continue;
-            if (f.name.find(">") != std::string::npos) continue;
-            // Skip names with STABS type encoding artifacts
-            if (f.name.find("=") != std::string::npos) continue;
-            // Skip fields with no size (C++ static members, vtable pointers)
-            if (f.bitSize == 0 && f.bitOffset == 0) continue;
-            // Skip C++ vtable pointers (_vptr$ClassName)
-            if (f.name.find("_vptr$") != std::string::npos) continue;
-            // Handle anonymous struct/union fields (names like $_NNNN)
-            auto *ft = resolveType(f.typeRef);
+        auto skipField = [](const StabsTypeField &f) -> bool {
+            if (f.name.empty() || f.name[0] == '/') return true;
+            if (f.name.find("::") != std::string::npos) return true;
+            if (f.name.find("(") != std::string::npos) return true;
+            if (f.name[0] == '!' || f.name[0] == '#' || f.name[0] == '$') return true;
+            if (f.name[0] == '~') return true;
+            if (f.name.find("_vptr$") != std::string::npos) return true;
+            if (f.name.find("operator") == 0) return true;
+            if (f.name.find("<") != std::string::npos) return true;
+            if (f.name.find("&") != std::string::npos) return true;
+            if (f.name.find(">") != std::string::npos) return true;
+            if (f.name.find("=") != std::string::npos) return true;
+            return f.bitSize == 0 && f.bitOffset == 0;
+        };
+        auto inlineAnonymousType = [&](TypeRef typeRef) -> const StabsTypeInfo * {
+            auto *ft = resolveType(typeRef);
             bool isAnon = false;
             if (ft && (ft->kind == StabsTypeKind::Struct || ft->kind == StabsTypeKind::Union))
                 isAnon = ft->name.find("$_") == 0;
-            // Also check the unresolved type name
             if (!isAnon) {
-                auto *rawT = getType(f.typeRef);
-                if (rawT && rawT->kind == StabsTypeKind::ForwardRef && rawT->forwardTag.find("$_") == 0)
+                auto *rawT = getType(typeRef);
+                if (rawT && rawT->kind == StabsTypeKind::ForwardRef &&
+                    rawT->forwardTag.find("$_") == 0)
                     isAnon = true;
-                if (rawT && (rawT->kind == StabsTypeKind::Struct || rawT->kind == StabsTypeKind::Union) &&
+                if (rawT && (rawT->kind == StabsTypeKind::Struct ||
+                             rawT->kind == StabsTypeKind::Union) &&
                     rawT->name.find("$_") == 0)
                     isAnon = true;
             }
-            if (isAnon && ft && !ft->fields.empty() && ft->sizeBytes > 0) {
-                // Inline the anonymous struct body
-                std::string kw2 = (ft->kind == StabsTypeKind::Union) ? "union" : "struct";
-                out += "    " + kw2 + " {\n";
-                for (auto &sf : ft->fields) {
-                    if (sf.name.empty() || sf.name[0] == '/' || sf.name[0] == '!') continue;
-                    if (sf.name.find("::") != std::string::npos) continue;
-                    if (sf.bitSize == 0 && sf.bitOffset == 0) continue;
-                    std::string sfdecl = formatDecl(sf.typeRef, sf.name);
-                    if (sfdecl.find("(*)()") != std::string::npos) continue;
-                    out += "        " + sfdecl + ";\n";
+            if (isAnon && ft && !ft->fields.empty() && ft->sizeBytes > 0)
+                return ft;
+            return nullptr;
+        };
+        std::function<void(const StabsTypeField &, const std::string &)> emitField =
+            [&](const StabsTypeField &f, const std::string &indent) {
+                if (skipField(f))
+                    return;
+                if (auto *anon = inlineAnonymousType(f.typeRef)) {
+                    std::string kw2 = (anon->kind == StabsTypeKind::Union) ? "union" : "struct";
+                    out += indent + kw2 + " {\n";
+                    for (auto &sf : anon->fields)
+                        emitField(sf, indent + "    ");
+                    out += indent + "} " + f.name + ";\n";
+                    return;
                 }
-                out += "    } " + f.name + ";\n";
-            } else if (isAnon) {
-                // Anonymous struct with unknown body — emit as char[size] padding
-                int sz = 4;
-                if (ft && ft->sizeBytes > 0) sz = ft->sizeBytes;
-                else {
+                auto *rawT = getType(f.typeRef);
+                if (rawT && rawT->kind == StabsTypeKind::ForwardRef &&
+                    rawT->forwardTag.find("$_") == 0) {
+                    int sz = 4;
                     int fBitSz = fieldBitSize(f);
-                    if (fBitSz > 0) sz = fBitSz / 8;
+                    if (fBitSz > 0)
+                        sz = fBitSz / 8;
+                    out += indent + "char " + f.name + "[" + std::to_string(sz) + "];\n";
+                    return;
                 }
-                out += "    char " + f.name + "[" + std::to_string(sz) + "];\n";
-            } else {
-                if (t->name == "fileHandleData_t" &&
-                    f.name == "handleFiles") {
-                    out += "    FILE * handleFiles;\n";
-                    continue;
+                if (t->name == "fileHandleData_t" && f.name == "handleFiles") {
+                    out += indent + "FILE * handleFiles;\n";
+                    return;
                 }
                 std::string fdecl = formatDecl(f.typeRef, f.name);
-                // Skip fields with invalid C syntax (function pointer pointers etc.)
-                if (fdecl.find("(*)()") != std::string::npos) continue;
-                out += "    " + fdecl + ";\n";
-            }
-        }
+                if (fdecl.find("(*)()") != std::string::npos)
+                    return;
+                out += indent + fdecl + ";\n";
+            };
+        for (auto &f : t->fields)
+            emitField(f, "    ");
         out += "}";
         return out;
     }

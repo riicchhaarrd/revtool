@@ -339,7 +339,34 @@ public:
                 continue;
             std::string retStr = fn.returnType != NullType ?
                 types.formatType(fn.returnType) : "int";
-            out += QString::fromStdString("static " + retStr + " " + cname + "();\n");
+            std::string proto = "static " + retStr + " " + cname + "(";
+            if (fn.params.empty()) {
+                proto += "void";
+            } else {
+                for (size_t p = 0; p < fn.params.size(); ++p) {
+                    if (p)
+                        proto += ", ";
+                    auto &par = fn.params[p];
+                    if (par.typeRef != NullType) {
+                        if (!par.name.empty())
+                            proto += types.formatDecl(par.typeRef, par.name);
+                        else
+                            proto += types.formatType(par.typeRef);
+                    } else {
+                        proto += "int";
+                        if (!par.name.empty())
+                            proto += " " + par.name;
+                    }
+                }
+            }
+            if (isKnownVariadicFunction(fn.name)) {
+                if (!fn.params.empty())
+                    proto += ", ...";
+                else
+                    proto = "static " + retStr + " " + cname + "(...";
+            }
+            proto += ");\n";
+            out += QString::fromStdString(proto);
         }
         out += "\n";
 
@@ -603,6 +630,10 @@ public:
         if (s_portMode) {
             out.replace("const dvar_t *", "dvar_t *");
             out.replace("const struct dvar_s *", "struct dvar_s *");
+            out.replace("*(int *)(&0)", "0");
+            out.replace("*(int *)(&-1337)", "-1337");
+            out.replace(QRegularExpression(R"(&0(?![A-Za-z0-9_]))"), "&(int){0}");
+            out.replace(QRegularExpression(R"(&-1337(?![A-Za-z0-9_]))"), "&(int){-1337}");
             // Strip "const" from "this" parameters — constructors modify through them
             {
                 std::string s = out.toStdString();
@@ -2945,6 +2976,69 @@ private:
             // Check if all field types compile without undefined types.
             // Emit structs with unknown field types as offset-based int arrays.
             {
+                auto isInlineAnonymousAggregate = [](const StabsTypeInfo *ft) -> bool {
+                    return ft &&
+                           (ft->kind == StabsTypeKind::Struct ||
+                            ft->kind == StabsTypeKind::Union) &&
+                           ft->name.find("$_") == 0 &&
+                           !ft->fields.empty() &&
+                           ft->sizeBytes > 0;
+                };
+                std::function<bool(TypeRef, const std::string &, int)> fieldTypeOk =
+                    [&](TypeRef fieldRef, const std::string &ownerName, int depth) -> bool {
+                        if (fieldRef == NullType || depth > 8)
+                            return false;
+                        auto *ft = types.resolveType(fieldRef);
+                        if (!ft)
+                            return false;
+                        auto *rawFt = types.getType(fieldRef);
+                        if (rawFt && rawFt->kind == StabsTypeKind::Pointer)
+                            return true;
+                        if (ft->kind <= StabsTypeKind::LongDouble)
+                            return true;
+                        if (ft->kind == StabsTypeKind::Struct ||
+                            ft->kind == StabsTypeKind::Union) {
+                            if (isInlineAnonymousAggregate(ft)) {
+                                for (auto &sf : ft->fields) {
+                                    if (sf.bitSize == 0 && sf.bitOffset == 0)
+                                        continue;
+                                    if (sf.name.empty() || sf.name[0] == '/' ||
+                                        sf.name[0] == '!' || sf.name[0] == '#' ||
+                                        sf.name[0] == '$' || sf.name[0] == '~')
+                                        continue;
+                                    if (sf.name.find("::") != std::string::npos ||
+                                        sf.name.find("(") != std::string::npos ||
+                                        sf.name.find("<") != std::string::npos)
+                                        continue;
+                                    if (!fieldTypeOk(sf.typeRef, ownerName, depth + 1))
+                                        return false;
+                                }
+                                return true;
+                            }
+                            return !ft->name.empty() &&
+                                   (emittedNames.count(ft->name) ||
+                                    ft->name == ownerName);
+                        }
+                        if (ft->kind == StabsTypeKind::Enum)
+                            return !ft->name.empty() && emittedNames.count(ft->name);
+                        if (ft->kind == StabsTypeKind::Array) {
+                            auto *elem = types.resolveType(ft->targetType);
+                            if (!elem)
+                                return false;
+                            if (elem->kind <= StabsTypeKind::LongDouble)
+                                return true;
+                            if (elem->kind == StabsTypeKind::Array)
+                                return fieldTypeOk(ft->targetType, ownerName, depth + 1);
+                            if (elem->kind == StabsTypeKind::Struct ||
+                                elem->kind == StabsTypeKind::Union)
+                                return !elem->name.empty() &&
+                                       emittedNames.count(elem->name);
+                            return elem->kind == StabsTypeKind::Enum &&
+                                   !elem->name.empty() &&
+                                   emittedNames.count(elem->name);
+                        }
+                        return false;
+                    };
                 bool allFieldsOk = true;
                 for (auto &f : t->fields) {
                     if (f.bitSize == 0 && f.bitOffset == 0) continue;
@@ -2956,31 +3050,8 @@ private:
                     // Check that the field's type resolves to something we've defined
                     auto *ft = types.resolveType(f.typeRef);
                     if (!ft) { allFieldsOk = false; break; }
-                    // Pointer to anything is fine (forward-declared structs ok)
-                    auto *rawFt = types.getType(f.typeRef);
-                    if (rawFt && rawFt->kind == StabsTypeKind::Pointer) continue;
-                    // Primitives are always fine
-                    if (ft->kind <= StabsTypeKind::LongDouble) continue;
-                    // Struct/union by value — must be already emitted
-                    if (ft->kind == StabsTypeKind::Struct || ft->kind == StabsTypeKind::Union) {
-                        if (!ft->name.empty() && !emittedNames.count(ft->name) &&
-                            ft->name != t->name) {
-                            allFieldsOk = false; break;
-                        }
-                    }
-                    // Enum — must be already emitted
-                    if (ft->kind == StabsTypeKind::Enum) {
-                        if (!ft->name.empty() && !emittedNames.count(ft->name)) {
-                            allFieldsOk = false; break;
-                        }
-                    }
-                    // Array — check element type
-                    if (ft->kind == StabsTypeKind::Array) {
-                        auto *elem = types.resolveType(ft->targetType);
-                        if (!elem || (elem->kind == StabsTypeKind::Struct &&
-                            !emittedNames.count(elem->name))) {
-                            allFieldsOk = false; break;
-                        }
+                    if (!fieldTypeOk(f.typeRef, t->name, 0)) {
+                        allFieldsOk = false; break;
                     }
                 }
                 if (!allFieldsOk) {
@@ -3112,6 +3183,7 @@ private:
 
         QString generate(StructNode *root) {
             QString out;
+            m_declaredAggregateVars.clear();
 
             // Function signature
             std::string retType = "int";
@@ -3624,8 +3696,9 @@ private:
                         }
                     }
                 }
+                bool scalarOnlyLocal = s_portMode && localAssignedOnlyScalars(l.name);
                 if (s_portMode && decl.find('*') != std::string::npos &&
-                    localAssignedOnlyScalars(l.name))
+                    scalarOnlyLocal)
                     decl = "int " + l.name;
                 if (s_portMode && m_indexVars.count(l.name))
                     decl = "int " + l.name;
@@ -3666,6 +3739,20 @@ private:
                         }
                     if (!usedAsSubscript)
                         decl = "char *" + l.name;
+                }
+                if (s_portMode) {
+                    TypeRef aggregateDecl = localAggregateTypeFromCallUse(l.name);
+                    if (aggregateDecl == NullType)
+                        aggregateDecl = l.typeRef;
+                    auto *adt = aggregateDecl != NullType ?
+                        m_types.resolveType(aggregateDecl) : nullptr;
+                    if (adt && (adt->kind == StabsTypeKind::Struct ||
+                                adt->kind == StabsTypeKind::Union)) {
+                        std::string typeName = m_types.formatType(aggregateDecl);
+                        if (decl.rfind(typeName + " ", 0) == 0 &&
+                            decl.find('*') == std::string::npos)
+                            m_declaredAggregateVars[l.name] = aggregateDecl;
+                    }
                 }
                 out += "    " + QString::fromStdString(decl) + ";\n";
             }
@@ -4872,6 +4959,7 @@ private:
         std::set<int>         m_pointerTemps;   // temps used as pointers (dereference targets)
         std::set<std::string> m_pointerVars;   // var NAMES used as pointers
         std::map<int, TypeRef> m_tempStructPtr;   // temp → struct pointer type (from Field access)
+        std::map<std::string, TypeRef> m_declaredAggregateVars;
         mutable std::set<int> m_resolvingTempTypes; // cycle guard for temp type inference
         mutable std::map<int, TypeRef> m_tempDefinitionTypeCache;
         std::set<int>         m_resolvingInferTempTypes;
@@ -8056,6 +8144,7 @@ private:
                 // C statement `int v = union_val` is rejected without a cast.
                 if (s_portMode && stmt.expr) {
                     TypeRef rhsType = NullType;
+                    bool rhsIsAggregateCall = false;
                     if (stmt.expr->op == IROp::Var && !stmt.expr->name.empty()) {
                         rhsType = stmt.expr->typeRef;
                         if (rhsType == NullType) {
@@ -8069,16 +8158,28 @@ private:
                         }
                     } else if (stmt.expr->op == IROp::Temp) {
                         rhsType = m_func.tempType((int)stmt.expr->value);
+                    } else if (stmt.expr->op == IROp::Call && !stmt.expr->name.empty()) {
+                        auto *cf = m_mf.stabsFunctionByName(stmt.expr->name);
+                        if (cf && cf->returnType != NullType) {
+                            rhsType = cf->returnType;
+                            rhsIsAggregateCall = true;
+                        }
                     }
                     if (rhsType != NullType) {
                         auto *rt = m_types.resolveType(rhsType);
                         if (rt && (rt->kind == StabsTypeKind::Struct ||
                                    rt->kind == StabsTypeKind::Union) &&
-                            rt->sizeBytes > 0 && rt->sizeBytes <= 4 &&
-                            rhs.find('.') == std::string::npos &&
-                            rhs.find('[') == std::string::npos &&
-                            rhs.find('*') == std::string::npos) {
-                            rhs = "*(int *)(&" + rhs + ")";
+                            rt->sizeBytes > 0 && rt->sizeBytes <= 4) {
+                            if (rhsIsAggregateCall) {
+                                std::string field0 =
+                                    m_types.formatFieldAccess(rhsType, 0, false, true);
+                                if (!field0.empty())
+                                    rhs = "(" + rhs + ")." + field0;
+                            } else if (rhs.find('.') == std::string::npos &&
+                                       rhs.find('[') == std::string::npos &&
+                                       rhs.find('*') == std::string::npos) {
+                                rhs = "*(int *)(&" + rhs + ")";
+                            }
                         }
                     }
                 }
@@ -11596,6 +11697,29 @@ private:
                             arg = emitExpr(e->kids[i].get());
                         else
                             arg = "0";
+                        auto bareIdentifierType = [&](const std::string &name,
+                                                       bool includeGeneratedAggregates) -> TypeRef {
+                            if (name.empty())
+                                return NullType;
+                            if (!std::isalpha((unsigned char)name[0]) && name[0] != '_')
+                                return NullType;
+                            for (char c : name) {
+                                if (!std::isalnum((unsigned char)c) && c != '_')
+                                    return NullType;
+                            }
+                            for (auto &p : m_func.params)
+                                if (p.name == name && p.typeRef != NullType)
+                                    return p.typeRef;
+                            for (auto &l : m_func.locals)
+                                if (l.name == name && l.typeRef != NullType)
+                                    return l.typeRef;
+                            if (includeGeneratedAggregates) {
+                                auto it = m_declaredAggregateVars.find(name);
+                                if (it != m_declaredAggregateVars.end())
+                                    return it->second;
+                            }
+                            return NullType;
+                        };
                         if (i < argCount) {
                             bool expectsBytePointer = false;
                             if (calledFn2 && i < calledFn2->params.size())
@@ -11615,6 +11739,15 @@ private:
                                 if (!fieldArg.empty())
                                     arg = fieldArg;
                             }
+                        }
+                        if (s_portMode && i < argCount &&
+                            (e->name == "strcmp" || e->name == "strlen")) {
+                            TypeRef argRef = bareIdentifierType(arg, false);
+                            auto *argType = m_types.resolveType(argRef);
+                            if (argType && argType->kind == StabsTypeKind::Union &&
+                                argType->name == "DvarValue" &&
+                                arg.find(".string") == std::string::npos)
+                                arg += ".string";
                         }
                         // Prepend `&` when passing a struct-by-value global/var as
                         // a pointer argument.  The binary takes the address
@@ -11656,9 +11789,18 @@ private:
                                           (pt->kind == StabsTypeKind::Struct &&
                                            pt->sizeBytes > 0 && pt->sizeBytes <= 4))) {
                                     std::string ptype = m_types.formatType(par.typeRef);
+                                    bool alreadyTypedAggregate = false;
+                                    if (i < argCount && e->kids[i]) {
+                                        TypeRef argRef = bareIdentifierType(arg, true);
+                                        auto *argType = m_types.resolveType(argRef);
+                                        if (argType && argType->kind == pt->kind &&
+                                            !argType->name.empty() && argType->name == pt->name)
+                                            alreadyTypedAggregate = true;
+                                    }
                                     // Skip C++ template types and complex names
                                     if (ptype.find('<') == std::string::npos &&
                                         ptype.find("std::") == std::string::npos &&
+                                        !alreadyTypedAggregate &&
                                         arg.find(ptype) == std::string::npos &&
                                         arg.find("union ") != 0 && arg.find("struct ") != 0)
                                         arg = "*(" + ptype + " *)&(int){" + arg + "}";
