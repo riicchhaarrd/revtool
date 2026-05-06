@@ -827,25 +827,82 @@ public:
         // Emit extern declarations for globals
         std::set<std::string> globalDeclared;
         std::set<std::string> staticGlobalNames;
+        std::map<std::string, std::set<uint32_t>> nonStaticAddrs;
         if (s_portMode) {
-            for (auto &g : types.globals())
-                if (g.isStatic && !g.name.empty())
+            for (auto &g : types.globals()) {
+                if (!g.isStatic && !g.name.empty() && g.address)
+                    nonStaticAddrs[g.name].insert(g.address);
+            }
+            for (auto &g : types.globals()) {
+                if (!g.isStatic || g.name.empty())
+                    continue;
+                auto it = nonStaticAddrs.find(g.name);
+                if (g.address &&
+                    (it == nonStaticAddrs.end() || it->second.count(g.address)))
                     staticGlobalNames.insert(g.name);
+            }
         }
-        // Build best-type map: prefer non-int, non-null types for each global name
+        auto unrelatedGlobalStructType = [&](const std::string &name,
+                                             TypeRef ref) {
+            if (ref == NullType || name.size() < 5)
+                return false;
+            auto *t = types.resolveType(ref);
+            if (!t || (t->kind != StabsTypeKind::Struct &&
+                       t->kind != StabsTypeKind::Union) ||
+                t->name.empty() || t->name.find("$_") == 0)
+                return false;
+            std::string tn = t->name;
+            std::string gn = name;
+            for (auto &c : tn) c = (char)tolower((unsigned char)c);
+            for (auto &c : gn) c = (char)tolower((unsigned char)c);
+            if (tn.size() > 2 && tn.substr(tn.size() - 2) == "_t")
+                tn = tn.substr(0, tn.size() - 2);
+            bool related = gn.find(tn) != std::string::npos ||
+                           tn.find(gn) != std::string::npos;
+            if (!related && tn.size() >= 4)
+                related = gn.find(tn.substr(0, 4)) != std::string::npos;
+            return !related;
+        };
+        auto globalTypeScore = [&](const StabsGlobalVar &g) {
+            int score = 0;
+            if (g.address) score += 100;
+            if (g.typeRef == NullType) return g.address ? 5 : 0;
+            score += 10;
+            auto *t = types.resolveType(g.typeRef);
+            if (!t) return score;
+            if (types.isConstPointerGlobalType(g.typeRef))
+                score += 40;
+            if (t->kind == StabsTypeKind::Int ||
+                t->kind == StabsTypeKind::UInt ||
+                t->kind == StabsTypeKind::Void)
+                return score;
+            return score + 120;
+        };
+        // Build best-type map: prefer addressed globals and avoid unrelated
+        // struct tags from stale/cross-CU STABS entries.
         std::map<std::string, TypeRef> bestGlobalType;
+        std::map<std::string, int> bestGlobalScore;
         for (auto &g : types.globals()) {
             if (g.name.empty()) continue;
-            if (s_portMode && (g.isStatic || staticGlobalNames.count(g.name))) continue;
+            if (s_portMode &&
+                ((g.isStatic && !nonStaticAddrs.count(g.name)) ||
+                 staticGlobalNames.count(g.name)))
+                continue;
             auto it = bestGlobalType.find(g.name);
+            int score = globalTypeScore(g);
+            TypeRef candidateType = g.typeRef;
+            if (candidateType != NullType && !types.resolveType(candidateType))
+                candidateType = NullType;
+            if (unrelatedGlobalStructType(g.name, candidateType))
+                candidateType = NullType;
+            if (candidateType == NullType && g.typeRef != NullType)
+                score = g.address ? 5 : 0;
             if (it == bestGlobalType.end()) {
-                bestGlobalType[g.name] = g.typeRef;
-            } else if (g.typeRef != NullType) {
-                auto *oldT = it->second != NullType ? types.getType(it->second) : nullptr;
-                auto *newT = types.getType(g.typeRef);
-                bool oldBasic = !oldT || oldT->kind == StabsTypeKind::Int || oldT->kind == StabsTypeKind::UInt;
-                bool newBasic = !newT || newT->kind == StabsTypeKind::Int || newT->kind == StabsTypeKind::UInt;
-                if (oldBasic && !newBasic) it->second = g.typeRef;
+                bestGlobalType[g.name] = candidateType;
+                bestGlobalScore[g.name] = score;
+            } else if (score > bestGlobalScore[g.name]) {
+                it->second = candidateType;
+                bestGlobalScore[g.name] = score;
             }
         }
         for (auto &g : types.globals()) {
@@ -2821,6 +2878,18 @@ private:
                         int byteOff = f.bitOffset / 8;
                         int byteSize = f.bitSize / 8;
                         if (byteSize <= 0) byteSize = 4;
+                        if (t->name == "fileHandleData_t" &&
+                            f.name == "handleFiles") {
+                            if (byteOff > prevEnd) {
+                                int pad = byteOff - prevEnd;
+                                char pname[32];
+                                snprintf(pname, sizeof(pname), "    char _pad_%X[%d];\n", prevEnd, pad);
+                                out += pname;
+                            }
+                            out += "    FILE * handleFiles;\n";
+                            prevEnd = byteOff + byteSize;
+                            continue;
+                        }
                         // Add padding if needed
                         if (byteOff > prevEnd) {
                             int pad = byteOff - prevEnd;
@@ -2909,6 +2978,9 @@ private:
             // (cross-block inlining is unsafe because the defining expr's context may differ)
             forceDeclCrossBlockTemps();
             buildCosmeticTypeMap();
+            m_tempDefinitionTypeCache.clear();
+            m_inferTempTypeCache.clear();
+            m_isFloatExprCache.clear();
         }
 
         QString generate(StructNode *root) {
@@ -2992,6 +3064,79 @@ private:
                         scanLoadsEarly(stmt.addr.get());
                         for (auto &a : stmt.args) scanLoadsEarly(a.get());
                     }
+            }
+
+            {
+                auto markAddressIndexUses = [&](const IRExpr *addr, int accessSize) {
+                    std::function<void(const IRExpr *)> scanAddr =
+                        [&](const IRExpr *node) {
+                            if (!node)
+                                return;
+                            IRExpr *arrayBase = nullptr;
+                            IRExpr *indexExpr = nullptr;
+                            if (localArrayAddressIndex(const_cast<IRExpr *>(node),
+                                                       accessSize,
+                                                       arrayBase,
+                                                       indexExpr))
+                                markIndexTemps(indexExpr);
+                            if (node->op == IROp::Add && node->kids.size() == 2) {
+                                for (int side = 0; side < 2; ++side) {
+                                    const IRExpr *base = stripCastsForAddress(
+                                        node->kids[side].get());
+                                    const IRExpr *idx = node->kids[1 - side].get();
+                                    if (!base || !idx || idx->isConst())
+                                        continue;
+                                    if (base->op == IROp::AddrOf &&
+                                        !base->kids.empty())
+                                        base = stripCastsForAddress(
+                                            base->kids[0].get());
+                                    if (base->op == IROp::Var && !base->name.empty()) {
+                                        TypeRef baseType =
+                                            exprType(const_cast<IRExpr *>(base));
+                                        auto *bt = baseType != NullType ?
+                                            m_types.resolveType(baseType) : nullptr;
+                                        if (bt && bt->kind == StabsTypeKind::Array)
+                                            markIndexTemps(idx);
+                                    }
+                                }
+                                for (int side = 0; side < 2; ++side) {
+                                    const IRExpr *maybeIdx = node->kids[side].get();
+                                    if (!maybeIdx || maybeIdx->op != IROp::Mul)
+                                        continue;
+                                    for (auto &kid : maybeIdx->kids) {
+                                        if (kid && !kid->isConst())
+                                            markIndexTemps(kid.get());
+                                    }
+                                }
+                            }
+                            for (auto &kid : node->kids)
+                                scanAddr(kid.get());
+                        };
+                    scanAddr(addr);
+                };
+
+                std::function<void(const IRExpr *)> scanExpr =
+                    [&](const IRExpr *expr) {
+                        if (!expr)
+                            return;
+                        if (expr->op == IROp::Load && !expr->kids.empty())
+                            markAddressIndexUses(expr->kids[0].get(),
+                                                 expr->loadSize);
+                        for (auto &kid : expr->kids)
+                            scanExpr(kid.get());
+                    };
+
+                for (auto &bb : m_func.blocks) {
+                    for (auto &stmt : bb.stmts) {
+                        if (stmt.kind == IRStmtKind::Store && stmt.addr)
+                            markAddressIndexUses(stmt.addr.get(),
+                                                 stmt.storeSize);
+                        scanExpr(stmt.expr.get());
+                        scanExpr(stmt.addr.get());
+                        for (auto &arg : stmt.args)
+                            scanExpr(arg.get());
+                    }
+                }
             }
 
             // Local variable declarations — skip params (already declared in signature)
@@ -3226,6 +3371,8 @@ private:
                         }
                     }
                 }
+                if (s_portMode && m_indexVars.count(l.name))
+                    decl = "int " + l.name;
                 // Override int → char* for locals used as pointers (non-port mode only)
                 if (!s_portMode && m_pointerVars.count(l.name) && decl == "int " + l.name) {
                     bool usedAsSubscript = false;
@@ -3340,7 +3487,7 @@ private:
                                         if (m_types.isStructPointer(btype) ||
                                             (bt && (bt->kind == StabsTypeKind::Struct ||
                                                     bt->kind == StabsTypeKind::Union)))
-                                            m_tempStructPtr[tid] = btype;
+                                            setTempStructPointerType(tid, btype);
                                     }
                                 }
                             }
@@ -3360,7 +3507,7 @@ private:
                 if (dit == m_tempDef.end() || !dit->second) continue;
                 TypeRef resolved = exprType(dit->second);
                 if (resolved != NullType && m_types.isStructPointer(resolved))
-                    m_tempStructPtr[id] = resolved;
+                    setTempStructPointerType(id, resolved);
                 // Debug: print for all temps that resolve to struct pointers
                 if (resolved != NullType && m_types.isStructPointer(resolved)) {
                 }
@@ -3467,6 +3614,8 @@ private:
                     const std::string &tname) -> std::string {
                     if (!s_portMode)
                         return typeName;
+                    if (m_indexTemps.count(id) || m_indexVars.count(tname))
+                        return "int";
                     if (typeName == "void *")
                         typeName = "int *";
                     if (typeName == "union" || typeName == "struct" ||
@@ -4295,6 +4444,12 @@ private:
         std::set<int>         m_pointerTemps;   // temps used as pointers (dereference targets)
         std::set<std::string> m_pointerVars;   // var NAMES used as pointers
         std::map<int, TypeRef> m_tempStructPtr;   // temp → struct pointer type (from Field access)
+        mutable std::set<int> m_resolvingTempTypes; // cycle guard for temp type inference
+        mutable std::map<int, TypeRef> m_tempDefinitionTypeCache;
+        std::set<int>         m_resolvingInferTempTypes;
+        std::map<int, std::string> m_inferTempTypeCache;
+        std::set<const IRExpr *> m_resolvingFloatExprs;
+        std::map<const IRExpr *, bool> m_isFloatExprCache;
         std::set<int>         m_forceDeclareTemps; // temps that leak as raw tN and need declaration
 
         std::string stripOuterParens(std::string s) const {
@@ -5311,6 +5466,14 @@ private:
             if (inner.constant < 0)
                 return "";
 
+            if (inner.coeffs.size() == 1 && arrayAddr.elemSize % 4 == 0) {
+                auto coeffIt = inner.coeffs.begin();
+                if (coeffIt->second * 4 == arrayAddr.elemSize) {
+                    coeffIt->second *= 4;
+                    inner.constant *= 4;
+                }
+            }
+
             std::string elementIndex = "0";
             std::string elementKey;
             for (auto &[key, coeff] : inner.coeffs) {
@@ -5690,16 +5853,41 @@ private:
             return false;
         }
 
+        void setTempStructPointerType(int id, TypeRef ref) {
+            if (id < 0 || ref == NullType)
+                return;
+            m_tempStructPtr[id] = ref;
+            m_tempDefinitionTypeCache.clear();
+            m_inferTempTypeCache.clear();
+            m_isFloatExprCache.clear();
+        }
+
         TypeRef tempDefinitionType(int id, int depth = 0) const {
             if (depth > 8) return NullType;
+            auto cached = m_tempDefinitionTypeCache.find(id);
+            if (cached != m_tempDefinitionTypeCache.end())
+                return cached->second;
+            auto active = m_resolvingTempTypes.insert(id);
+            if (!active.second)
+                return NullType;
+            struct Guard {
+                std::set<int> &set;
+                int id;
+                ~Guard() { set.erase(id); }
+            } guard{m_resolvingTempTypes, id};
+            auto finish = [&](TypeRef ref) {
+                m_tempDefinitionTypeCache[id] = ref;
+                return ref;
+            };
+
             auto dit = m_tempDef.find(id);
             if (dit == m_tempDef.end() || !dit->second)
-                return NullType;
+                return finish(NullType);
             const IRExpr *def = dit->second;
             if (def->op == IROp::Field)
-                return fieldTypeFromBase(def);
+                return finish(fieldTypeFromBase(def));
             if (def->op == IROp::Temp)
-                return tempDefinitionType(def->tempId(), depth + 1);
+                return finish(tempDefinitionType(def->tempId(), depth + 1));
             if (def->op == IROp::Add && def->kids.size() == 2) {
                 for (auto &kid : def->kids) {
                     if (!kid) continue;
@@ -5709,13 +5897,13 @@ private:
                     if (kt == NullType)
                         kt = kid->typeRef;
                     if (kt != NullType && m_types.isStructPointer(kt))
-                        return kt;
+                        return finish(kt);
                 }
             }
             if (def->op == IROp::Call && !def->name.empty()) {
                 auto *cf = m_mf.stabsFunctionByName(def->name);
                 if (cf && cf->returnType != NullType)
-                    return cf->returnType;
+                    return finish(cf->returnType);
             }
             if (def->op == IROp::Cast && !def->kids.empty() &&
                 (def->castKind == CastKind::PtrToInt ||
@@ -5727,18 +5915,18 @@ private:
                         constPointerGlobalObjectType(def->kids[0]->kids[0]->name);
                     if (globalType != NullType &&
                         m_types.isStructPointer(globalType))
-                        return globalType;
+                        return finish(globalType);
                 }
                 TypeRef innerType = exprType(def->kids[0].get());
                 if (innerType != NullType && m_types.isStructPointer(innerType))
-                    return innerType;
+                    return finish(innerType);
             }
             if (def->op == IROp::Load && !def->kids.empty()) {
                 TypeRef addrType = exprType(def->kids[0].get());
                 if (addrType != NullType)
-                    return m_types.derefPointer(addrType);
+                    return finish(m_types.derefPointer(addrType));
             }
-            return def->typeRef;
+            return finish(def->typeRef);
         }
 
         TypeRef tempStructPointerType(int id, int depth = 0) const {
@@ -6212,10 +6400,31 @@ private:
             return false;
         }
 
+        void markIndexTemps(const IRExpr *expr) {
+            if (!expr)
+                return;
+            std::vector<const IRExpr *> stack = {expr};
+            while (!stack.empty()) {
+                const IRExpr *node = stack.back();
+                stack.pop_back();
+                if (!node)
+                    continue;
+                if (node->op == IROp::Temp)
+                    m_indexTemps.insert(node->tempId());
+                if (node->op == IROp::Var && !node->name.empty())
+                    m_indexVars.insert(node->name);
+                for (auto &kid : node->kids)
+                    if (kid)
+                        stack.push_back(kid.get());
+            }
+        }
+
         std::set<int>         m_inliningTemps;    // cycle guard for temp inlining in emitExpr
         bool                  m_emittedRetVoid = true; // true if function signature says void
         int                   m_addrDepth = 0;     // >0 when emitting Load/Store address sub-exprs
         std::set<int>         m_loadAddrTemps;    // temps used in Load address expressions
+        std::set<int>         m_indexTemps;       // temps emitted as array subscripts
+        std::set<std::string> m_indexVars;        // locals emitted as array subscripts
         std::map<int, TypeRef> m_cosmeticTypes;    // cosmetic: inferred types for temps/vars
         std::map<std::string, TypeRef> m_cosmeticVarTypes; // cosmetic: inferred types for named vars
         std::map<int, SourceGlobalElementPtr> m_sourceGlobalElementPtrs;
@@ -7454,6 +7663,7 @@ private:
                     IRExpr *arrayBase = nullptr;
                     IRExpr *indexExpr = nullptr;
                     if (localArrayAddressIndex(a, stmt.storeSize, arrayBase, indexExpr)) {
+                        markIndexTemps(indexExpr);
                         out += pad(indent) + QString::fromStdString(
                             emitExpr(arrayBase) + "[" + emitExpr(indexExpr) + "] = " + val) + ";\n";
                         break;
@@ -7473,6 +7683,7 @@ private:
                         }
                     }
                     if (storeBase && storeIdx && storeScale == 4) {
+                        markIndexTemps(storeIdx);
                         // Mark base as pointer (used in array subscript)
                         if (storeBase->op == IROp::Var && !storeBase->name.empty())
                             m_pointerVars.insert(storeBase->name);
@@ -7482,6 +7693,7 @@ private:
                         std::string is = emitExpr(storeIdx);
                         out += pad(indent) + QString::fromStdString(bs + "[" + is + "] = " + val) + ";\n";
                     } else if (storeBase && storeIdx) {
+                        markIndexTemps(storeIdx);
                         std::string bs = emitExpr(storeBase);
                         std::string is = emitExpr(storeIdx);
                         out += pad(indent) + QString::fromStdString(
@@ -7500,6 +7712,7 @@ private:
                          a->kids[0]->kids[1]->kids.size() == 2 &&
                          a->kids[0]->kids[1]->kids[1]->isConst() &&
                          (a->kids[0]->kids[0]->op == IROp::Var || a->kids[0]->kids[0]->op == IROp::Temp)) {
+                    markIndexTemps(a->kids[0]->kids[1]->kids[0].get());
                     std::string base = emitExpr(a->kids[0]->kids[0].get());
                     std::string idx = emitExpr(a->kids[0]->kids[1]->kids[0].get());
                     int off = (int)a->kids[1]->value;
@@ -8434,6 +8647,7 @@ private:
                     IRExpr *arrayBase = nullptr;
                     IRExpr *indexExpr = nullptr;
                     if (localArrayAddressIndex(addr, e->loadSize, arrayBase, indexExpr)) {
+                        markIndexTemps(indexExpr);
                         result = emitExpr(arrayBase) + "[" + emitExpr(indexExpr) + "]";
                         break;
                     }
@@ -8456,6 +8670,7 @@ private:
                     }
                     if (isArray && base && index &&
                         (base->op == IROp::Var || base->op == IROp::Temp)) {
+                        markIndexTemps(index);
                         std::string baseStr = emitExpr(base);
                         std::string idxStr = emitExpr(index);
                         int off = (int)addr->kids[1]->value;
@@ -8519,6 +8734,7 @@ private:
                         }
                     }
                     if (arrBase && arrIdx) {
+                        markIndexTemps(arrIdx);
                         // Only emit base[idx] if base is pointer-to-scalar (stride=4 matches elemSize).
                         // For pointer-to-struct with size != 4, base[idx] strides by sizeof(struct)
                         // which is wrong — fall through to *(int*)((char*)base + idx*4).
@@ -8858,11 +9074,11 @@ private:
                             if (!isDirectStruct && structAddBase->op == IROp::Temp &&
                                 baseType != NullType) {
                                 if (m_types.isStructPointer(baseType))
-                                    m_tempStructPtr[structAddBase->tempId()] = baseType;
+                                    setTempStructPointerType(structAddBase->tempId(), baseType);
                                 else {
                                     auto *bt2 = m_types.resolveType(baseType);
                                     if (bt2 && (bt2->kind == StabsTypeKind::Struct || bt2->kind == StabsTypeKind::Union))
-                                        m_tempStructPtr[structAddBase->tempId()] = baseType;
+                                        setTempStructPointerType(structAddBase->tempId(), baseType);
                                 }
                             }
                             if (isDirectStruct && structAddBase->op == IROp::Load &&
@@ -10567,8 +10783,24 @@ private:
 
         bool isFloatExpr(IRExpr *e) {
             if (!e) return false;
+            auto cached = m_isFloatExprCache.find(e);
+            if (cached != m_isFloatExprCache.end())
+                return cached->second;
+            auto active = m_resolvingFloatExprs.insert(e);
+            if (!active.second)
+                return false;
+            struct Guard {
+                std::set<const IRExpr *> &set;
+                const IRExpr *expr;
+                ~Guard() { set.erase(expr); }
+            } guard{m_resolvingFloatExprs, e};
+            auto finish = [&](bool result) {
+                m_isFloatExprCache[e] = result;
+                return result;
+            };
+
             if (e->op == IROp::Temp) {
-                if (inferTempType(e->tempId()) == "float") return true;
+                if (inferTempType(e->tempId()) == "float") return finish(true);
                 // Check tempTypes directly
                 {
                     auto ttit = m_func.tempTypes.find(e->tempId());
@@ -10577,12 +10809,12 @@ private:
                         if (rt && (rt->kind == StabsTypeKind::Float ||
                                    rt->kind == StabsTypeKind::Double ||
                                    rt->kind == StabsTypeKind::LongDouble))
-                            return true;
+                            return finish(true);
                         std::string ts = m_types.formatType(ttit->second);
                         if (ts.find("float") != std::string::npos ||
                             ts.find("double") != std::string::npos ||
                             ts == "vec_t" || ts == "const vec_t")
-                            return true;
+                            return finish(true);
                     }
                 }
                 // Check coalesced var type directly (v7 / v13 — temps that
@@ -10595,13 +10827,13 @@ private:
                         if (rt && (rt->kind == StabsTypeKind::Float ||
                                    rt->kind == StabsTypeKind::Double ||
                                    rt->kind == StabsTypeKind::LongDouble))
-                            return true;
+                            return finish(true);
                     }
                 }
                 // Follow temp definition
                 auto it = m_tempDef.find(e->tempId());
                 if (it != m_tempDef.end() && it->second)
-                    return isFloatExpr(it->second);
+                    return finish(isFloatExpr(it->second));
                 // Check copy map and tempToVar for source variable
                 std::string srcName;
                 auto cit = m_copyMap.find(e->tempId());
@@ -10616,35 +10848,35 @@ private:
                     for (auto &p : m_func.params)
                         if (p.name == srcName && p.typeRef != NullType) {
                             std::string ts = m_types.formatType(p.typeRef);
-                            if (ts == "float" || ts == "double") return true;
+                            if (ts == "float" || ts == "double") return finish(true);
                         }
                     for (auto &l : m_func.locals)
                         if (l.name == srcName && l.typeRef != NullType) {
                             std::string ts = m_types.formatType(l.typeRef);
-                            if (ts == "float" || ts == "double") return true;
+                            if (ts == "float" || ts == "double") return finish(true);
                         }
                 }
-                return false;
+                return finish(false);
             }
             if (e->op == IROp::Var && !e->name.empty()) {
                 // IR-side type hint takes priority.
                 if (e->typeRef != NullType) {
                     std::string ts = m_types.formatType(e->typeRef);
-                    if (ts == "float" || ts == "double" || ts == "vec_t") return true;
+                    if (ts == "float" || ts == "double" || ts == "vec_t") return finish(true);
                 }
                 if (e->name.find('.') != std::string::npos ||
                     (!e->name.empty() && e->name.back() == 'f'))
-                    return true;
+                    return finish(true);
                 // Check if variable is declared as float
                 for (auto &l : m_func.locals)
                     if (l.name == e->name && l.typeRef != NullType) {
                         std::string ts = m_types.formatType(l.typeRef);
-                        return ts == "float" || ts == "double";
+                        return finish(ts == "float" || ts == "double");
                     }
                 for (auto &p : m_func.params)
                     if (p.name == e->name && p.typeRef != NullType) {
                         std::string ts = m_types.formatType(p.typeRef);
-                        return ts == "float" || ts == "double";
+                        return finish(ts == "float" || ts == "double");
                     }
                 // Check coalesced varType by name (v7 / v13 etc. — auto-generated
                 // names that aren't in STABS locals but get types from coalescing)
@@ -10656,24 +10888,24 @@ private:
                     if (rt && (rt->kind == StabsTypeKind::Float ||
                                rt->kind == StabsTypeKind::Double ||
                                rt->kind == StabsTypeKind::LongDouble))
-                        return true;
+                        return finish(true);
                     std::string ts = m_types.formatType(it->second);
                     if (ts == "float" || ts == "double" || ts == "vec_t" ||
                         ts == "const vec_t" || ts == "const float" || ts == "const double")
-                        return true;
+                        return finish(true);
                 }
             }
             // Constants that emit as float literals (e.g. 0x3F800000 → 1.0f)
-            if (e->op == IROp::Const && !tryFloatConst((uint32_t)e->value).empty()) return true;
-            if (e->op == IROp::Load && e->loadSize == 5) return true;
-            if (e->op == IROp::Cast && (e->castKind == CastKind::IntToFloat)) return true;
+            if (e->op == IROp::Const && !tryFloatConst((uint32_t)e->value).empty()) return finish(true);
+            if (e->op == IROp::Load && e->loadSize == 5) return finish(true);
+            if (e->op == IROp::Cast && (e->castKind == CastKind::IntToFloat)) return finish(true);
             // Call to a function that returns float
             if (e->op == IROp::Call) {
                 const StabsFunction *cf = m_mf.stabsFunctionByName(e->name);
                 if (cf && cf->returnType != NullType) {
                     std::string rt = m_types.formatType(cf->returnType);
                     if (rt == "float" || rt == "double" || rt == "vec_t")
-                        return true;
+                        return finish(true);
                 }
                 static const std::set<std::string> floatFuncs = {
                     "atof", "strtof", "strtod",
@@ -10683,30 +10915,46 @@ private:
                     "sin", "cos", "tan", "sqrt", "fabs", "floor", "ceil",
                     "pow", "fmod", "exp", "log", "atan2",
                 };
-                if (floatFuncs.count(e->name)) return true;
+                if (floatFuncs.count(e->name)) return finish(true);
             }
             // Bitwise/shift ops on float: if any child is float, propagate
             if ((e->op == IROp::And || e->op == IROp::Or || e->op == IROp::Xor ||
                  e->op == IROp::Shr || e->op == IROp::Sar || e->op == IROp::Shl) &&
                 !e->kids.empty()) {
                 for (auto &k : e->kids)
-                    if (k && isFloatExpr(k.get())) return true;
+                    if (k && isFloatExpr(k.get())) return finish(true);
             }
             // Float arithmetic propagates
             if ((e->op == IROp::Add || e->op == IROp::Sub || e->op == IROp::Mul || e->op == IROp::Neg) &&
-                !e->kids.empty() && isFloatExpr(e->kids[0].get())) return true;
-            return false;
+                !e->kids.empty() && isFloatExpr(e->kids[0].get())) return finish(true);
+            return finish(false);
         }
 
         std::string inferTempType(int id, int depth = 0) {
             if (depth > 10) return "int"; // depth limit to prevent infinite recursion
+            auto cached = m_inferTempTypeCache.find(id);
+            if (cached != m_inferTempTypeCache.end())
+                return cached->second;
+            auto active = m_resolvingInferTempTypes.insert(id);
+            if (!active.second)
+                return "int";
+            struct Guard {
+                std::set<int> &set;
+                int id;
+                ~Guard() { set.erase(id); }
+            } guard{m_resolvingInferTempTypes, id};
+            auto finish = [&](std::string type) {
+                m_inferTempTypeCache[id] = type;
+                return type;
+            };
+
             auto it = m_tempDef.find(id);
-            if (it == m_tempDef.end() || !it->second) return "int";
+            if (it == m_tempDef.end() || !it->second) return finish("int");
             auto *e = it->second;
             if (e->op == IROp::Field && !e->kids.empty()) {
                 TypeRef fieldType = fieldTypeFromBase(e);
                 if (fieldType != NullType)
-                    return m_types.formatType(fieldType);
+                    return finish(m_types.formatType(fieldType));
             }
             // If the expression itself has a type annotation, use it
             if (e->typeRef != NullType) {
@@ -10716,12 +10964,12 @@ private:
                 if (rt && rt->kind == StabsTypeKind::Array) {
                     if (e->op == IROp::Mul || e->op == IROp::Add || e->op == IROp::Sub ||
                         e->op == IROp::SDiv || e->op == IROp::Neg)
-                        return m_types.formatType(rt->targetType);  // element type, no pointer
-                    return m_types.formatType(rt->targetType) + " *";
+                        return finish(m_types.formatType(rt->targetType));  // element type, no pointer
+                    return finish(m_types.formatType(rt->targetType) + " *");
                 }
                 // Don't propagate struct/union/pointer types through arithmetic
                 if (rt && (rt->kind == StabsTypeKind::Struct || rt->kind == StabsTypeKind::Union))
-                    return "int";
+                    return finish("int");
                 std::string fmt = m_types.formatType(e->typeRef);
                 if (fmt.find("*") != std::string::npos &&
                     (e->op == IROp::Mul || e->op == IROp::Add || e->op == IROp::Sub)) {
@@ -10729,47 +10977,47 @@ private:
                     size_t star = fmt.find(" *");
                     if (star != std::string::npos) fmt = fmt.substr(0, star);
                 }
-                return fmt;
+                return finish(fmt);
             }
             // Float operations → float
-            if (e->op == IROp::Const && !tryFloatConst((uint32_t)e->value).empty()) return "float";
+            if (e->op == IROp::Const && !tryFloatConst((uint32_t)e->value).empty()) return finish("float");
             if (e->op == IROp::Cast &&
                 (e->castKind == CastKind::IntToFloat ||
                  e->castKind == CastKind::FloatToInt ||
                  e->castKind == CastKind::PtrToInt))
-                return e->castKind == CastKind::IntToFloat ? "float" : "int";
+                return finish(e->castKind == CastKind::IntToFloat ? "float" : "int");
             if (e->op == IROp::Var) {
                 // Float literal names
                 if (!e->name.empty() && (e->name.find(".0f") != std::string::npos ||
                     e->name.find(".0") != std::string::npos))
-                    return "float";
+                    return finish("float");
                 // Check STABS type of the variable
                 for (auto &l : m_func.locals)
                     if (l.name == e->name && l.typeRef != NullType) {
                         auto *lt = m_types.resolveType(l.typeRef);
                         if (lt && (lt->kind == StabsTypeKind::Float || lt->kind == StabsTypeKind::Double))
-                            return "float";
+                            return finish("float");
                         std::string fmt = m_types.formatType(l.typeRef);
                         if (fmt == "float" || fmt == "double" || fmt == "vec_t")
-                            return "float";
+                            return finish("float");
                     }
                 for (auto &p : m_func.params)
                     if (p.name == e->name && p.typeRef != NullType) {
                         std::string fmt = m_types.formatType(p.typeRef);
                         if (fmt.find("float") != std::string::npos || fmt.find("vec_t") != std::string::npos)
-                            return "float";
+                            return finish("float");
                     }
             }
             // Comparison results → int (boolean)
-            if (e->op >= IROp::Eq && e->op <= IROp::Uge) return "int";
+            if (e->op >= IROp::Eq && e->op <= IROp::Uge) return finish("int");
             // If this temp has a known struct pointer type from Field access, use it
             {
                 auto sit = m_tempStructPtr.find(id);
                 if (sit != m_tempStructPtr.end() && sit->second != NullType)
-                    return m_types.formatType(sit->second);
+                    return finish(m_types.formatType(sit->second));
             }
             // If this temp is used as a pointer (dereferenced), declare as char*
-            if (m_pointerTemps.count(id)) return "int *";
+            if (m_pointerTemps.count(id)) return finish("int *");
             // Check if defined by arithmetic with float operands
             if (e->op == IROp::Mul || e->op == IROp::Add || e->op == IROp::Sub ||
                 e->op == IROp::Neg || e->op == IROp::SDiv) {
@@ -10801,7 +11049,7 @@ private:
                         if (tit != m_func.tempTypes.end() && tit->second != NullType) {
                             std::string fmt = m_types.formatType(tit->second);
                             if (fmt == "float" || fmt == "double" || fmt == "vec_t")
-                                return "float";
+                                return finish("float");
                         }
                         // Check the coalesced var type
                         auto vit = m_func.tempToVar.find(k->tempId());
@@ -10810,12 +11058,12 @@ private:
                             if (vtit != m_func.varTypes.end() && vtit->second != NullType) {
                                 std::string fmt = m_types.formatType(vtit->second);
                                 if (fmt == "float" || fmt == "double" || fmt == "vec_t")
-                                    return "float";
+                                    return finish("float");
                             }
                         }
                         // Recursive: check if the operand temp itself infers to float
                         if (inferTempType(k->tempId(), depth + 1) == "float")
-                            return "float";
+                            return finish("float");
                     }
                     // Check if operand is a Call to a float-returning function
                     if (k->op == IROp::Call) {
@@ -10823,7 +11071,7 @@ private:
                         if (cf && cf->returnType != NullType) {
                             std::string rt = m_types.formatType(cf->returnType);
                             if (rt == "float" || rt == "double" || rt == "vec_t")
-                                return "float";
+                                return finish("float");
                         }
                         // Hardcoded float-returning C library functions
                         static const std::set<std::string> floatFuncs = {
@@ -10835,7 +11083,7 @@ private:
                             "sqrt", "fabs", "fmin", "fmax", "floor", "ceil",
                             "pow", "fmod", "exp", "log", "log10",
                         };
-                        if (floatFuncs.count(k->name)) return "float";
+                        if (floatFuncs.count(k->name)) return finish("float");
                     }
                 }
             }
@@ -10843,9 +11091,9 @@ private:
             // that can be traced to a float value
             if (e->op == IROp::Temp) {
                 // Copy from another temp — recurse
-                return inferTempType(e->tempId(), depth + 1);
+                return finish(inferTempType(e->tempId(), depth + 1));
             }
-            return "int";
+            return finish("int");
         }
 
         // Convert C++ scope operator :: to _ for valid C identifiers

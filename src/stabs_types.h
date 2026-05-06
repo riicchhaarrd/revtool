@@ -974,6 +974,11 @@ public:
                 }
                 out += "    char " + f.name + "[" + std::to_string(sz) + "];\n";
             } else {
+                if (t->name == "fileHandleData_t" &&
+                    f.name == "handleFiles") {
+                    out += "    FILE * handleFiles;\n";
+                    continue;
+                }
                 std::string fdecl = formatDecl(f.typeRef, f.name);
                 // Skip fields with invalid C syntax (function pointer pointers etc.)
                 if (fdecl.find("(*)()") != std::string::npos) continue;

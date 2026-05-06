@@ -815,7 +815,8 @@ private:
                     if (it != nlSyms.end()) {
                         bool alreadyTyped = false;
                         for (auto &g : m_typeTable.globals()) {
-                            if (g.name == gname && g.address == it->second &&
+                            if (!g.isStatic &&
+                                g.name == gname && g.address == it->second &&
                                 g.typeRef != NullType) {
                                 alreadyTyped = true;
                                 break;
@@ -856,7 +857,7 @@ private:
                                 for (auto &c : sn) c = tolower(c);
                                 for (auto &c : gn) c = tolower(c);
                                 // Check if either contains the other (partial match)
-                                bool related = false;
+                                bool related = gname.size() < 5;
                                 if (sn.size() >= 3 && gn.size() >= 5) {  // skip for short names
                                     // Strip common prefixes/suffixes
                                     std::string sn2 = sn;
