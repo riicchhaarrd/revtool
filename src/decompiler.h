@@ -675,10 +675,48 @@ public:
                     p += pat.size();
                 }
             }
-            // Fix char* variables used in multiplication — downgrade to int
-            // Pattern: "char *vN;" declared but "vN * N" or "(vN *" used
+            // Fix char* variables used in multiplication — downgrade to int.
+            // Keep the analysis scoped to the function/block that owns the
+            // declaration. Temp names are reused in every function, so a
+            // file-wide search turns unrelated pointer temps into truncated
+            // integer pointers on 64-bit hosts.
             {
-                // Find char* declarations
+                auto matchingBrace = [&](size_t open) -> size_t {
+                    int depth = 0;
+                    bool inString = false;
+                    bool inChar = false;
+                    bool escaped = false;
+                    for (size_t i = open; i < s.size(); ++i) {
+                        char c = s[i];
+                        if (escaped) {
+                            escaped = false;
+                            continue;
+                        }
+                        if ((inString || inChar) && c == '\\') {
+                            escaped = true;
+                            continue;
+                        }
+                        if (!inChar && c == '"') {
+                            inString = !inString;
+                            continue;
+                        }
+                        if (!inString && c == '\'') {
+                            inChar = !inChar;
+                            continue;
+                        }
+                        if (inString || inChar)
+                            continue;
+                        if (c == '{')
+                            ++depth;
+                        else if (c == '}') {
+                            --depth;
+                            if (depth == 0)
+                                return i;
+                        }
+                    }
+                    return s.size();
+                };
+
                 size_t p2 = 0;
                 while ((p2 = s.find("char *", p2)) != std::string::npos) {
                     // Check it's a declaration line (indent + "char *NAME;")
@@ -699,7 +737,17 @@ public:
                         while (!varName.empty() && varName.back() == ' ') varName.pop_back();
                         while (!varName.empty() && varName.front() == ' ') varName.erase(varName.begin());
                         // Check if this var is used in multiplication: (varName * N) or (N * varName)
-                        if (!varName.empty() && s.find("(" + varName + " * ") != std::string::npos) {
+                        size_t scopeStart = s.rfind('{', ls);
+                        size_t scopeEnd = s.size();
+                        if (scopeStart != std::string::npos)
+                            scopeEnd = matchingBrace(scopeStart);
+                        if (scopeEnd <= scopeStart || scopeEnd > s.size())
+                            scopeEnd = s.size();
+                        std::string scope =
+                            s.substr(scopeStart == std::string::npos ? 0 : scopeStart,
+                                     scopeEnd - (scopeStart == std::string::npos ? 0 : scopeStart));
+                        if (!varName.empty() &&
+                            scope.find("(" + varName + " * ") != std::string::npos) {
                             // Downgrade: replace "char *NAME;" or "char * NAME;" with "int NAME;"
                             // Try both patterns (with/without space after *)
                             std::string oldDecl = "char *" + varName + ";";
