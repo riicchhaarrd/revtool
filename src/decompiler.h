@@ -11522,10 +11522,12 @@ private:
                     // from leftover register values)
                     size_t argCount = e->kids.size();
                     const StabsFunction *calledFn2 = m_mf.stabsFunctionByName(e->name);
-                    if (calledFn2 && !calledFn2->params.empty() &&
-                        calledFn2->params.size() < argCount) {
-                        if (!Decompiler::isKnownVariadicFunction(e->name))
+                    if (calledFn2 && !Decompiler::isKnownVariadicFunction(e->name)) {
+                        if (calledFn2->params.empty() && calledFn2->returnType != NullType) {
+                            argCount = 0;
+                        } else if (calledFn2->params.size() < argCount) {
                             argCount = calledFn2->params.size();
+                        }
                     }
                     int builtinLimit = builtinFunctionArgLimit(e->name);
                     if (builtinLimit >= 0 && (size_t)builtinLimit < argCount)
