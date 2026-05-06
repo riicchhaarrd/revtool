@@ -5455,13 +5455,10 @@ private:
             return field->name + "[" + index + "]";
         }
 
-        std::string sourceGlobalArrayLvalueExpr(const IRExpr *addr,
-                                                int accessSize = 0) {
-            SourceGlobalArrayAddress arrayAddr;
-            if (!sourceGlobalArrayAddressExpr(addr, arrayAddr) ||
-                arrayAddr.elemSize <= 0)
+        std::string sourceGlobalArrayLvalueFromAddress(SourceGlobalArrayAddress arrayAddr,
+                                                       int accessSize = 0) {
+            if (arrayAddr.elemSize <= 0)
                 return "";
-
             LinearOffsetExpr inner = arrayAddr.offset;
             if (inner.constant < 0)
                 return "";
@@ -5507,6 +5504,76 @@ private:
             std::string access =
                 sourceGlobalArrayFieldAccess(arrayAddr.elemType, fieldOffset,
                                              inner, accessSize);
+            if (access.empty())
+                return "";
+            return arrayAddr.emitName + "[" + elementIndex + "]." + access;
+        }
+
+        std::string sourceGlobalArrayLvalueExpr(const IRExpr *addr,
+                                                int accessSize = 0) {
+            SourceGlobalArrayAddress arrayAddr;
+            if (!sourceGlobalArrayAddressExpr(addr, arrayAddr))
+                return "";
+            return sourceGlobalArrayLvalueFromAddress(arrayAddr, accessSize);
+        }
+
+        std::string rewriteCompoundGlobalArrayDest(const std::string &dest,
+                                                   int accessSize) {
+            size_t lb = dest.find('[');
+            size_t rb = dest.rfind(']');
+            if (lb == std::string::npos || rb == std::string::npos ||
+                rb <= lb || rb + 1 != dest.size())
+                return "";
+            std::string base = dest.substr(0, lb);
+            if (base.empty() || base.find_first_of("()+-*/&[] .") != std::string::npos)
+                return "";
+            SourceGlobalArrayAddress arrayAddr;
+            if (!sourceGlobalArrayInfo(base, arrayAddr) || arrayAddr.elemSize <= 0)
+                return "";
+
+            std::string index = stripOuterParens(dest.substr(lb + 1, rb - lb - 1));
+            size_t star = index.find('*');
+            if (star == std::string::npos)
+                return "";
+            std::string lhs = stripOuterParens(index.substr(0, star));
+            std::string rhs = stripOuterParens(index.substr(star + 1));
+            auto trim = [](std::string s) {
+                while (!s.empty() && std::isspace((unsigned char)s.front()))
+                    s.erase(s.begin());
+                while (!s.empty() && std::isspace((unsigned char)s.back()))
+                    s.pop_back();
+                return s;
+            };
+            lhs = trim(lhs);
+            rhs = trim(rhs);
+            auto parseScale = [](const std::string &s, int &out) {
+                if (s.empty())
+                    return false;
+                char *end = nullptr;
+                long v = std::strtol(s.c_str(), &end, 0);
+                if (!end || *end != '\0' || v <= 0 || v > 0x7fffffff)
+                    return false;
+                out = (int)v;
+                return true;
+            };
+
+            int scale = 0;
+            std::string elementIndex;
+            if (parseScale(rhs, scale)) {
+                elementIndex = lhs;
+            } else if (parseScale(lhs, scale)) {
+                elementIndex = rhs;
+            } else {
+                return "";
+            }
+            if (elementIndex.empty())
+                return "";
+            if (scale != arrayAddr.elemSize && scale * 4 != arrayAddr.elemSize)
+                return "";
+
+            LinearOffsetExpr noInner;
+            std::string access = sourceGlobalArrayFieldAccess(
+                arrayAddr.elemType, 0, noInner, accessSize);
             if (access.empty())
                 return "";
             return arrayAddr.emitName + "[" + elementIndex + "]." + access;
@@ -7682,6 +7749,43 @@ private:
                             break;
                         }
                     }
+                    if (storeBase && storeIdx) {
+                        SourceGlobalArrayAddress arrayAddr;
+                        if (sourceGlobalArrayAddressExpr(storeBase, arrayAddr)) {
+                            LinearOffsetExpr indexDelta;
+                            if (addLinearOffsetTerm(storeIdx, storeScale,
+                                                    indexDelta)) {
+                                mergeLinearOffset(arrayAddr.offset, indexDelta);
+                                std::string lvalue =
+                                    sourceGlobalArrayLvalueFromAddress(
+                                        arrayAddr, stmt.storeSize);
+                                if (!lvalue.empty()) {
+                                    markIndexTemps(storeIdx);
+                                    out += pad(indent) +
+                                           QString::fromStdString(
+                                               lvalue + " = " + val) + ";\n";
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    if (storeBase && storeIdx) {
+                        SourceGlobalArrayAddress arrayAddr;
+                        if (sourceGlobalArrayBaseExpr(storeBase, arrayAddr) &&
+                            (storeScale == arrayAddr.elemSize ||
+                             storeScale * 4 == arrayAddr.elemSize)) {
+                            LinearOffsetExpr noInner;
+                            std::string access = sourceGlobalArrayFieldAccess(
+                                arrayAddr.elemType, 0, noInner, stmt.storeSize);
+                            if (!access.empty()) {
+                                markIndexTemps(storeIdx);
+                                out += pad(indent) + QString::fromStdString(
+                                    arrayAddr.emitName + "[" + emitExpr(storeIdx) +
+                                    "]." + access + " = " + val) + ";\n";
+                                break;
+                            }
+                        }
+                    }
                     if (storeBase && storeIdx && storeScale == 4) {
                         markIndexTemps(storeIdx);
                         // Mark base as pointer (used in array subscript)
@@ -7884,6 +7988,12 @@ private:
                 if (s_portMode && printedArrayDesignatorHasArrayType(val))
                     val += "[0]";
                 std::string dest = stmt.destVar;
+                if (s_portMode) {
+                    std::string rewritten =
+                        rewriteCompoundGlobalArrayDest(dest, stmt.storeSize);
+                    if (!rewritten.empty())
+                        dest = rewritten;
+                }
                 // Compound dest (array-subscript "a[4]" or dotted "a.b") is already a
                 // valid C expression — don't run it through cName or the brackets/dot
                 // collapse into underscores and we emit "a_4_" as a bogus identifier.
