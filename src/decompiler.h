@@ -35,6 +35,28 @@ public:
     static inline bool s_cosmeticMode = false;  // prefer readable output over byte-matching
     static inline bool s_portMode = false;      // port mode: skip per-file type preamble
 
+    static bool isCIdentifier(const std::string &name) {
+        if (name.empty()) return false;
+        if (!std::isalpha((unsigned char)name[0]) && name[0] != '_')
+            return false;
+        for (char c : name) {
+            if (!std::isalnum((unsigned char)c) && c != '_')
+                return false;
+        }
+        return true;
+    }
+
+    static std::string externSuppressGuard(const std::string &name) {
+        std::string guard = "COD2_SUPPRESS_EXTERN_";
+        for (char c : name) {
+            if (std::isalnum((unsigned char)c) || c == '_')
+                guard.push_back(c);
+            else
+                guard.push_back('_');
+        }
+        return guard;
+    }
+
     // Decompile a single function
     static QString decompile(const MachOFile &mf, uint32_t funcAddr, bool format = true) {
         Lifter lifter(mf);
@@ -89,7 +111,18 @@ public:
 
         QString out;
         out += "/* " + path + " */\n\n";
+        int portExternSuppressInsert = -1;
+        std::set<std::string> portExternSuppressions;
+        std::set<std::string> portNonStaticGlobalNames;
         if (s_portMode) {
+            for (auto &g : types.globals()) {
+                if (!g.isStatic && !g.name.empty() && g.address &&
+                    isCIdentifier(g.name))
+                    portNonStaticGlobalNames.insert(g.name);
+            }
+        }
+        if (s_portMode) {
+            portExternSuppressInsert = out.size();
             out += "#include \"cod2_types.h\"\n\n";
         } else {
         out += platformTypedefs();
@@ -165,6 +198,8 @@ public:
                 emitAnonymousTypeDefs(out, types, g.typeRef, emittedAnonGlobals,
                                       emittedAnonGlobalNames,
                                       sourceAvailableTypeNames);
+                if (g.isStatic && portNonStaticGlobalNames.count(g.name))
+                    portExternSuppressions.insert(g.name);
             }
             out += QString::fromStdString(
                 (g.isStatic ? "static " : "") + decl) + ";\n";
@@ -371,13 +406,14 @@ public:
 
             std::set<std::string> knownNames = emittedGlobals;
             std::set<std::string> externGlobalNames;
-            std::set<std::string> headerStaticGlobalNames;
+            std::set<std::string> sourceStaticGlobalNames;
             for (auto &g : types.globals()) {
-                if (g.isStatic && !g.name.empty())
-                    headerStaticGlobalNames.insert(g.name);
+                if (g.isStatic && g.sourceFileIdx == srcIdx && !g.name.empty())
+                    sourceStaticGlobalNames.insert(g.name);
             }
             for (auto &g : types.globals()) {
-                if (!g.isStatic && !g.name.empty() && !headerStaticGlobalNames.count(g.name))
+                if (!g.isStatic && !g.name.empty() &&
+                    !sourceStaticGlobalNames.count(g.name))
                     externGlobalNames.insert(g.name);
             }
             for (size_t fi : sorted) {
@@ -461,11 +497,28 @@ public:
                 if (size == 0 || size > 65536) size = 4;
                 emittedGlobals.insert(sym.name);
                 knownNames.insert(sym.name);
+                if (portNonStaticGlobalNames.count(sym.name))
+                    portExternSuppressions.insert(sym.name);
                 out += QString::fromStdString("static char " + sym.name + "[" +
                                                std::to_string(size) + "];\n");
                 anyLocalData = true;
             }
             if (anyLocalData) out += "\n";
+        }
+
+        if (s_portMode && portExternSuppressInsert >= 0 &&
+            !portExternSuppressions.empty()) {
+            QString defs;
+            for (auto &name : portExternSuppressions) {
+                if (!isCIdentifier(name)) continue;
+                defs += QString::fromStdString("#define " +
+                                               externSuppressGuard(name) +
+                                               " 1\n");
+            }
+            if (!defs.isEmpty()) {
+                defs += "\n";
+                out.insert(portExternSuppressInsert, defs);
+            }
         }
 
         // Also scan for named variables used but not declared anywhere
@@ -827,18 +880,16 @@ public:
         // Emit extern declarations for globals
         std::set<std::string> globalDeclared;
         std::set<std::string> staticGlobalNames;
-        std::map<std::string, std::set<uint32_t>> nonStaticAddrs;
+        std::set<std::string> nonStaticGlobalNames;
         if (s_portMode) {
             for (auto &g : types.globals()) {
-                if (!g.isStatic && !g.name.empty() && g.address)
-                    nonStaticAddrs[g.name].insert(g.address);
+                if (!g.isStatic && !g.name.empty())
+                    nonStaticGlobalNames.insert(g.name);
             }
             for (auto &g : types.globals()) {
                 if (!g.isStatic || g.name.empty())
                     continue;
-                auto it = nonStaticAddrs.find(g.name);
-                if (g.address &&
-                    (it == nonStaticAddrs.end() || it->second.count(g.address)))
+                if (g.address)
                     staticGlobalNames.insert(g.name);
             }
         }
@@ -884,9 +935,8 @@ public:
         std::map<std::string, int> bestGlobalScore;
         for (auto &g : types.globals()) {
             if (g.name.empty()) continue;
-            if (s_portMode &&
-                ((g.isStatic && !nonStaticAddrs.count(g.name)) ||
-                 staticGlobalNames.count(g.name)))
+            if (s_portMode && g.isStatic &&
+                !nonStaticGlobalNames.count(g.name))
                 continue;
             auto it = bestGlobalType.find(g.name);
             int score = globalTypeScore(g);
@@ -907,7 +957,7 @@ public:
         }
         for (auto &g : types.globals()) {
             if (g.address == 0 || g.name.empty()) continue;
-            if (s_portMode && (g.isStatic || staticGlobalNames.count(g.name))) continue;
+            if (s_portMode && g.isStatic) continue;
             if (globalDeclared.count(g.name)) continue;
             // Use the best type for this global name
             if (g.name.find('<') != std::string::npos) continue;
@@ -939,7 +989,13 @@ public:
                 decl.find("(*)()") != std::string::npos ||
                 decl.find("this") != std::string::npos)
                 continue;
+            bool guardedExtern = s_portMode && staticGlobalNames.count(g.name) &&
+                                  isCIdentifier(g.name);
+            if (guardedExtern)
+                out += "#ifndef " + QString::fromStdString(externSuppressGuard(g.name)) + "\n";
             out += "extern " + QString::fromStdString(decl) + ";\n";
+            if (guardedExtern)
+                out += "#endif\n";
         }
 
         // For ForwardRef-typed globals, check if the forward tag resolves to
@@ -6603,7 +6659,27 @@ private:
                                       const std::string &fieldName = "") {
             if (!s_portMode || !baseExpr) return base;
             TypeRef castBaseType = baseType;
-            if (baseExpr->op == IROp::Var && !baseExpr->name.empty()) {
+            bool printedLocalType = false;
+            if (!base.empty() &&
+                base.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                                       "abcdefghijklmnopqrstuvwxyz"
+                                       "0123456789_") == std::string::npos &&
+                (base[0] == '_' || std::isalpha((unsigned char)base[0]))) {
+                TypeRef printedType = NullType;
+                for (auto &p : m_func.params)
+                    if (p.name == base && p.typeRef != NullType)
+                        { printedType = p.typeRef; printedLocalType = true; break; }
+                if (printedType == NullType) {
+                    for (auto &l : m_func.locals)
+                        if (l.name == base && l.typeRef != NullType)
+                            { printedType = l.typeRef; printedLocalType = true; break; }
+                }
+                if (printedType == NullType)
+                    printedType = namedVariableType(base);
+                if (printedType != NullType && m_types.isStructPointer(printedType))
+                    castBaseType = printedType;
+            }
+            if (!printedLocalType && baseExpr->op == IROp::Var && !baseExpr->name.empty()) {
                 TypeRef globalType = constPointerGlobalObjectType(baseExpr->name);
                 if (globalType != NullType && m_types.isStructPointer(globalType))
                     castBaseType = globalType;
@@ -6621,6 +6697,8 @@ private:
                 return base;
             std::string castType = m_types.formatType(castBaseType);
             bool stripsConst = castType.rfind("const ", 0) == 0;
+            if (printedLocalType && !stripsConst)
+                return base;
             // Only cast typed temps when the access needs to shed a const global view.
             if (baseExpr->op == IROp::Temp && m_tempStructPtr.count(baseExpr->tempId()) &&
                 !stripsConst)
