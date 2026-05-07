@@ -1201,6 +1201,13 @@ private:
         return dwarfStringAttr(unit, attrs, DW_AT_name, debugStr, debugStrOffsets);
     }
 
+    std::string dwarfQualifiedTypeName(const std::string &name,
+                                       const std::string &scope) const {
+        if (name.empty() || scope.empty())
+            return name;
+        return cIdentifierFromName(scope + "::" + name);
+    }
+
     uint64_t dwarfAddressFromIndex(const DwarfUnit &unit, uint64_t index,
                                    const ELFSectionRecord *debugAddr) const {
         if (!debugAddr || unit.addressSize == 0 || unit.addressSize > 8)
@@ -1495,6 +1502,7 @@ private:
     void fillDwarfType(uint32_t dieOffset, uint64_t tag,
                        const DwarfUnit &unit,
                        const std::map<uint64_t, DwarfValue> &attrs,
+                       const std::string &currentNamespace,
                        const ELFSectionRecord *debugStr,
                        const ELFSectionRecord *debugStrOffsets,
                        std::map<uint32_t, TypeRef> &typeRefs) {
@@ -1517,6 +1525,10 @@ private:
 
         std::string name = dwarfStringAttr(unit, attrs, DW_AT_name,
                                            debugStr, debugStrOffsets);
+        if (tag == DW_TAG_typedef || tag == DW_TAG_structure_type ||
+            tag == DW_TAG_class_type || tag == DW_TAG_union_type ||
+            tag == DW_TAG_enumeration_type)
+            name = dwarfQualifiedTypeName(name, currentNamespace);
         uint32_t sizeBytes = (uint32_t)dwarfUnsignedAttr(attrs, DW_AT_byte_size, ti->sizeBytes);
 
         switch (tag) {
@@ -2290,6 +2302,7 @@ private:
                         TypeRef currentArrayType,
                         TypeRef currentEnumType,
                         TypeRef currentSubroutineType,
+                        const std::string &currentNamespace,
                         int depth) {
         if (depth > 64) return;
         while (pos < end) {
@@ -2315,6 +2328,7 @@ private:
             TypeRef childArrayType = currentArrayType;
             TypeRef childEnumType = currentEnumType;
             TypeRef childSubroutineType = currentSubroutineType;
+            std::string childNamespace = currentNamespace;
             if (abbr.tag == DW_TAG_compile_unit) {
                 if (dwarfHasAttr(attrs, DW_AT_str_offsets_base))
                     unit.strOffsetsBase = (uint32_t)dwarfUnsignedAttr(attrs, DW_AT_str_offsets_base);
@@ -2326,6 +2340,12 @@ private:
                                                debugStr, debugStrOffsets);
                 if (dwarfHasAttr(attrs, DW_AT_stmt_list))
                     unit.stmtList = (uint32_t)dwarfUnsignedAttr(attrs, DW_AT_stmt_list);
+            } else if (abbr.tag == DW_TAG_namespace) {
+                std::string ns = dwarfStringAttr(unit, attrs, DW_AT_name,
+                                                 debugStr, debugStrOffsets);
+                if (!ns.empty())
+                    childNamespace = currentNamespace.empty()
+                        ? ns : currentNamespace + "::" + ns;
             } else if (abbr.tag == DW_TAG_base_type ||
                        abbr.tag == DW_TAG_pointer_type ||
                        abbr.tag == DW_TAG_reference_type ||
@@ -2343,7 +2363,7 @@ private:
                        abbr.tag == DW_TAG_enumeration_type ||
                        abbr.tag == DW_TAG_array_type ||
                        abbr.tag == DW_TAG_subroutine_type) {
-                fillDwarfType(dieOffset, abbr.tag, unit, attrs,
+                fillDwarfType(dieOffset, abbr.tag, unit, attrs, currentNamespace,
                               debugStr, debugStrOffsets, typeRefs);
                 TypeRef thisType = dwarfTypeRefForOffset(typeRefs, dwarfDieKey(unit, dieOffset));
                 if (abbr.tag == DW_TAG_structure_type || abbr.tag == DW_TAG_class_type ||
@@ -2438,7 +2458,7 @@ private:
                                debugStrOffsets, debugAddr, dieRecords, typeRefs,
                                childFuncIdx, childCompositeType,
                                childArrayType, childEnumType,
-                               childSubroutineType, depth + 1);
+                               childSubroutineType, childNamespace, depth + 1);
         }
     }
 
@@ -2514,7 +2534,7 @@ private:
             pos = dieStart;
             parseDwarfDIEs(pos, unitEnd, abbrevs, unit, debugTypes, debugStr,
                            debugLineStr, debugStrOffsets, debugAddr, dieRecords, typeRefs,
-                           -1, NullType, NullType, NullType, NullType, 0);
+                           -1, NullType, NullType, NullType, NullType, "", 0);
             finalizeDwarfTypes(typeRefs);
             pos = unitEnd;
         }
@@ -2619,7 +2639,7 @@ private:
             pos = dieStart;
             parseDwarfDIEs(pos, unitEnd, abbrevs, unit, debugInfo, debugStr,
                            debugLineStr, debugStrOffsets, debugAddr, dieRecords, typeRefs,
-                           -1, NullType, NullType, NullType, NullType, 0);
+                           -1, NullType, NullType, NullType, NullType, "", 0);
             finalizeDwarfTypes(typeRefs);
             pos = unitEnd;
         }
