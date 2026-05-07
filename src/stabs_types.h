@@ -469,6 +469,14 @@ public:
 
     // Format a type for a variable declaration: "type name"
     std::string formatDecl(TypeRef ref, const std::string &varName) const {
+        auto pointerQualifier = [](StabsTypeKind kind) -> const char * {
+            switch (kind) {
+            case StabsTypeKind::Const: return "const";
+            case StabsTypeKind::Volatile: return "volatile";
+            case StabsTypeKind::Restrict: return "restrict";
+            default: return nullptr;
+            }
+        };
         auto formatArrayDecl = [&](TypeRef start, std::string &out) -> bool {
             TypeRef cur = start;
             std::vector<std::string> qualifiers;
@@ -508,6 +516,42 @@ public:
 
         auto *t = getType(ref);
         if (!t) return "int " + varName;
+
+        std::string qualifiedPointerDecl;
+        {
+            TypeRef cur = ref;
+            auto *ct = t;
+            std::vector<std::string> ptrQualifiers;
+            while (ct) {
+                const char *qualifier = pointerQualifier(ct->kind);
+                if (!qualifier)
+                    break;
+                ptrQualifiers.push_back(qualifier);
+                cur = ct->targetType;
+                ct = getType(cur);
+            }
+            if (!ptrQualifiers.empty() && ct && ct->kind == StabsTypeKind::Pointer) {
+                auto *rawTgt = getType(ct->targetType);
+                auto *tgt = rawTgt ? rawTgt : resolveType(ct->targetType);
+                std::string quals;
+                for (const auto &q : ptrQualifiers) {
+                    if (!quals.empty()) quals += " ";
+                    quals += q;
+                }
+                if (tgt && tgt->kind == StabsTypeKind::Function) {
+                    std::string ret = formatType(tgt->targetType);
+                    qualifiedPointerDecl = ret + " (* " + quals + " " + varName + ")(" +
+                                           formatFunctionParamTypes(*tgt) + ")";
+                } else {
+                    std::string inner = formatType(ct->targetType);
+                    if (inner.find('[') != std::string::npos)
+                        inner = inner.substr(0, inner.find('['));
+                    qualifiedPointerDecl = inner + " * " + quals + " " + varName;
+                }
+            }
+        }
+        if (!qualifiedPointerDecl.empty())
+            return qualifiedPointerDecl;
 
         // Handle arrays specially — collect all dimensions for multi-dimensional arrays
         if (t->kind == StabsTypeKind::Array) {
