@@ -223,6 +223,7 @@ constexpr uint64_t DW_ATE_signed           = 0x05;
 constexpr uint64_t DW_ATE_signed_char      = 0x06;
 constexpr uint64_t DW_ATE_unsigned         = 0x07;
 constexpr uint64_t DW_ATE_unsigned_char    = 0x08;
+constexpr uint64_t DW_ATE_UTF              = 0x10;
 constexpr uint8_t  DW_OP_addr              = 0x03;
 constexpr uint8_t  DW_OP_const1u           = 0x08;
 constexpr uint8_t  DW_OP_const1s           = 0x09;

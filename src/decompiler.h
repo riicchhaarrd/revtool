@@ -1285,11 +1285,14 @@ public:
                    "typedef int int32_t __attribute__((mode(SI)));\n"
                    "typedef unsigned int uint32_t __attribute__((mode(SI)));\n"
                    "typedef int int64_t __attribute__((mode(DI)));\n"
-                   "typedef unsigned int uint64_t __attribute__((mode(DI)));\n";
+                   "typedef unsigned int uint64_t __attribute__((mode(DI)));\n"
+                   "typedef uint16_t char16_t;\n"
+                   "typedef uint32_t char32_t;\n";
         } else {
             out += "#include <stdint.h>\n"
                    "#include <stddef.h>\n"
                    "#include <stdarg.h>\n"
+                   "#include <uchar.h>\n"
                    "#include <math.h>\n"
                    "#include <string.h>\n"
                    "#include <stdio.h>\n";
