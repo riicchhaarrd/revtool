@@ -1471,6 +1471,7 @@ private:
                 ti->targetType = dwarfBuiltinVoidType(typeRefs);
             break;
         case DW_TAG_reference_type:
+        case DW_TAG_rvalue_reference_type:
             ti->kind = StabsTypeKind::Reference;
             ti->sizeBytes = unit.addressSize;
             ti->targetType = dwarfTypeAttr(unit, attrs, DW_AT_type, typeRefs);
@@ -2152,6 +2153,7 @@ private:
             } else if (abbr.tag == DW_TAG_base_type ||
                        abbr.tag == DW_TAG_pointer_type ||
                        abbr.tag == DW_TAG_reference_type ||
+                       abbr.tag == DW_TAG_rvalue_reference_type ||
                        abbr.tag == DW_TAG_const_type ||
                        abbr.tag == DW_TAG_volatile_type ||
                        abbr.tag == DW_TAG_typedef ||
