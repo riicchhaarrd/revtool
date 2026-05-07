@@ -657,6 +657,83 @@ std::string decompileFunction(unsigned int addr) {
     return Decompiler::decompile(g_mf, addr).toStdString();
 }
 
+static uint32_t functionSizeForDisassembly(const MachOFile &mf,
+                                           const std::vector<FunctionInfo> &funcs,
+                                           const Section *sec,
+                                           uint32_t addr) {
+    if (!sec || addr < sec->addr || addr >= sec->addr + sec->size)
+        return 0;
+
+    uint32_t maxSize = sec->size - (addr - sec->addr);
+    uint32_t size = 0;
+    for (const auto &fn : funcs) {
+        if (fn.address == addr && fn.size > 0) {
+            size = fn.size;
+            break;
+        }
+    }
+    if (size == 0) {
+        uint32_t next = 0;
+        for (const auto &fn : funcs) {
+            if (fn.address > addr && mf.sectionForAddress(fn.address) == sec &&
+                (!next || fn.address < next))
+                next = fn.address;
+        }
+        if (next > addr)
+            size = next - addr;
+    }
+    if (size == 0 || size > maxSize)
+        size = maxSize;
+    return size;
+}
+
+std::string disassembleFunction(unsigned int addr) {
+    if (!g_loaded) return "error: no binary loaded";
+    const Section *sec = g_mf.sectionForAddress(addr);
+    if (!sec || !g_mf.isCodeSection(*sec))
+        return "error: address is not in executable code";
+    if (addr < sec->addr)
+        return "error: invalid function address";
+
+    uint32_t codeOff = addr - sec->addr;
+    if (codeOff >= sec->size)
+        return "error: function bytes unavailable";
+    uint32_t size = functionSizeForDisassembly(g_mf, collectFunctions(g_mf), sec, addr);
+    if (size == 0)
+        return "error: empty function";
+    const uint8_t *code = g_mf.bytesAt(sec->offset + codeOff, size);
+    if (!code)
+        return "error: function bytes unavailable";
+
+    csh cs;
+    if (cs_open(CS_ARCH_X86, CS_MODE_32, &cs) != CS_ERR_OK)
+        return "error: capstone unavailable";
+    cs_option(cs, CS_OPT_SYNTAX, CS_OPT_SYNTAX_INTEL);
+
+    cs_insn *insn = nullptr;
+    size_t count = cs_disasm(cs, code, size, addr, 0, &insn);
+    std::string out;
+    for (size_t i = 0; i < count; ++i) {
+        char line[192];
+        char bytes[64] = {0};
+        size_t bytePos = 0;
+        for (size_t b = 0; b < insn[i].size && b < 10; ++b) {
+            int n = snprintf(bytes + bytePos, sizeof(bytes) - bytePos,
+                             b ? " %02X" : "%02X", insn[i].bytes[b]);
+            if (n <= 0 || (size_t)n >= sizeof(bytes) - bytePos)
+                break;
+            bytePos += (size_t)n;
+        }
+        snprintf(line, sizeof(line), "%08llX  %-30s  %-8s %s\n",
+                 (unsigned long long)insn[i].address, bytes,
+                 insn[i].mnemonic, insn[i].op_str);
+        out += line;
+    }
+    cs_free(insn, count);
+    cs_close(&cs);
+    return out.empty() ? "error: no instructions decoded" : out;
+}
+
 std::string decompileSourceFile(int idx) {
     if (!g_loaded) return "error: no binary loaded";
     return Decompiler::decompileFile(g_mf, idx).toStdString();
@@ -686,6 +763,7 @@ EMSCRIPTEN_BINDINGS(dis) {
     emscripten::function("listStringsJson", &listStringsJson);
     emscripten::function("findStringXrefsByAddressJson", &findStringXrefsByAddressJson);
     emscripten::function("decompileFunction", &decompileFunction);
+    emscripten::function("disassembleFunction", &disassembleFunction);
     emscripten::function("decompileSourceFile", &decompileSourceFile);
     emscripten::function("setUseSSA", &setUseSSA);
     emscripten::function("setFlatMode", &setFlatMode);
