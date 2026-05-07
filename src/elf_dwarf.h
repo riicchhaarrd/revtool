@@ -217,6 +217,7 @@ constexpr uint8_t DW_LNE_set_discriminator = 4;
 
 constexpr uint64_t DW_ATE_address          = 0x01;
 constexpr uint64_t DW_ATE_boolean          = 0x02;
+constexpr uint64_t DW_ATE_complex_float    = 0x03;
 constexpr uint64_t DW_ATE_float            = 0x04;
 constexpr uint64_t DW_ATE_signed           = 0x05;
 constexpr uint64_t DW_ATE_signed_char      = 0x06;

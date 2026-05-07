@@ -1381,6 +1381,8 @@ private:
                                 const std::string &name) const {
         if (name == "void") return StabsTypeKind::Void;
         if (name == "bool" || name == "_Bool") return StabsTypeKind::Bool;
+        if (encoding == DW_ATE_complex_float)
+            return StabsTypeKind::Unknown;
         if (encoding == DW_ATE_float) {
             if (name == "long double" || sizeBytes > 8)
                 return StabsTypeKind::LongDouble;
@@ -1410,6 +1412,19 @@ private:
             return StabsTypeKind::Int;
         }
         return StabsTypeKind::Unknown;
+    }
+
+    std::string dwarfBaseTypeName(uint64_t encoding, uint64_t sizeBytes,
+                                  const std::string &name) const {
+        if (encoding != DW_ATE_complex_float)
+            return name;
+        if (name == "complex float") return "float _Complex";
+        if (name == "complex double") return "double _Complex";
+        if (name == "complex long double") return "long double _Complex";
+        if (!name.empty()) return name;
+        if (sizeBytes <= 8) return "float _Complex";
+        if (sizeBytes <= 16) return "double _Complex";
+        return "long double _Complex";
     }
 
     uint32_t dwarfLocationAddress(const DwarfUnit &unit, const DwarfValue &value,
@@ -1537,6 +1552,7 @@ private:
         switch (tag) {
         case DW_TAG_base_type: {
             uint64_t encoding = dwarfUnsignedAttr(attrs, DW_AT_encoding, 0);
+            name = dwarfBaseTypeName(encoding, sizeBytes, name);
             ti->kind = dwarfBaseKind(encoding, sizeBytes, name);
             ti->name = name;
             ti->sizeBytes = (int)sizeBytes;
