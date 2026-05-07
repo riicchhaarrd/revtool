@@ -1569,6 +1569,34 @@ private:
             ti->fields.push_back(std::move(field));
     }
 
+    void addDwarfInheritance(TypeRef compositeType,
+                             const DwarfUnit &unit,
+                             const std::map<uint64_t, DwarfValue> &attrs,
+                             std::map<uint32_t, TypeRef> &typeRefs) {
+        if (compositeType == NullType) return;
+        StabsTypeInfo *ti = m_typeTable.getMutableType(compositeType);
+        if (!ti || ti->kind != StabsTypeKind::Struct)
+            return;
+
+        StabsTypeField field;
+        field.typeRef = dwarfTypeAttr(unit, attrs, DW_AT_type, typeRefs);
+        field.name = "_base";
+        field.isInheritance = true;
+        auto it = attrs.find(DW_AT_data_member_location);
+        if (it != attrs.end() && it->second.present) {
+            int byteOffset = 0;
+            if (dwarfDataMemberByteOffset(it->second, byteOffset))
+                field.bitOffset = byteOffset * 8;
+        }
+        if (auto *bt = m_typeTable.resolveType(field.typeRef)) {
+            if (!bt->name.empty())
+                field.name = "_base_" + bt->name;
+            field.bitSize = bt->sizeBytes > 0 ? bt->sizeBytes * 8 : 0;
+        }
+        if (field.typeRef != NullType)
+            ti->fields.push_back(std::move(field));
+    }
+
     void addDwarfEnumerator(TypeRef enumType,
                             const DwarfUnit &unit,
                             const std::map<uint64_t, DwarfValue> &attrs,
@@ -1676,6 +1704,31 @@ private:
                     }
                 } else if (ti->kind == StabsTypeKind::Struct ||
                            ti->kind == StabsTypeKind::Union) {
+                    std::vector<StabsTypeField> expandedFields;
+                    expandedFields.reserve(ti->fields.size());
+                    bool expandedInheritance = false;
+                    for (const auto &field : ti->fields) {
+                        if (!field.isInheritance) {
+                            expandedFields.push_back(field);
+                            continue;
+                        }
+                        auto *base = m_typeTable.resolveType(field.typeRef);
+                        if (!base || base->fields.empty()) {
+                            expandedFields.push_back(field);
+                            continue;
+                        }
+                        for (auto baseField : base->fields) {
+                            if (baseField.isInheritance)
+                                continue;
+                            baseField.bitOffset += field.bitOffset;
+                            expandedFields.push_back(std::move(baseField));
+                        }
+                        expandedInheritance = true;
+                    }
+                    if (expandedInheritance) {
+                        ti->fields = std::move(expandedFields);
+                        changed = true;
+                    }
                     int maxBitEnd = 0;
                     for (auto &field : ti->fields) {
                         if (field.bitSize == 0) {
@@ -2195,6 +2248,8 @@ private:
             } else if (abbr.tag == DW_TAG_member) {
                 addDwarfMember(currentCompositeType, unit, attrs,
                                debugStr, debugStrOffsets, typeRefs);
+            } else if (abbr.tag == DW_TAG_inheritance) {
+                addDwarfInheritance(currentCompositeType, unit, attrs, typeRefs);
             } else if (abbr.tag == DW_TAG_enumerator) {
                 addDwarfEnumerator(currentEnumType, unit, attrs,
                                    debugStr, debugStrOffsets);

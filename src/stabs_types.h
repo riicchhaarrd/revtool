@@ -33,6 +33,7 @@ struct StabsTypeField {
     TypeRef     typeRef = NullType;
     int         bitOffset = 0;
     int         bitSize   = 0;
+    bool        isInheritance = false;
 };
 
 struct StabsEnumVal {

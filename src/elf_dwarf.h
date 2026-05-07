@@ -101,6 +101,7 @@ constexpr uint64_t DW_TAG_subroutine_type  = 0x15;
 constexpr uint64_t DW_TAG_typedef          = 0x16;
 constexpr uint64_t DW_TAG_union_type       = 0x17;
 constexpr uint64_t DW_TAG_unspecified_parameters = 0x18;
+constexpr uint64_t DW_TAG_inheritance      = 0x1C;
 constexpr uint64_t DW_TAG_subrange_type    = 0x21;
 constexpr uint64_t DW_TAG_base_type        = 0x24;
 constexpr uint64_t DW_TAG_const_type       = 0x26;
