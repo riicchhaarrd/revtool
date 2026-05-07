@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>dis — Binary Decompiler</title>
+<title>revtool — Binary Decompiler</title>
 <style>
 /* ── Reset / Base ─────────────────────────────────────────────────── */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -271,6 +271,30 @@ body.light #icon-moon { display: none; }
   color: var(--text-bin-ph); font-style: italic; padding: 8px 12px; font-size: 12px;
 }
 
+/* Project DB */
+.db-panel {
+  padding: 7px 8px 9px; border-bottom: 1px solid var(--border-bin);
+  display: flex; flex-direction: column; gap: 7px;
+}
+.db-actions { display: grid; grid-template-columns: repeat(5, 1fr); gap: 5px; }
+.db-btn {
+  background: var(--bg-input); border: 1px solid var(--border-input);
+  color: var(--text); border-radius: 3px; padding: 4px 6px;
+  font: 11px/1.2 inherit; cursor: pointer;
+}
+.db-btn:hover { background: var(--bg-hover); border-color: var(--accent); }
+.db-btn:disabled { opacity: .45; cursor: default; border-color: var(--border-input); }
+#db-status { color: var(--text-dim); font-size: 11px; min-height: 14px; }
+#custom-types {
+  width: 100%; height: 94px; resize: vertical; min-height: 54px; max-height: 220px;
+  background: var(--bg-input); border: 1px solid var(--border-input);
+  border-radius: 3px; color: var(--text); outline: none;
+  font: 11px/1.45 'Cascadia Code','JetBrains Mono','Fira Code',Consolas,monospace;
+  padding: 6px 7px;
+}
+#custom-types:focus { border-color: var(--accent); }
+#db-file-input { display: none; }
+
 /* Search box */
 .sb-search { margin: 5px 8px; position: relative; flex-shrink: 0; }
 .sb-search input {
@@ -304,8 +328,19 @@ body.light #icon-moon { display: none; }
   font-size: 10px; background: var(--badge-bg); color: var(--badge-fg);
   padding: 1px 5px; border-radius: 9px; flex-shrink: 0;
 }
+.item-action {
+  display: flex; align-items: center; justify-content: center;
+  width: 18px; height: 18px; border: 0; border-radius: 3px;
+  background: transparent; color: var(--text-dim); cursor: pointer;
+  opacity: 0; flex-shrink: 0;
+}
+.item:hover .item-action, .item.active .item-action { opacity: .85; }
+.item-action:hover { background: var(--tab-x-hover); color: var(--text); opacity: 1; }
+.item.manual .lbl { color: var(--text-bi-val); }
+.item.noted .lbl::after { content: " *"; color: var(--c-cmt); }
 .item.active .cnt { background: rgba(0,59,142,.15); }
 body:not(.light) .item.active .cnt { background: rgba(255,255,255,.12); color: #aaa; }
+.item.type-item .cnt { text-transform: uppercase; }
 .list-empty { padding: 10px 12px; color: var(--text-placeholder); font-style: italic; font-size: 12px; text-align: center; }
 
 /* ── Editor area ──────────────────────────────────────────────────── */
@@ -354,14 +389,30 @@ body:not(.light) .item.active .cnt { background: rgba(255,255,255,.12); color: #
 
 /* Code pane */
 #code-pane {
-  display: none; flex: 1; overflow: auto; position: relative;
+  display: none; flex: 1; overflow: hidden; position: relative;
   background: var(--bg);
 }
-#code-pane::-webkit-scrollbar { width: 10px; height: 10px; }
-#code-pane::-webkit-scrollbar-track { background: var(--scrollbar-track); }
-#code-pane::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 5px; }
-#code-pane::-webkit-scrollbar-thumb:hover { background: var(--scrollbar-hover); }
 #code-pane.show { display: flex; }
+.code-panel {
+  min-width: 0; display: flex; flex-direction: column; overflow: hidden;
+  background: var(--bg);
+}
+#decomp-pane { flex: 1 1 58%; position: relative; }
+#asm-pane {
+  flex: 0 0 42%; border-left: 1px solid var(--border-code); display: none;
+}
+#code-pane.has-asm #asm-pane { display: flex; }
+.pane-title {
+  height: 28px; flex-shrink: 0; padding: 7px 12px 0 14px;
+  border-bottom: 1px solid var(--border-code);
+  font-size: 10px; font-weight: 700; letter-spacing: .8px;
+  text-transform: uppercase; color: var(--text-dim); user-select: none;
+}
+.pane-scroll { flex: 1; overflow: auto; position: relative; }
+.pane-scroll::-webkit-scrollbar { width: 10px; height: 10px; }
+.pane-scroll::-webkit-scrollbar-track { background: var(--scrollbar-track); }
+.pane-scroll::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 5px; }
+.pane-scroll::-webkit-scrollbar-thumb:hover { background: var(--scrollbar-hover); }
 #code-inner { display: flex; min-width: max-content; }
 
 #line-nums {
@@ -376,19 +427,30 @@ body:not(.light) .item.active .cnt { background: rgba(255,255,255,.12); color: #
   font: 13px/1.6 'Cascadia Code','JetBrains Mono','Fira Code',Consolas,monospace;
   white-space: pre; tab-size: 4; min-width: 0; color: var(--text);
 }
+#asm-view {
+  padding: 14px 18px 40px 16px;
+  font: 12px/1.6 'Cascadia Code','JetBrains Mono','Fira Code',Consolas,monospace;
+  white-space: pre; tab-size: 8; min-width: max-content; color: var(--text);
+}
 
 /* Copy button */
 #copy-btn {
-  position: sticky; top: 14px; right: 14px; margin-left: -46px;
+  position: absolute; top: 42px; right: 14px;
   width: 32px; height: 32px; background: var(--bg-copy); border: 1px solid var(--border-copy);
   border-radius: 4px; cursor: pointer; color: var(--text-dim); display: none;
-  align-items: center; justify-content: center; flex-shrink: 0;
-  align-self: flex-start; transition: background .1s, color .1s; z-index: 2;
+  align-items: center; justify-content: center; transition: background .1s, color .1s; z-index: 2;
 }
 #copy-btn:hover { background: var(--bg-hover); color: var(--text); }
 #copy-btn.ok { color: #4ec9b0 !important; }
 body.light #copy-btn.ok { color: #1a7a3a !important; }
 #code-pane.show #copy-btn { display: flex; }
+
+@media (max-width: 900px) {
+  #code-pane.has-asm { flex-direction: column; }
+  #asm-pane {
+    flex: 0 0 40%; border-left: 0; border-top: 1px solid var(--border-code);
+  }
+}
 
 /* ── Syntax colours ───────────────────────────────────────────────── */
 .k { color: var(--c-kw);   }
@@ -458,7 +520,7 @@ body:not(.light) .toast.ok  { color: #4ec9b0; }
       <line x1="14" y1="7.5" x2="17.5" y2="7.5"  stroke="#9cdcfe" stroke-width="1.5" stroke-linecap="round"/>
       <line x1="14" y1="11.5" x2="17.5" y2="11.5" stroke="#9cdcfe" stroke-width="1.5" stroke-linecap="round"/>
     </svg>
-    dis
+    revtool
   </a>
   <span id="header-tagline">Binary Decompiler</span>
   <div id="header-gap"></div>
@@ -504,6 +566,7 @@ body:not(.light) .toast.ok  { color: #4ec9b0; }
     Open Binary
   </button>
   <input type="file" id="file-input">
+  <input type="file" id="db-file-input" accept=".json,.revtool.json,application/json">
 </header>
 
 <!-- ── Main ───────────────────────────────────────────────────── -->
@@ -522,6 +585,53 @@ body:not(.light) .toast.ok  { color: #4ec9b0; }
       <div class="sb-body">
         <div id="bin-placeholder">No binary loaded</div>
         <div id="bin-info" style="display:none"></div>
+      </div>
+    </div>
+
+    <!-- Project database -->
+    <div class="sb-section" id="sec-project">
+      <div class="sb-head" onclick="toggleSec('sec-project')">
+        Project DB
+        <span class="badge" id="db-badge" style="display:none">0</span>
+        <span class="chev">
+          <svg width="9" height="9" viewBox="0 0 9 9" fill="none"><path d="M1.5 3 4.5 6.5 7.5 3" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </span>
+      </div>
+      <div class="sb-body">
+        <div class="db-panel">
+          <div class="db-actions">
+            <button class="db-btn" id="db-save-btn" onclick="saveProjectDb()">Save</button>
+            <button class="db-btn" id="db-new-type-btn" onclick="newStructType()">Type</button>
+            <button class="db-btn" id="db-infer-btn" onclick="inferStructs()">Infer</button>
+            <button class="db-btn" id="db-export-btn" onclick="exportProjectDb()">Export</button>
+            <button class="db-btn" id="db-load-btn" onclick="document.getElementById('db-file-input').click()">Load</button>
+          </div>
+          <textarea id="custom-types" spellcheck="false" placeholder="typedefs / structs" oninput="onCustomTypesChanged()"></textarea>
+          <div id="db-status">No binary loaded</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Manual and inferred types -->
+    <div class="sb-section grow" id="sec-types">
+      <div class="sb-head" onclick="toggleSec('sec-types')">
+        Types
+        <span class="badge" id="type-badge" style="display:none">0</span>
+        <span class="chev">
+          <svg width="9" height="9" viewBox="0 0 9 9" fill="none"><path d="M1.5 3 4.5 6.5 7.5 3" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </span>
+      </div>
+      <div class="sb-body">
+        <div class="sb-search">
+          <svg width="11" height="11" viewBox="0 0 11 11" fill="none">
+            <circle cx="4.5" cy="4.5" r="3" stroke="currentColor" stroke-width="1.2"/>
+            <line x1="7" y1="7" x2="10" y2="10" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+          </svg>
+          <input id="type-filter" type="text" placeholder="Search types…" oninput="filterTypes()">
+        </div>
+        <div class="item-list" id="type-list">
+          <div class="list-empty">Load a binary</div>
+        </div>
       </div>
     </div>
 
@@ -635,22 +745,33 @@ body:not(.light) .toast.ok  { color: #4ec9b0; }
           <line x1="15" y1="25" x2="22" y2="25" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
         </svg>
         <span id="welcome-line1">Drop a binary here</span>
-        <span id="welcome-line2">or click to browse · Mach-O, PE32, and ELF32 i386 supported</span>
+        <span id="welcome-line2">or click to browse · Mach-O, PE32, ELF32, and ELF64 supported</span>
       </div>
     </div>
 
     <!-- Code -->
     <div id="code-pane">
-      <div id="code-inner">
-        <div id="line-nums"></div>
-        <div id="code-view"></div>
+      <div id="decomp-pane" class="code-panel">
+        <div class="pane-title">Decompiler</div>
+        <div id="decomp-scroll" class="pane-scroll">
+          <div id="code-inner">
+            <div id="line-nums"></div>
+            <div id="code-view"></div>
+          </div>
+        </div>
+        <button id="copy-btn" title="Copy code" onclick="copyCode()">
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+            <rect x="5" y="3" width="7" height="9" rx="1" stroke="currentColor" stroke-width="1.3" fill="none"/>
+            <path d="M3 10.5V2h5.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </button>
       </div>
-      <button id="copy-btn" title="Copy code" onclick="copyCode()">
-        <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-          <rect x="5" y="3" width="7" height="9" rx="1" stroke="currentColor" stroke-width="1.3" fill="none"/>
-          <path d="M3 10.5V2h5.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
-        </svg>
-      </button>
+      <div id="asm-pane" class="code-panel">
+        <div class="pane-title">Disassembly</div>
+        <div id="asm-scroll" class="pane-scroll">
+          <div id="asm-view"></div>
+        </div>
+      </div>
     </div>
   </div>
 </div>
@@ -697,13 +818,20 @@ let mod      = null;
 let tabs     = [];
 let activeId = null;
 let curCode  = '';
+let curAsm   = '';
 let allFns   = [];
 let allSrcs  = [];
 let allStrings = [];
 let curXrefs = [];
+let allTypes = [];
 let activeStringAddr = null;
 let activeXrefAddr = null;
 let currentFormat = '';
+let currentBinaryHash = '';
+let currentBinaryName = '';
+let currentBinarySize = 0;
+let projectDb = null;
+let projectDbSaveTimer = null;
 let decompVersion = 0;
 
 function parseJson(text, fallback) {
@@ -754,15 +882,22 @@ function decompileTab(tab) {
     : mod.decompileSourceFile(tab.srcIdx);
 }
 
+function disassembleTab(tab) {
+  if (tab.kind !== 'fn' || typeof mod.disassembleFunction !== 'function')
+    return '';
+  return mod.disassembleFunction(tab.addr);
+}
+
 function refreshTab(tab, statusPrefix) {
   if (!mod || !tab) return;
   spin(true);
   sbMsg((statusPrefix || 'Decompiling') + ' ' + tab.label + '…');
   setTimeout(() => {
     tab.code = decompileTab(tab);
+    tab.asm = disassembleTab(tab);
     tab.version = decompVersion;
     spin(false);
-    if (activeId === tab.id) showCode(tab.code);
+    if (activeId === tab.id) showTab(tab);
     sbMsg(tab.label + ' · ' + countLines(tab.code) + ' lines');
   }, 10);
 }
@@ -784,6 +919,11 @@ createDisModule().then(m => {
 document.getElementById('file-input').addEventListener('change', function() {
   if (this.files[0]) loadFile(this.files[0]);
 });
+document.getElementById('db-file-input').addEventListener('change', function() {
+  if (this.files[0]) importProjectDb(this.files[0]);
+  this.value = '';
+});
+renderProjectDb();
 document.querySelectorAll('[data-decomp-option]').forEach(el => {
   el.addEventListener('change', function() {
     if (!mod) return;
@@ -826,10 +966,17 @@ function loadFile(file) {
     }
     spin(false);
     if (res.startsWith('error:')) { toast(res, 'err'); sbMsg(res, true); return; }
+    currentBinaryHash = hashBytes(bytes);
+    currentBinaryName = file.name;
+    currentBinarySize = bytes.length;
+    projectDb = loadProjectDb(currentBinaryHash, currentBinaryName);
+    applyProjectDbToBackend();
+    resetEditorTabs();
     document.getElementById('hdr-txt').textContent = file.name;
     sbMsg(file.name + ' · ' + res.replace('ok: ', ''));
     toast(res.replace('ok: ', ''), 'ok');
     populateSidebar(file.name, bytes.length);
+    renderProjectDb();
   };
   reader.readAsArrayBuffer(file);
 }
@@ -858,6 +1005,423 @@ function loadBinaryBytes(bytes) {
   } finally {
     mod._free(ptr);
   }
+}
+
+// ── Project DB ──────────────────────────────────────────────────────
+function hashBytes(bytes) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < bytes.length; i++) {
+    h ^= bytes[i];
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return bytes.length.toString(16) + '-' + h.toString(16).padStart(8, '0');
+}
+
+function emptyProjectDb(hash, name) {
+  return {
+    version: 1,
+    binaryHash: hash || '',
+    binaryName: name || '',
+    functionNames: {},
+    functionNotes: {},
+    customTypes: ''
+  };
+}
+
+function normalizeProjectDb(raw, hash, name) {
+  const db = emptyProjectDb(hash, name);
+  if (!raw || typeof raw !== 'object') return db;
+  db.version = Number(raw.version || 1);
+  db.binaryHash = hash || raw.binaryHash || '';
+  db.binaryName = name || raw.binaryName || '';
+  db.functionNames = raw.functionNames && typeof raw.functionNames === 'object'
+    ? Object.assign({}, raw.functionNames)
+    : {};
+  db.functionNotes = raw.functionNotes && typeof raw.functionNotes === 'object'
+    ? Object.assign({}, raw.functionNotes)
+    : {};
+  db.customTypes = typeof raw.customTypes === 'string' ? raw.customTypes : '';
+  return db;
+}
+
+function projectDbKey(hash) {
+  return 'revtool-db:' + hash;
+}
+
+function loadProjectDb(hash, name) {
+  try {
+    const raw = localStorage.getItem(projectDbKey(hash));
+    return raw ? normalizeProjectDb(JSON.parse(raw), hash, name) : emptyProjectDb(hash, name);
+  } catch (_) {
+    return emptyProjectDb(hash, name);
+  }
+}
+
+function addrKey(addr) {
+  return shortHex(addr);
+}
+
+function parseAddrKey(key) {
+  const s = String(key || '').trim();
+  if (!s) return 0;
+  return s.toLowerCase().startsWith('0x') ? parseInt(s, 16) : parseInt(s, 10);
+}
+
+function hasManualFunctionName(addr) {
+  return !!(projectDb && projectDb.functionNames && projectDb.functionNames[addrKey(addr)]);
+}
+
+function functionNote(addr) {
+  return projectDb && projectDb.functionNotes
+    ? String(projectDb.functionNotes[addrKey(addr)] || '')
+    : '';
+}
+
+function hasFunctionNote(addr) {
+  return !!functionNote(addr).trim();
+}
+
+function isValidCIdentifier(name) {
+  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(name || '');
+}
+
+function applyProjectDbToBackend() {
+  if (!mod || !projectDb || !projectDb.functionNames) return;
+  for (const [key, name] of Object.entries(projectDb.functionNames)) {
+    const addr = parseAddrKey(key);
+    if (!addr || !isValidCIdentifier(name)) continue;
+    if (typeof mod.renameFunction === 'function')
+      mod.renameFunction(addr, name);
+  }
+}
+
+function saveProjectDb(opts) {
+  const quiet = opts && opts.quiet;
+  if (!currentBinaryHash || !projectDb) {
+    if (!quiet) toast('No binary loaded', 'err');
+    renderProjectDb();
+    return;
+  }
+  projectDb.binaryHash = currentBinaryHash;
+  projectDb.binaryName = currentBinaryName;
+  localStorage.setItem(projectDbKey(currentBinaryHash), JSON.stringify(projectDb));
+  renderProjectDb();
+  if (!quiet) toast('Project DB saved', 'ok');
+}
+
+function scheduleProjectDbSave() {
+  clearTimeout(projectDbSaveTimer);
+  projectDbSaveTimer = setTimeout(() => saveProjectDb({ quiet: true }), 250);
+  renderProjectDb();
+}
+
+function exportProjectDb() {
+  if (!currentBinaryHash || !projectDb) { toast('No binary loaded', 'err'); return; }
+  saveProjectDb({ quiet: true });
+  const blob = new Blob([JSON.stringify(projectDb, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  const base = basename(currentBinaryName || 'binary').replace(/[^A-Za-z0-9._-]+/g, '_');
+  a.href = URL.createObjectURL(blob);
+  a.download = base + '.revtool.json';
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 0);
+}
+
+function importProjectDb(file) {
+  if (!currentBinaryHash) { toast('Load a binary before importing a DB', 'err'); return; }
+  const reader = new FileReader();
+  reader.onload = ev => {
+    try {
+      const raw = JSON.parse(String(ev.target.result || '{}'));
+      if (raw.binaryHash && raw.binaryHash !== currentBinaryHash)
+        toast('DB hash differs from the loaded binary; applying by address', 'err');
+      projectDb = normalizeProjectDb(raw, currentBinaryHash, currentBinaryName);
+      applyProjectDbToBackend();
+      saveProjectDb({ quiet: true });
+      reloadProjectViews();
+      toast('Project DB loaded', 'ok');
+    } catch (err) {
+      toast('Invalid project DB: ' + (err && err.message ? err.message : String(err)), 'err');
+    }
+  };
+  reader.readAsText(file);
+}
+
+function inferStructs() {
+  if (!currentBinaryHash) { toast('Load a binary first', 'err'); return; }
+  if (!mod || typeof mod.inferStructCandidatesJson !== 'function') {
+    toast('WASM module does not expose struct inference', 'err');
+    return;
+  }
+  if (!projectDb) projectDb = emptyProjectDb(currentBinaryHash, currentBinaryName);
+  projectDb.customTypes = document.getElementById('custom-types').value;
+  spin(true);
+  sbMsg('Inferring struct candidates...');
+  setTimeout(() => {
+    const data = parseJson(mod.inferStructCandidatesJson(), { candidates: [] });
+    spin(false);
+    if (data.error) { toast(data.error, 'err'); sbMsg(data.error, true); return; }
+    const candidates = data.candidates || [];
+    if (!candidates.length) {
+      toast('No struct candidates found', 'err');
+      sbMsg('No struct candidates found');
+      return;
+    }
+
+    let existing = projectDb.customTypes || '';
+    const additions = [];
+    for (const c of candidates) {
+      if (!c.name || !c.c_decl) continue;
+      if (existing.includes('struct ' + c.name)) continue;
+      const where = (c.function_name || c.function_address_hex || 'function') + ' / ' + (c.base_register || 'reg');
+      additions.push('/* inferred: ' + where + ' */\n' + c.c_decl);
+      existing += '\n' + c.c_decl;
+    }
+    if (!additions.length) {
+      toast('Struct candidates already exist in custom types', 'ok');
+      sbMsg(candidates.length + ' struct candidates already present');
+      return;
+    }
+
+    const prefix = projectDb.customTypes && projectDb.customTypes.trim() ? projectDb.customTypes.trimEnd() + '\n\n' : '';
+    projectDb.customTypes = prefix + additions.join('\n\n') + '\n';
+    clearTimeout(projectDbSaveTimer);
+    saveProjectDb({ quiet: true });
+    renderProjectDb();
+    refreshActiveView();
+    toast(additions.length + ' struct candidates added', 'ok');
+    sbMsg(additions.length + ' struct candidates added to Project DB');
+  }, 10);
+}
+
+function newStructType() {
+  if (!currentBinaryHash) { toast('Load a binary first', 'err'); return; }
+  const raw = prompt('Struct name', 'custom_type_t');
+  if (raw === null) return;
+  const name = raw.trim();
+  if (!isValidCIdentifier(name)) {
+    toast('Struct name must be a C identifier', 'err');
+    return;
+  }
+  if (!projectDb) projectDb = emptyProjectDb(currentBinaryHash, currentBinaryName);
+  projectDb.customTypes = document.getElementById('custom-types').value;
+  if (new RegExp('\\b(struct|union|enum|typedef)\\s+' + name + '\\b').test(projectDb.customTypes)) {
+    toast('Type already exists: ' + name, 'err');
+    return;
+  }
+
+  const prefix = projectDb.customTypes && projectDb.customTypes.trim()
+    ? projectDb.customTypes.trimEnd() + '\n\n'
+    : '';
+  const start = prefix.length;
+  projectDb.customTypes = prefix +
+    'struct ' + name + ' {\n' +
+    '    unsigned int field_0x0;\n' +
+    '};\n';
+  clearTimeout(projectDbSaveTimer);
+  saveProjectDb({ quiet: true });
+  renderProjectDb();
+  refreshActiveView();
+  focusCustomType(start);
+  toast('Struct added: ' + name, 'ok');
+}
+
+function renderProjectDb() {
+  const loaded = !!currentBinaryHash;
+  const db = projectDb || emptyProjectDb('', '');
+  const count = Object.keys(db.functionNames || {}).length;
+  const noteCount = Object.values(db.functionNotes || {}).filter(v => String(v || '').trim()).length;
+  allTypes = parseCustomTypeEntries(db.customTypes || '');
+  const badge = document.getElementById('db-badge');
+  badge.textContent = count + noteCount + allTypes.length;
+  badge.style.display = loaded ? '' : 'none';
+  document.getElementById('db-save-btn').disabled = !loaded;
+  document.getElementById('db-new-type-btn').disabled = !loaded;
+  document.getElementById('db-infer-btn').disabled =
+    !loaded || !mod || typeof mod.inferStructCandidatesJson !== 'function';
+  document.getElementById('db-export-btn').disabled = !loaded;
+  document.getElementById('db-load-btn').disabled = !loaded;
+  const ta = document.getElementById('custom-types');
+  ta.disabled = !loaded;
+  if (document.activeElement !== ta)
+    ta.value = db.customTypes || '';
+  const typeLines = (db.customTypes || '').trim() ? countLines(db.customTypes || '') : 0;
+  document.getElementById('db-status').textContent = loaded
+    ? (count + ' names · ' + noteCount + ' notes · ' + allTypes.length + ' types · ' + typeLines + ' type lines')
+    : 'No binary loaded';
+  document.getElementById('type-badge').textContent = allTypes.length;
+  document.getElementById('type-badge').style.display = loaded ? '' : 'none';
+  filterTypes();
+}
+
+function onCustomTypesChanged() {
+  if (!currentBinaryHash) return;
+  if (!projectDb) projectDb = emptyProjectDb(currentBinaryHash, currentBinaryName);
+  projectDb.customTypes = document.getElementById('custom-types').value;
+  scheduleProjectDbSave();
+  refreshActiveView();
+}
+
+function customTypePrelude() {
+  return projectDb && projectDb.customTypes ? projectDb.customTypes.trim() : '';
+}
+
+function parseCustomTypeEntries(text) {
+  const src = String(text || '');
+  const entries = [];
+  const seen = new Set();
+
+  function add(kind, name, index) {
+    if (!isValidCIdentifier(name)) return;
+    const key = kind + ':' + name + ':' + index;
+    if (seen.has(key)) return;
+    seen.add(key);
+    entries.push({ kind, name, index });
+  }
+
+  const namedDecls = [
+    { kind: 'struct', re: /\bstruct\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{/g },
+    { kind: 'union',  re: /\bunion\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{/g },
+    { kind: 'enum',   re: /\benum\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{/g }
+  ];
+  for (const spec of namedDecls) {
+    let m;
+    while ((m = spec.re.exec(src)) !== null)
+      add(spec.kind, m[1], m.index);
+  }
+
+  const typedefRe = /\btypedef\b[\s\S]*?;/g;
+  let m;
+  while ((m = typedefRe.exec(src)) !== null) {
+    const segment = m[0]
+      .replace(/\/\*[\s\S]*?\*\//g, ' ')
+      .replace(/\/\/.*$/gm, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    const alias = /([A-Za-z_][A-Za-z0-9_]*)\s*(?:\[[^\]]*\]\s*)*;$/.exec(segment);
+    if (alias)
+      add('typedef', alias[1], m.index);
+  }
+
+  entries.sort((a, b) => a.index - b.index || a.name.localeCompare(b.name));
+  return entries;
+}
+
+function codeWithCustomTypes(code) {
+  const prelude = customTypePrelude();
+  if (!prelude || String(code || '').startsWith('error:')) return code || '';
+  return prelude + '\n\n' + (code || '');
+}
+
+function formatFunctionNote(note) {
+  const clean = String(note || '').trim();
+  if (!clean) return '';
+  return clean.split('\n').map(line => '// NOTE: ' + line).join('\n');
+}
+
+function codeForTab(tab) {
+  let code = tab.code || '';
+  if (tab.kind === 'fn') {
+    const note = formatFunctionNote(functionNote(tab.addr));
+    if (note && !String(code || '').startsWith('error:'))
+      code = note + '\n\n' + code;
+  }
+  return codeWithCustomTypes(code);
+}
+
+function refreshActiveView() {
+  const tab = tabs.find(t => t.id === activeId);
+  if (tab) showTab(tab);
+}
+
+function resetEditorTabs() {
+  tabs = [];
+  activeId = null;
+  renderTabBar();
+  const pane = document.getElementById('code-pane');
+  pane.classList.remove('show', 'has-asm');
+  document.getElementById('welcome').classList.remove('gone');
+  document.getElementById('code-view').innerHTML = '';
+  document.getElementById('line-nums').textContent = '';
+  document.getElementById('asm-view').textContent = '';
+  curCode = '';
+  curAsm = '';
+  updateLines(0);
+}
+
+function reloadProjectViews() {
+  populateSidebar(currentBinaryName, currentBinarySize);
+  tabs.forEach(t => {
+    if (t.kind === 'fn') {
+      const info = allFns.find(f => f.addr === t.addr);
+      if (info) t.label = fnShort(info.name);
+    }
+    t.version = -1;
+  });
+  renderTabBar();
+  const active = tabs.find(t => t.id === activeId);
+  if (active) refreshTab(active, 'Refreshing');
+  else renderProjectDb();
+}
+
+function renameFn(addr, e) {
+  e && e.stopPropagation();
+  if (!mod || typeof mod.renameFunction !== 'function') {
+    toast('WASM module does not expose renaming', 'err');
+    return;
+  }
+  const info = allFns.find(f => f.addr === addr);
+  const current = hasManualFunctionName(addr)
+    ? projectDb.functionNames[addrKey(addr)]
+    : (info ? fnShort(info.name) : '');
+  const next = prompt('Function name', current || ('sub_' + shortHex(addr).slice(2)));
+  if (next === null) return;
+  const name = next.trim();
+  if (!isValidCIdentifier(name)) {
+    toast('Function name must be a C identifier', 'err');
+    return;
+  }
+  const res = mod.renameFunction(addr, name);
+  if (String(res).startsWith('error:')) {
+    toast(res, 'err');
+    return;
+  }
+  if (!projectDb) projectDb = emptyProjectDb(currentBinaryHash, currentBinaryName);
+  projectDb.functionNames[addrKey(addr)] = name;
+  saveProjectDb({ quiet: true });
+  allFns.forEach(f => { if (f.addr === addr) f.name = name; });
+  tabs.forEach(t => {
+    if (t.kind === 'fn' && t.addr === addr) t.label = fnShort(name);
+    t.version = -1;
+  });
+  filterFns();
+  renderTabBar();
+  const active = tabs.find(t => t.id === activeId);
+  if (active) refreshTab(active, 'Refreshing');
+  toast(res.replace('ok: ', ''), 'ok');
+  renderProjectDb();
+}
+
+function noteFn(addr, e) {
+  e && e.stopPropagation();
+  if (!currentBinaryHash) { toast('Load a binary first', 'err'); return; }
+  if (!projectDb) projectDb = emptyProjectDb(currentBinaryHash, currentBinaryName);
+  const info = allFns.find(f => f.addr === addr);
+  const label = info ? fnShort(info.name) : shortHex(addr);
+  const next = prompt('Function note for ' + label, functionNote(addr));
+  if (next === null) return;
+  const note = next.trim();
+  if (!projectDb.functionNotes) projectDb.functionNotes = {};
+  if (note)
+    projectDb.functionNotes[addrKey(addr)] = note;
+  else
+    delete projectDb.functionNotes[addrKey(addr)];
+  saveProjectDb({ quiet: true });
+  filterFns();
+  refreshActiveView();
+  renderProjectDb();
+  toast(note ? 'Function note saved' : 'Function note cleared', 'ok');
 }
 
 // ── Sidebar ──────────────────────────────────────────────────────────
@@ -910,11 +1474,13 @@ function populateSidebar(filename, sizeBytes) {
   document.getElementById('src-filter').value = '';
   document.getElementById('str-filter').value = '';
   document.getElementById('xref-filter').value = '';
+  document.getElementById('type-filter').value = '';
 
   renderFnList(allFns);
   renderSrcList(allSrcs);
   renderStringList(allStrings);
   renderXrefList([]);
+  filterTypes();
 }
 
 function row(lbl, val) {
@@ -924,8 +1490,11 @@ function row(lbl, val) {
 function renderFnList(fns) {
   const el = document.getElementById('fn-list');
   if (!fns.length) { el.innerHTML = '<div class="list-empty">No matches</div>'; return; }
-  el.innerHTML = fns.map(f =>
-    `<div class="item" data-addr="${f.addr}" onclick="openFn(${f.addr},this)" title="${esc(f.name)} @ ${shortHex(f.addr)}">
+  el.innerHTML = fns.map(f => {
+    const manual = hasManualFunctionName(f.addr);
+    const noted = hasFunctionNote(f.addr);
+    const title = f.name + ' @ ' + shortHex(f.addr) + (noted ? '\n\n' + functionNote(f.addr) : '');
+    return `<div class="item${manual ? ' manual' : ''}${noted ? ' noted' : ''}" data-addr="${f.addr}" onclick="openFn(${f.addr},this)" title="${esc(title)}">
       <svg class="icon" width="11" height="11" viewBox="0 0 11 11" fill="none">
         <path d="M1.5 8.5V2.5l4 3-4 3z" fill="var(--c-fn)"/>
         <line x1="7" y1="3"   x2="9.5" y2="3"   stroke="var(--c-fn)" stroke-width="1.1" stroke-linecap="round"/>
@@ -934,8 +1503,20 @@ function renderFnList(fns) {
       </svg>
       <span class="lbl">${esc(fnShort(f.name))}</span>
       <span class="cnt">${esc(shortHex(f.addr))}</span>
-     </div>`
-  ).join('');
+      <button class="item-action" onclick="renameFn(${f.addr},event)" title="Rename function">
+        <svg width="11" height="11" viewBox="0 0 11 11" fill="none">
+          <path d="M2 8.5 2.5 6.4 7.2 1.7a1 1 0 0 1 1.4 0l.7.7a1 1 0 0 1 0 1.4L4.6 8.5 2 8.5z" stroke="currentColor" stroke-width="1" fill="none" stroke-linejoin="round"/>
+          <path d="M6.5 2.4 8.6 4.5" stroke="currentColor" stroke-width="1" stroke-linecap="round"/>
+        </svg>
+      </button>
+      <button class="item-action" onclick="noteFn(${f.addr},event)" title="Edit function note">
+        <svg width="11" height="11" viewBox="0 0 11 11" fill="none">
+          <path d="M2 1.8h7v7.4H2z" stroke="currentColor" stroke-width="1" fill="none" stroke-linejoin="round"/>
+          <path d="M3.4 3.5h4.2M3.4 5.3h4.2M3.4 7.1h2.5" stroke="currentColor" stroke-width=".9" stroke-linecap="round"/>
+        </svg>
+      </button>
+     </div>`;
+  }).join('');
   const tab = tabs.find(t => t.id === activeId);
   if (tab && tab.kind === 'fn') markActive('fn-list', 'data-addr', tab.addr);
 }
@@ -999,9 +1580,39 @@ function renderXrefList(xrefs) {
   if (activeXrefAddr !== null) markActive('xref-list', 'data-xref', activeXrefAddr);
 }
 
+function renderTypeList(types) {
+  const el = document.getElementById('type-list');
+  if (!currentBinaryHash) { el.innerHTML = '<div class="list-empty">Load a binary</div>'; return; }
+  if (!allTypes.length) { el.innerHTML = '<div class="list-empty">No custom types</div>'; return; }
+  if (!types.length) { el.innerHTML = '<div class="list-empty">No matches</div>'; return; }
+  el.innerHTML = types.map(t =>
+    `<div class="item type-item" data-index="${t.index}" onclick="focusCustomType(${t.index})" title="${esc(t.kind + ' ' + t.name)}">
+      <svg class="icon" width="11" height="11" viewBox="0 0 11 11" fill="none">
+        <path d="M2 2.5h7M2 5.5h7M2 8.5h7" stroke="var(--c-type)" stroke-width="1.1" stroke-linecap="round"/>
+        <path d="M2 2.5v6M9 2.5v6" stroke="var(--c-type)" stroke-width="1.1" stroke-linecap="round"/>
+      </svg>
+      <span class="lbl">${esc(t.name)}</span>
+      <span class="cnt">${esc(t.kind)}</span>
+     </div>`
+  ).join('');
+}
+
+function focusCustomType(index) {
+  const ta = document.getElementById('custom-types');
+  if (!ta) return;
+  document.getElementById('sec-project').classList.remove('closed');
+  const pos = Math.max(0, Math.min(Number(index) || 0, ta.value.length));
+  ta.focus();
+  ta.setSelectionRange(pos, pos);
+  const before = ta.value.slice(0, pos);
+  const line = before.split('\n').length - 1;
+  ta.scrollTop = Math.max(0, (line - 2) * 16);
+  markActive('type-list', 'data-index', pos);
+}
+
 function filterFns() {
   const q = document.getElementById('fn-filter').value;
-  renderFnList(fuzzyFilter(allFns, q, f => [f.name, shortHex(f.addr), String(f.addr)]));
+  renderFnList(fuzzyFilter(allFns, q, f => [f.name, functionNote(f.addr), shortHex(f.addr), String(f.addr)]));
 }
 function filterSrcs() {
   const q = document.getElementById('src-filter').value;
@@ -1019,6 +1630,11 @@ function filterXrefs() {
     x.operands || '',
     x.xref_address_hex || shortHex(x.xref_address || 0)
   ]));
+}
+function filterTypes() {
+  const el = document.getElementById('type-filter');
+  const q = el ? el.value : '';
+  renderTypeList(fuzzyFilter(allTypes, q, t => [t.name, t.kind]));
 }
 
 // ── Tabs & decompilation ─────────────────────────────────────────────
@@ -1040,6 +1656,7 @@ function openFn(addr, el) {
   setTimeout(() => {
     const tab = { id:'fn_'+addr.toString(16), label, kind:'fn', addr, version: decompVersion };
     tab.code = decompileTab(tab);
+    tab.asm = disassembleTab(tab);
     spin(false);
     addTab(tab);
     sbMsg(label+' · '+countLines(tab.code)+' lines');
@@ -1081,6 +1698,7 @@ function openSrc(idx, el) {
   setTimeout(() => {
     const tab = { id:'src_'+idx, label, kind:'src', srcIdx:idx, version: decompVersion };
     tab.code = decompileTab(tab);
+    tab.asm = '';
     spin(false);
     addTab(tab);
     sbMsg(label+' · '+countLines(tab.code)+' lines');
@@ -1102,7 +1720,7 @@ function activateTab(id) {
     refreshTab(tab, 'Refreshing');
     return;
   }
-  showCode(tab.code);
+  showTab(tab);
 }
 function closeTab(id, e) {
   e && e.stopPropagation();
@@ -1111,10 +1729,14 @@ function closeTab(id, e) {
   tabs.splice(i,1);
   if (activeId===id) activeId = tabs.length ? tabs[Math.max(0,i-1)].id : null;
   renderTabBar();
-  if (activeId) { const t=tabs.find(x=>x.id===activeId); if(t){showCode(t.code);return;} }
-  document.getElementById('code-pane').classList.remove('show');
+  if (activeId) { const t=tabs.find(x=>x.id===activeId); if(t){showTab(t);return;} }
+  const pane = document.getElementById('code-pane');
+  pane.classList.remove('show', 'has-asm');
   document.getElementById('welcome').classList.remove('gone');
-  curCode=''; updateLines(0);
+  document.getElementById('code-view').innerHTML = '';
+  document.getElementById('line-nums').textContent = '';
+  document.getElementById('asm-view').textContent = '';
+  curCode=''; curAsm=''; updateLines(0);
 }
 function renderTabBar() {
   document.getElementById('tab-bar').innerHTML = tabs.map(t =>
@@ -1129,21 +1751,32 @@ function renderTabBar() {
      </div>`
   ).join('');
 }
-function showCode(code) {
+
+function showTab(tab) {
+  showCode(codeForTab(tab), tab.asm || '');
+}
+
+function showCode(code, asm) {
   curCode = code;
+  curAsm = asm || '';
   document.getElementById('welcome').classList.add('gone');
   const pane = document.getElementById('code-pane');
   pane.classList.add('show');
+  pane.classList.toggle('has-asm', !!curAsm);
   const lines = code.split('\n');
   document.getElementById('line-nums').textContent = lines.map((_,i)=>i+1).join('\n');
   document.getElementById('code-view').innerHTML = hlC(code);
+  document.getElementById('asm-view').textContent = curAsm;
   updateLines(lines.length);
-  pane.scrollTop=0; pane.scrollLeft=0;
+  const decompScroll = document.getElementById('decomp-scroll');
+  if (decompScroll) { decompScroll.scrollTop = 0; decompScroll.scrollLeft = 0; }
+  const asmScroll = document.getElementById('asm-scroll');
+  if (asmScroll) { asmScroll.scrollTop = 0; asmScroll.scrollLeft = 0; }
 }
 function updateLines(n) {
   document.getElementById('sb-lines').textContent = n ? n+' lines' : '';
 }
-function countLines(s) { return s.split('\n').length; }
+function countLines(s) { return String(s || '').split('\n').length; }
 
 // ── Copy ─────────────────────────────────────────────────────────────
 function copyCode() {
@@ -1215,6 +1848,7 @@ document.addEventListener('keydown',e=>{
     document.getElementById('src-filter').blur();
     document.getElementById('str-filter').blur();
     document.getElementById('xref-filter').blur();
+    document.getElementById('type-filter').blur();
   }
 });
 
