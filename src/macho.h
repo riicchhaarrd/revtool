@@ -2764,7 +2764,8 @@ private:
 
     void parseELFDynamicNeeded(const std::vector<ELFSectionRecord> &sections) {
         for (const auto &sec : sections) {
-            if (sec.type != SHT_DYNAMIC || sec.entsize < 8 ||
+            uint32_t minEntSize = isELF64() ? 16 : 8;
+            if (sec.type != SHT_DYNAMIC || sec.entsize < minEntSize ||
                 sec.offset >= m_size || sec.link >= sections.size())
                 continue;
 
@@ -2772,11 +2773,17 @@ private:
             uint32_t count = sec.size / sec.entsize;
             for (uint32_t i = 0; i < count; ++i) {
                 uint64_t off = (uint64_t)sec.offset + (uint64_t)i * sec.entsize;
-                if (off + 8 > m_size) break;
-                int32_t tag = readLE<int32_t>((size_t)off);
-                uint32_t val = readLE<uint32_t>((size_t)off + 4);
+                if (off + minEntSize > m_size) break;
+                int64_t tag = isELF64()
+                    ? readLE<int64_t>((size_t)off)
+                    : readLE<int32_t>((size_t)off);
+                uint64_t val64 = isELF64()
+                    ? readLE<uint64_t>((size_t)off + 8)
+                    : readLE<uint32_t>((size_t)off + 4);
                 if (tag == 0) break;
                 if (tag != DT_NEEDED) continue;
+                if (val64 > UINT32_MAX) continue;
+                uint32_t val = (uint32_t)val64;
                 std::string name = stringAtBounded(strtab.offset, strtab.size, val);
                 if (name.empty()) continue;
                 bool dup = false;
@@ -2806,23 +2813,29 @@ private:
 
         uint32_t pltEntrySize = 16;
         for (const auto &rel : sections) {
-            if (rel.type != SHT_REL || rel.entsize < 8 || rel.offset >= m_size ||
+            bool isRela = rel.type == SHT_RELA;
+            uint32_t minEntSize = isRela ? (isELF64() ? 24 : 12) : (isELF64() ? 16 : 8);
+            if ((rel.type != SHT_REL && rel.type != SHT_RELA) ||
+                rel.entsize < minEntSize || rel.offset >= m_size ||
                 rel.link >= sections.size())
                 continue;
-            if (rel.name.find(".rel.plt") != 0 && rel.name.find(".rel.dyn") != 0)
+            if (rel.name.find(".rel.plt") != 0 && rel.name.find(".rel.dyn") != 0 &&
+                rel.name.find(".rela.plt") != 0 && rel.name.find(".rela.dyn") != 0)
                 continue;
 
             uint32_t count = rel.size / rel.entsize;
             for (uint32_t i = 0; i < count; ++i) {
                 uint64_t off = (uint64_t)rel.offset + (uint64_t)i * rel.entsize;
-                if (off + 8 > m_size) break;
-                uint32_t info = readLE<uint32_t>((size_t)off + 4);
-                uint32_t symIdx = info >> 8;
+                if (off + minEntSize > m_size) break;
+                uint64_t info = isELF64()
+                    ? readLE<uint64_t>((size_t)off + 8)
+                    : readLE<uint32_t>((size_t)off + 4);
+                uint32_t symIdx = isELF64() ? (uint32_t)(info >> 32) : (uint32_t)(info >> 8);
                 std::string name = elfSymbolName(sections, rel.link, symIdx);
                 if (name.empty()) continue;
 
                 uint32_t stubAddr = 0;
-                if (rel.name.find(".rel.plt") == 0) {
+                if (rel.name.find(".rel.plt") == 0 || rel.name.find(".rela.plt") == 0) {
                     stubAddr = plt->addr + pltEntrySize * (pltSec ? i : i + 1);
                 }
                 if (stubAddr && m_funcMap.find(stubAddr) == m_funcMap.end())
@@ -3025,10 +3038,8 @@ private:
                 parseELFStabsSection(sections[i], sections[strIdx]);
         }
 
-        if (!is64) {
-            parseELFDynamicNeeded(sections);
-            parseELFPltRelocations(sections);
-        }
+        parseELFDynamicNeeded(sections);
+        parseELFPltRelocations(sections);
         parseSTABS();
         parseDWARF(sections);
         buildFunctionMap();
