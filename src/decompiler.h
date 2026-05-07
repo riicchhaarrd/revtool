@@ -235,6 +235,7 @@ public:
         bool anyGlobals = false;
         for (auto &g : types.globals()) {
             if (g.address == 0) continue;
+            if (!isCIdentifier(g.name)) continue;
             if (g.sourceFileIdx != srcIdx) continue;
             if (emittedGlobals.count(g.name)) continue;
             if (s_portMode && !g.isStatic) continue;
@@ -262,6 +263,7 @@ public:
         if (!s_portMode) {
             for (auto &g : types.globals()) {
                 if (g.address == 0 || g.name.empty()) continue;
+                if (!isCIdentifier(g.name)) continue;
                 if (g.sourceFileIdx == srcIdx) continue;
                 if (!globalByName.count(g.name))
                     globalByName[g.name] = &g;
@@ -1119,6 +1121,7 @@ public:
         }
         for (auto &g : types.globals()) {
             if (g.address == 0 || g.name.empty()) continue;
+            if (!isCIdentifier(g.name)) continue;
             if (s_portMode && g.isStatic) continue;
             if (globalDeclared.count(g.name)) continue;
             // Use the best type for this global name
