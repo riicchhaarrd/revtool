@@ -10,7 +10,7 @@ Usage:
 
 import subprocess, hashlib, json, sys, os
 
-BINARY = ''
+BINARY = 'binary.x86'
 DECOMP = './build/decomp'
 BASELINE = 'regtest_baseline.json'
 CHECKLIST = 'regtest_funcs.txt'

@@ -1,7 +1,7 @@
 import rebuild, sys, time
 
 funcs = rebuild.get_all_functions()
-data = open('', 'rb').read()
+data = open('binary.x86', 'rb').read()
 info = rebuild.parse_macho(data)
 
 perfect = []

@@ -7,10 +7,7 @@ build/
 build_decomp/
 build_wasm*/
 
-# Local/private inputs and release artifacts
-
-
-
+# Generated WebAssembly artifacts
 web/dis.js
 web/dis.wasm
 wasm_deps/

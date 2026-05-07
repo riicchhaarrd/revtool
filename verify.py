@@ -571,7 +571,7 @@ def compile_test(binary, src_idx):
 
 def main():
     parser = argparse.ArgumentParser(description='Decompilation verification tool')
-    parser.add_argument('binary', nargs='?', default='')
+    parser.add_argument('binary', nargs='?', default='binary.x86')
     parser.add_argument('-n', '--name', help='Verify function by name')
     parser.add_argument('-s', '--source', type=int, help='Verify source file by index')
     parser.add_argument('--compile-test', action='store_true', help='Test compilation only')

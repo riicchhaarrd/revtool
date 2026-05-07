@@ -4,7 +4,7 @@ import subprocess, os, re, sys, time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from collections import Counter
 
-BINARY = ''
+BINARY = 'binary.x86'
 DECOMP = './build/decomp'
 
 def check_one(addr):

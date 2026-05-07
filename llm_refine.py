@@ -21,7 +21,7 @@ import random
 import anthropic
 
 DECOMP = "./build/decomp"
-BINARY = ""
+BINARY = "binary.x86"
 MODEL  = "claude-opus-4-6"
 
 # ── Platform header (extracted once) ────────────────────────────────────────

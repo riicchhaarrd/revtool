@@ -18,7 +18,7 @@ from unicorn import *
 from unicorn.x86_const import *
 from capstone import Cs, CS_ARCH_X86, CS_MODE_32
 
-BINARY = ''
+BINARY = 'binary.x86'
 DECOMP = './build/decomp'
 
 # Memory layout for emulation

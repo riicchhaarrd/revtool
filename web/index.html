@@ -814,10 +814,16 @@ function loadFile(file) {
   const reader = new FileReader();
   reader.onload = ev => {
     const bytes = new Uint8Array(ev.target.result);
-    const ptr = mod._malloc(bytes.length);
-    mod.HEAPU8.set(bytes, ptr);
-    const res = mod.loadBinaryPtr(ptr, bytes.length);
-    mod._free(ptr);
+    let res;
+    try {
+      res = loadBinaryBytes(bytes);
+    } catch (err) {
+      spin(false);
+      const msg = 'error: ' + (err && err.message ? err.message : String(err));
+      toast(msg, 'err');
+      sbMsg(msg, true);
+      return;
+    }
     spin(false);
     if (res.startsWith('error:')) { toast(res, 'err'); sbMsg(res, true); return; }
     document.getElementById('hdr-txt').textContent = file.name;
@@ -826,6 +832,32 @@ function loadFile(file) {
     populateSidebar(file.name, bytes.length);
   };
   reader.readAsArrayBuffer(file);
+}
+
+function loadBinaryBytes(bytes) {
+  if (typeof mod.loadBinary === 'function') {
+    try {
+      return mod.loadBinary(bytes);
+    } catch (err) {
+      if (!mod.HEAPU8 || typeof mod._malloc !== 'function' ||
+          typeof mod._free !== 'function' || typeof mod.loadBinaryPtr !== 'function') {
+        throw err;
+      }
+    }
+  }
+
+  if (!mod.HEAPU8 || typeof mod._malloc !== 'function' ||
+      typeof mod._free !== 'function' || typeof mod.loadBinaryPtr !== 'function') {
+    throw new Error('WASM module does not expose a binary loader');
+  }
+
+  const ptr = mod._malloc(bytes.length);
+  try {
+    mod.HEAPU8.set(bytes, ptr);
+    return mod.loadBinaryPtr(ptr, bytes.length);
+  } finally {
+    mod._free(ptr);
+  }
 }
 
 // ── Sidebar ──────────────────────────────────────────────────────────

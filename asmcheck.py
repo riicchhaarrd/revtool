@@ -10,7 +10,7 @@ Usage:
 
 import capstone, struct, subprocess, tempfile, os, re, sys
 
-BINARY = ''
+BINARY = 'binary.x86'
 DECOMP = './build/decomp'
 APPLE_GCC = '/tmp/apple-gcc-build/gcc/xgcc'
 GCC_FLAGS = ['-B/tmp/apple-gcc-build/gcc/', '-m32', '-O2', '-mdynamic-no-pic',
