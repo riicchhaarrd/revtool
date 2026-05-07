@@ -60,6 +60,7 @@ struct StabsTypeInfo {
     // array
     int arrayLow  = 0;
     int arrayHigh = 0;
+    bool isVector = false;
 
     // range (primitive) — self-referential range = base type
     int64_t rangeLow  = 0;
@@ -384,6 +385,24 @@ public:
         return count > 0 ? std::to_string(count) : std::string();
     }
 
+    int arrayStorageBytes(const StabsTypeInfo &t) const {
+        if (t.sizeBytes > 0)
+            return t.sizeBytes;
+        int count = t.arrayHigh - t.arrayLow + 1;
+        if (count <= 0)
+            return 0;
+        auto *elem = resolveType(t.targetType);
+        return elem && elem->sizeBytes > 0 ? elem->sizeBytes * count : 0;
+    }
+
+    std::string formatVectorType(const StabsTypeInfo &t, int depth = 0) const {
+        int bytes = arrayStorageBytes(t);
+        if (bytes <= 0)
+            return "";
+        return formatType(t.targetType, depth + 1) +
+               " __attribute__((vector_size(" + std::to_string(bytes) + ")))";
+    }
+
     // Format a C type name string
     std::string formatType(TypeRef ref, int depth = 0) const {
         if (depth > 20 || ref == NullType) return "int";
@@ -453,6 +472,11 @@ public:
             return t->name.empty() ? "enum" : "enum " + t->name;
 
         case StabsTypeKind::Array: {
+            if (t->isVector) {
+                std::string vectorType = formatVectorType(*t, depth);
+                if (!vectorType.empty())
+                    return vectorType;
+            }
             std::string elem = formatType(t->targetType, depth + 1);
             return elem + "[" + arrayDimension(*t) + "]";
         }
@@ -498,6 +522,20 @@ public:
             }
             if (!ct || ct->kind != StabsTypeKind::Array)
                 return false;
+
+            if (ct->isVector) {
+                std::string elem = formatType(ct->targetType);
+                for (const auto &q : qualifiers)
+                    if (elem.find(q) != 0)
+                        elem = q + elem;
+                int bytes = arrayStorageBytes(*ct);
+                if (bytes > 0) {
+                    out = elem + " " + varName +
+                          " __attribute__((vector_size(" +
+                          std::to_string(bytes) + ")))";
+                    return true;
+                }
+            }
 
             std::string dims;
             while (ct && ct->kind == StabsTypeKind::Array) {
@@ -1415,7 +1453,8 @@ private:
         case StabsTypeKind::Atomic:
             return "atomic:" + typedefTargetSignature(t->targetType, depth + 1);
         case StabsTypeKind::Array:
-            return "array:" + std::to_string(t->arrayLow) + ":" +
+            return std::string(t->isVector ? "vector:" : "array:") +
+                   std::to_string(t->arrayLow) + ":" +
                    std::to_string(t->arrayHigh) + ":" +
                    typedefTargetSignature(t->targetType, depth + 1);
         case StabsTypeKind::Function: {

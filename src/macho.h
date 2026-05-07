@@ -1639,6 +1639,7 @@ private:
             ti->targetType = dwarfTypeAttr(unit, attrs, DW_AT_type, typeRefs);
             ti->arrayLow = 0;
             ti->arrayHigh = -1;
+            ti->isVector = dwarfHasAttr(attrs, DW_AT_GNU_vector);
             break;
         case DW_TAG_subroutine_type:
             ti->kind = StabsTypeKind::Function;

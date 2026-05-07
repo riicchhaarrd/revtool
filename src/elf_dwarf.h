@@ -153,6 +153,7 @@ constexpr uint64_t DW_AT_str_offsets_base  = 0x72;
 constexpr uint64_t DW_AT_addr_base         = 0x73;
 constexpr uint64_t DW_AT_rnglists_base     = 0x74;
 constexpr uint64_t DW_AT_MIPS_linkage_name = 0x2007;
+constexpr uint64_t DW_AT_GNU_vector        = 0x2107;
 
 constexpr uint64_t DW_FORM_addr           = 0x01;
 constexpr uint64_t DW_FORM_block2         = 0x03;

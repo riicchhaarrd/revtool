@@ -10709,11 +10709,15 @@ private:
                         auto *at = m_types.resolveType(addrType);
                         if (at && at->kind == StabsTypeKind::Pointer) {
                             auto *tgt = m_types.resolveType(at->targetType);
+                            if (tgt && tgt->kind == StabsTypeKind::Array &&
+                                tgt->isVector) {
+                                result = "(*" + emitExpr(addr) + ")[0]";
+                            }
                             // Simple scalar pointer (int*, float*): var[0] notation
-                            if (tgt && tgt->sizeBytes > 0 && tgt->sizeBytes <= 8 &&
-                                tgt->kind != StabsTypeKind::Struct &&
-                                tgt->kind != StabsTypeKind::Union &&
-                                tgt->kind != StabsTypeKind::Pointer)
+                            else if (tgt && tgt->sizeBytes > 0 && tgt->sizeBytes <= 8 &&
+                                     tgt->kind != StabsTypeKind::Struct &&
+                                     tgt->kind != StabsTypeKind::Union &&
+                                     tgt->kind != StabsTypeKind::Pointer)
                                 result = emitExpr(addr) + "[0]";
                             else if (tgt && (tgt->kind == StabsTypeKind::Struct ||
                                              tgt->kind == StabsTypeKind::Union)) {
@@ -10851,7 +10855,8 @@ private:
                         TypeRef vt = exprType(inner);
                         if (vt != NullType) {
                             auto *vti = m_types.resolveType(vt);
-                            isArray = vti && vti->kind == StabsTypeKind::Array;
+                            isArray = vti && vti->kind == StabsTypeKind::Array &&
+                                      !vti->isVector;
                         }
                     }
                     if (isArray)
