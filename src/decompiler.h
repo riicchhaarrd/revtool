@@ -3321,7 +3321,8 @@ private:
                                     fieldEmitName == ownerName);
                         }
                         if (ft->kind == StabsTypeKind::Enum)
-                            return !ft->name.empty() && emittedNames.count(ft->name);
+                            return !ft->name.empty() &&
+                                   (!ft->enumValues.empty() || emittedNames.count(ft->name));
                         if (ft->kind == StabsTypeKind::Array) {
                             auto *elem = types.resolveType(ft->targetType);
                             if (!elem)
@@ -3338,7 +3339,8 @@ private:
                             }
                             return elem->kind == StabsTypeKind::Enum &&
                                    !elem->name.empty() &&
-                                   emittedNames.count(elem->name);
+                                   (!elem->enumValues.empty() ||
+                                    emittedNames.count(elem->name));
                         }
                         return false;
                     };
@@ -7416,6 +7418,79 @@ private:
                     ft->sizeBytes > accessSize)
                     return "";
             }
+            std::string base = emitExpr(baseNode);
+            if (base.empty() || base.find("void *") != std::string::npos)
+                return "";
+            base = portCastForArrow(base, baseNode, baseType, access);
+            return base + "->" + access;
+        }
+
+        std::string typedStructFieldLoadExpr(IRExpr *addr, int accessSize) {
+            if (!addr)
+                return "";
+
+            IRExpr *baseNode = addr;
+            int64_t off = 0;
+            if (addr->op == IROp::Add && addr->kids.size() == 2) {
+                if (addr->kids[1]->isConst()) {
+                    baseNode = addr->kids[0].get();
+                    off = (int64_t)addr->kids[1]->value;
+                } else if (addr->kids[0]->isConst()) {
+                    baseNode = addr->kids[1].get();
+                    off = (int64_t)addr->kids[0]->value;
+                } else {
+                    return "";
+                }
+            }
+            if (off < 0 || off > 0x400000)
+                return "";
+
+            baseNode = const_cast<IRExpr *>(stripCastsForAddress(baseNode));
+            TypeRef baseType = NullType;
+            if (baseNode && baseNode->op == IROp::Temp)
+                baseType = tempStructPointerType(baseNode->tempId());
+            if (baseType == NullType)
+                baseType = exprType(baseNode);
+            if (baseType == NullType || !m_types.isStructPointer(baseType) ||
+                !typeSupportsNamedMemberAccess(baseType))
+                return "";
+
+            TypeRef structRef = m_types.getPointedStruct(baseType);
+            if (structRef == NullType)
+                return "";
+            auto *st = m_types.resolveType(structRef);
+            if (st && st->sizeBytes > 0 && off >= st->sizeBytes)
+                return "";
+
+            std::string access =
+                m_types.formatFieldAccess(structRef, (int)off, false, true);
+            if (access.empty())
+                return "";
+            if (access.find('[') != std::string::npos &&
+                access.find("arr_") == std::string::npos &&
+                accessSize > 1)
+                return "";
+            if (access.find('.') == std::string::npos &&
+                access.find('[') == std::string::npos) {
+                auto *field = m_types.findFieldAtOffset(structRef, (int)off);
+                auto *ft = field ? m_types.resolveType(field->typeRef) : nullptr;
+                if (ft && (ft->kind == StabsTypeKind::Struct ||
+                           ft->kind == StabsTypeKind::Union) &&
+                    ft->sizeBytes > accessSize)
+                    return "";
+                if (ft && ft->kind == StabsTypeKind::Array) {
+                    int arrSize = ft->sizeBytes;
+                    if (arrSize <= 0) {
+                        auto *elem = m_types.resolveType(ft->targetType);
+                        int count = ft->arrayHigh - ft->arrayLow + 1;
+                        if (elem && count > 0)
+                            arrSize = elem->sizeBytes * count;
+                    }
+                    if (arrSize > accessSize)
+                        return "";
+                }
+            }
+
             std::string base = emitExpr(baseNode);
             if (base.empty() || base.find("void *") != std::string::npos)
                 return "";
@@ -12814,6 +12889,10 @@ private:
                     }
                 }
                 bool is8 = (e->castKind == CastKind::ZeroExt8 || e->castKind == CastKind::Trunc8);
+                std::string typedField =
+                    typedStructFieldLoadExpr(loadAddr, is8 ? 1 : 2);
+                if (!typedField.empty())
+                    return typedField;
                 const char *castType = is8 ? "unsigned char" : "unsigned short";
                 m_addrDepth++;
                 std::string addr = byteAddressExpr(inner_e->kids[0].get());

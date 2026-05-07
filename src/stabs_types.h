@@ -1302,11 +1302,22 @@ public:
         return out;
     }
 
+    static const char *enumModeAttribute(int sizeBytes) {
+        switch (sizeBytes) {
+        case 1: return "QI";
+        case 2: return "HI";
+        case 8: return "DI";
+        default: return nullptr;
+        }
+    }
+
     // Generate enum definition as C code
     std::string formatEnumDef(TypeRef ref) const {
         auto *t = getType(ref);
         if (!t || t->kind != StabsTypeKind::Enum) return "";
         std::string out = "enum";
+        if (const char *mode = enumModeAttribute(t->sizeBytes))
+            out += " __attribute__((mode(" + std::string(mode) + ")))";
         if (!t->name.empty()) out += " " + t->name;
         out += " {\n";
         for (size_t i = 0; i < t->enumValues.size(); ++i) {
