@@ -607,6 +607,12 @@ public:
                 for (auto &p : fn.params) knownNames.insert(p.name);
                 for (auto &l : fn.locals) knownNames.insert(l.name);
             }
+            for (auto &[ref, info] : types.allTypes()) {
+                (void)ref;
+                if (info.kind != StabsTypeKind::Enum) continue;
+                for (const auto &ev : info.enumValues)
+                    knownNames.insert(ev.name);
+            }
             // C keywords to exclude
             static const std::set<std::string> kw = {
                 "if","else","while","for","do","return","switch","case","break",
@@ -12129,6 +12135,13 @@ private:
                                 if (!fieldArg.empty())
                                     arg = fieldArg;
                             }
+                        }
+                        if (calledFn2 && i < calledFn2->params.size() &&
+                            i < argCount && e->kids[i] && e->kids[i]->isConst()) {
+                            std::string enumName = m_types.findEnumName(
+                                calledFn2->params[i].typeRef, e->kids[i]->value);
+                            if (!enumName.empty())
+                                arg = enumName;
                         }
                         if (s_portMode && i < argCount &&
                             (e->name == "strcmp" || e->name == "strlen")) {

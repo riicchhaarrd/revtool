@@ -428,6 +428,39 @@ public:
 
     // Format a type for a variable declaration: "type name"
     std::string formatDecl(TypeRef ref, const std::string &varName) const {
+        auto formatArrayDecl = [&](TypeRef start, std::string &out) -> bool {
+            TypeRef cur = start;
+            std::vector<std::string> qualifiers;
+            auto *ct = getType(cur);
+            while (ct && (ct->kind == StabsTypeKind::Const ||
+                          ct->kind == StabsTypeKind::Volatile)) {
+                qualifiers.push_back(ct->kind == StabsTypeKind::Const
+                    ? "const " : "volatile ");
+                cur = ct->targetType;
+                ct = getType(cur);
+            }
+            if (!ct || ct->kind != StabsTypeKind::Array)
+                return false;
+
+            std::string dims;
+            while (ct && ct->kind == StabsTypeKind::Array) {
+                int count = ct->arrayHigh - ct->arrayLow + 1;
+                dims += "[" + std::to_string(count) + "]";
+                cur = ct->targetType;
+                ct = getType(cur);
+            }
+            std::string elem = formatType(cur);
+            for (const auto &q : qualifiers)
+                if (elem.find(q) != 0)
+                    elem = q + elem;
+            out = elem + " " + varName + dims;
+            return true;
+        };
+
+        std::string arrayDecl;
+        if (formatArrayDecl(ref, arrayDecl))
+            return arrayDecl;
+
         auto *t = getType(ref);
         if (!t) return "int " + varName;
 
@@ -871,6 +904,17 @@ public:
         return TypeRef{-99, id}; // unit -99 to avoid collision with real types
     }
 
+    TypeRef createSyntheticType(StabsTypeKind kind = StabsTypeKind::Unknown,
+                                const std::string &name = "",
+                                int sizeBytes = 0) {
+        TypeRef ref = allocSyntheticType();
+        auto &ti = m_types[ref];
+        ti.kind = kind;
+        ti.name = name;
+        ti.sizeBytes = sizeBytes;
+        return ref;
+    }
+
     // Create a synthetic struct type and return its TypeRef
     TypeRef createSyntheticStruct(const std::string &name,
                                   const std::vector<StabsTypeField> &fields,
@@ -981,6 +1025,38 @@ public:
         for (auto &g : m_globals)
             if (g.address == address && g.typeRef != NullType) return &g;
         return nullptr;
+    }
+
+    const StabsGlobalVar* globalContainingAddress(uint32_t address,
+                                                  int &byteOffset,
+                                                  int cuIdx = -1) const {
+        const StabsGlobalVar *best = nullptr;
+        int bestScore = -1;
+        byteOffset = 0;
+        for (auto &g : m_globals) {
+            if (!g.address || g.typeRef == NullType || address < g.address)
+                continue;
+            auto *t = resolveType(g.typeRef);
+            if (!t || t->sizeBytes <= 0)
+                continue;
+            uint32_t end = g.address + (uint32_t)t->sizeBytes;
+            if (end < g.address || address >= end)
+                continue;
+            int off = (int)(address - g.address);
+            int score = 100000 - off;
+            if (cuIdx >= 0 && g.sourceFileIdx == cuIdx)
+                score += 1000000;
+            if (t->kind == StabsTypeKind::Array ||
+                t->kind == StabsTypeKind::Struct ||
+                t->kind == StabsTypeKind::Union)
+                score += 10000;
+            if (!best || score > bestScore) {
+                best = &g;
+                bestScore = score;
+                byteOffset = off;
+            }
+        }
+        return best;
     }
 
     // Include files

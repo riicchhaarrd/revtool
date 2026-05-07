@@ -197,9 +197,25 @@ constexpr uint32_t SHN_ABS   = 0xFFF1;
 constexpr int32_t  DT_NEEDED = 1;
 
 // DWARF tags
+constexpr uint64_t DW_TAG_array_type       = 0x01;
+constexpr uint64_t DW_TAG_class_type       = 0x02;
+constexpr uint64_t DW_TAG_enumeration_type = 0x04;
 constexpr uint64_t DW_TAG_formal_parameter = 0x05;
+constexpr uint64_t DW_TAG_member           = 0x0D;
+constexpr uint64_t DW_TAG_pointer_type     = 0x0F;
+constexpr uint64_t DW_TAG_reference_type   = 0x10;
 constexpr uint64_t DW_TAG_compile_unit     = 0x11;
+constexpr uint64_t DW_TAG_structure_type   = 0x13;
+constexpr uint64_t DW_TAG_subroutine_type  = 0x15;
+constexpr uint64_t DW_TAG_typedef          = 0x16;
+constexpr uint64_t DW_TAG_union_type       = 0x17;
+constexpr uint64_t DW_TAG_subrange_type    = 0x21;
+constexpr uint64_t DW_TAG_base_type        = 0x24;
+constexpr uint64_t DW_TAG_const_type       = 0x26;
+constexpr uint64_t DW_TAG_enumerator       = 0x28;
 constexpr uint64_t DW_TAG_subprogram       = 0x2E;
+constexpr uint64_t DW_TAG_variable         = 0x34;
+constexpr uint64_t DW_TAG_volatile_type    = 0x35;
 
 // DWARF children flag
 constexpr uint8_t DW_CHILDREN_no  = 0;
@@ -208,18 +224,29 @@ constexpr uint8_t DW_CHILDREN_yes = 1;
 // DWARF attributes
 constexpr uint64_t DW_AT_location          = 0x02;
 constexpr uint64_t DW_AT_name              = 0x03;
+constexpr uint64_t DW_AT_byte_size         = 0x0B;
+constexpr uint64_t DW_AT_bit_offset        = 0x0C;
+constexpr uint64_t DW_AT_bit_size          = 0x0D;
 constexpr uint64_t DW_AT_stmt_list         = 0x10;
 constexpr uint64_t DW_AT_low_pc            = 0x11;
 constexpr uint64_t DW_AT_high_pc           = 0x12;
+constexpr uint64_t DW_AT_const_value       = 0x1C;
 constexpr uint64_t DW_AT_comp_dir          = 0x1B;
+constexpr uint64_t DW_AT_lower_bound       = 0x22;
+constexpr uint64_t DW_AT_upper_bound       = 0x2F;
 constexpr uint64_t DW_AT_external          = 0x3F;
 constexpr uint64_t DW_AT_decl_file         = 0x3A;
 constexpr uint64_t DW_AT_decl_line         = 0x3B;
+constexpr uint64_t DW_AT_declaration       = 0x3C;
+constexpr uint64_t DW_AT_encoding          = 0x3E;
 constexpr uint64_t DW_AT_abstract_origin   = 0x31;
+constexpr uint64_t DW_AT_count             = 0x37;
+constexpr uint64_t DW_AT_data_member_location = 0x38;
 constexpr uint64_t DW_AT_specification     = 0x47;
 constexpr uint64_t DW_AT_type              = 0x49;
 constexpr uint64_t DW_AT_ranges            = 0x55;
 constexpr uint64_t DW_AT_linkage_name      = 0x6E;
+constexpr uint64_t DW_AT_data_bit_offset   = 0x6B;
 constexpr uint64_t DW_AT_str_offsets_base  = 0x72;
 constexpr uint64_t DW_AT_addr_base         = 0x73;
 constexpr uint64_t DW_AT_rnglists_base     = 0x74;
@@ -287,6 +314,27 @@ constexpr uint8_t DW_LNE_end_sequence      = 1;
 constexpr uint8_t DW_LNE_set_address       = 2;
 constexpr uint8_t DW_LNE_define_file       = 3;
 constexpr uint8_t DW_LNE_set_discriminator = 4;
+
+// DWARF encodings/opcodes used by the lightweight type/location reader
+constexpr uint64_t DW_ATE_address          = 0x01;
+constexpr uint64_t DW_ATE_boolean          = 0x02;
+constexpr uint64_t DW_ATE_float            = 0x04;
+constexpr uint64_t DW_ATE_signed           = 0x05;
+constexpr uint64_t DW_ATE_signed_char      = 0x06;
+constexpr uint64_t DW_ATE_unsigned         = 0x07;
+constexpr uint64_t DW_ATE_unsigned_char    = 0x08;
+constexpr uint8_t  DW_OP_addr              = 0x03;
+constexpr uint8_t  DW_OP_const1u           = 0x08;
+constexpr uint8_t  DW_OP_const1s           = 0x09;
+constexpr uint8_t  DW_OP_const2u           = 0x0A;
+constexpr uint8_t  DW_OP_const2s           = 0x0B;
+constexpr uint8_t  DW_OP_const4u           = 0x0C;
+constexpr uint8_t  DW_OP_const4s           = 0x0D;
+constexpr uint8_t  DW_OP_constu            = 0x10;
+constexpr uint8_t  DW_OP_consts            = 0x11;
+constexpr uint8_t  DW_OP_plus              = 0x22;
+constexpr uint8_t  DW_OP_plus_uconst       = 0x23;
+constexpr uint8_t  DW_OP_fbreg             = 0x91;
 
 struct DataDirectoryEntry {
     std::string name;
@@ -874,6 +922,7 @@ private:
         uint64_t u = 0;
         int64_t s = 0;
         std::string str;
+        std::vector<uint8_t> block;
         uint64_t form = 0;
         bool present = false;
         bool isString = false;
@@ -1282,6 +1331,18 @@ private:
         return result;
     }
 
+    uint64_t readULEBFromBlock(const std::vector<uint8_t> &block, size_t &pos) const {
+        uint64_t result = 0;
+        unsigned shift = 0;
+        while (pos < block.size() && shift < 64) {
+            uint8_t b = block[pos++];
+            result |= (uint64_t)(b & 0x7F) << shift;
+            if ((b & 0x80) == 0) break;
+            shift += 7;
+        }
+        return result;
+    }
+
     int64_t readSLEB(size_t &pos, size_t end) const {
         int64_t result = 0;
         unsigned shift = 0;
@@ -1297,10 +1358,32 @@ private:
         return result;
     }
 
+    int64_t readSLEBFromBlock(const std::vector<uint8_t> &block, size_t &pos) const {
+        int64_t result = 0;
+        unsigned shift = 0;
+        uint8_t b = 0;
+        while (pos < block.size() && shift < 64) {
+            b = block[pos++];
+            result |= (int64_t)(b & 0x7F) << shift;
+            shift += 7;
+            if ((b & 0x80) == 0) break;
+        }
+        if (shift < 64 && (b & 0x40))
+            result |= -((int64_t)1 << shift);
+        return result;
+    }
+
     uint64_t readUIntLE(size_t pos, size_t width) const {
         uint64_t value = 0;
         for (size_t i = 0; i < width && pos + i < m_size && i < 8; ++i)
             value |= (uint64_t)m_data[pos + i] << (i * 8);
+        return value;
+    }
+
+    uint64_t readBlockUIntLE(const std::vector<uint8_t> &block, size_t pos, size_t width) const {
+        uint64_t value = 0;
+        for (size_t i = 0; i < width && pos + i < block.size() && i < 8; ++i)
+            value |= (uint64_t)block[pos + i] << (i * 8);
         return value;
     }
 
@@ -1467,18 +1550,38 @@ private:
             value.u = (uint64_t)implicitConst;
             break;
         case DW_FORM_block1:
-            if (need(1)) { uint8_t n = readLE<uint8_t>(pos); pos += 1 + n; }
+            if (need(1)) {
+                uint8_t n = readLE<uint8_t>(pos);
+                pos += 1;
+                size_t avail = std::min<size_t>(n, end > pos ? end - pos : 0);
+                value.block.assign(m_data.begin() + pos, m_data.begin() + pos + avail);
+                pos += avail;
+            }
             break;
         case DW_FORM_block2:
-            if (need(2)) { uint16_t n = readLE<uint16_t>(pos); pos += 2 + n; }
+            if (need(2)) {
+                uint16_t n = readLE<uint16_t>(pos);
+                pos += 2;
+                size_t avail = std::min<size_t>(n, end > pos ? end - pos : 0);
+                value.block.assign(m_data.begin() + pos, m_data.begin() + pos + avail);
+                pos += avail;
+            }
             break;
         case DW_FORM_block4:
-            if (need(4)) { uint32_t n = readLE<uint32_t>(pos); pos += 4 + n; }
+            if (need(4)) {
+                uint32_t n = readLE<uint32_t>(pos);
+                pos += 4;
+                size_t avail = std::min<size_t>(n, end > pos ? end - pos : 0);
+                value.block.assign(m_data.begin() + pos, m_data.begin() + pos + avail);
+                pos += avail;
+            }
             break;
         case DW_FORM_block:
         case DW_FORM_exprloc: {
             uint64_t n = readULEB(pos, end);
-            pos += (size_t)std::min<uint64_t>(n, end > pos ? end - pos : 0);
+            size_t avail = (size_t)std::min<uint64_t>(n, end > pos ? end - pos : 0);
+            value.block.assign(m_data.begin() + pos, m_data.begin() + pos + avail);
+            pos += avail;
             break;
         }
         case DW_FORM_strx3:
@@ -1514,6 +1617,360 @@ private:
     bool dwarfHasAttr(const std::map<uint64_t, DwarfValue> &attrs, uint64_t attr) const {
         auto it = attrs.find(attr);
         return it != attrs.end() && it->second.present;
+    }
+
+    TypeRef dwarfTypeRefForOffset(std::map<uint32_t, TypeRef> &typeRefs,
+                                  uint32_t dieOffset) {
+        auto it = typeRefs.find(dieOffset);
+        if (it != typeRefs.end())
+            return it->second;
+        TypeRef ref = m_typeTable.createSyntheticType();
+        typeRefs[dieOffset] = ref;
+        return ref;
+    }
+
+    TypeRef dwarfBuiltinVoidType(std::map<uint32_t, TypeRef> &typeRefs) {
+        constexpr uint32_t kVoidOffset = 0xFFFFFF00u;
+        TypeRef ref = dwarfTypeRefForOffset(typeRefs, kVoidOffset);
+        if (auto *ti = m_typeTable.getMutableType(ref)) {
+            ti->kind = StabsTypeKind::Void;
+            ti->name = "void";
+            ti->sizeBytes = 0;
+        }
+        return ref;
+    }
+
+    uint32_t dwarfRefOffset(const DwarfUnit &unit, const DwarfValue &value) const {
+        switch (value.form) {
+        case DW_FORM_ref1:
+        case DW_FORM_ref2:
+        case DW_FORM_ref4:
+        case DW_FORM_ref8:
+        case DW_FORM_ref_udata:
+            return unit.offset + (uint32_t)value.u;
+        case DW_FORM_ref_addr:
+            return (uint32_t)value.u;
+        default:
+            return unit.offset + (uint32_t)value.u;
+        }
+    }
+
+    TypeRef dwarfTypeAttr(const DwarfUnit &unit,
+                          const std::map<uint64_t, DwarfValue> &attrs,
+                          uint64_t attr,
+                          std::map<uint32_t, TypeRef> &typeRefs) {
+        auto it = attrs.find(attr);
+        if (it == attrs.end() || !it->second.present)
+            return NullType;
+        return dwarfTypeRefForOffset(typeRefs, dwarfRefOffset(unit, it->second));
+    }
+
+    StabsTypeKind dwarfBaseKind(uint64_t encoding, uint64_t sizeBytes,
+                                const std::string &name) const {
+        if (name == "void") return StabsTypeKind::Void;
+        if (name == "bool" || name == "_Bool") return StabsTypeKind::Bool;
+        if (name.find("long long") != std::string::npos)
+            return encoding == DW_ATE_unsigned ? StabsTypeKind::ULongLong
+                                                : StabsTypeKind::LongLong;
+        if (name.find("long") != std::string::npos)
+            return encoding == DW_ATE_unsigned ? StabsTypeKind::ULong
+                                                : StabsTypeKind::Long;
+        if (encoding == DW_ATE_float)
+            return sizeBytes > 4 ? StabsTypeKind::Double : StabsTypeKind::Float;
+        if (encoding == DW_ATE_boolean) return StabsTypeKind::Bool;
+        if (encoding == DW_ATE_signed_char) return StabsTypeKind::Char;
+        if (encoding == DW_ATE_unsigned_char) return StabsTypeKind::UChar;
+        if (encoding == DW_ATE_unsigned) {
+            if (sizeBytes <= 1) return StabsTypeKind::UChar;
+            if (sizeBytes == 2) return StabsTypeKind::UShort;
+            if (sizeBytes == 4) return StabsTypeKind::UInt;
+            if (sizeBytes >= 8) return StabsTypeKind::ULongLong;
+            return StabsTypeKind::UInt;
+        }
+        if (encoding == DW_ATE_signed || encoding == DW_ATE_address) {
+            if (sizeBytes <= 1) return StabsTypeKind::Char;
+            if (sizeBytes == 2) return StabsTypeKind::Short;
+            if (sizeBytes == 4) return StabsTypeKind::Int;
+            if (sizeBytes >= 8) return StabsTypeKind::LongLong;
+            return StabsTypeKind::Int;
+        }
+        return StabsTypeKind::Unknown;
+    }
+
+    uint32_t dwarfLocationAddress(const DwarfValue &value, uint8_t addressSize) const {
+        if (value.block.size() >= 1 + addressSize && value.block[0] == DW_OP_addr)
+            return (uint32_t)readBlockUIntLE(value.block, 1, addressSize);
+        return 0;
+    }
+
+    bool dwarfLocationFBReg(const DwarfValue &value, int &offset) const {
+        if (value.block.empty() || value.block[0] != DW_OP_fbreg)
+            return false;
+        size_t pos = 1;
+        offset = (int)readSLEBFromBlock(value.block, pos);
+        return true;
+    }
+
+    bool dwarfBlockConstValue(const std::vector<uint8_t> &block,
+                              int64_t &out) const {
+        if (block.empty()) return false;
+        size_t pos = 1;
+        switch (block[0]) {
+        case DW_OP_plus_uconst:
+        case DW_OP_constu:
+            out = (int64_t)readULEBFromBlock(block, pos);
+            return true;
+        case DW_OP_consts:
+            out = readSLEBFromBlock(block, pos);
+            return true;
+        case DW_OP_const1u:
+            if (block.size() >= 2) { out = block[1]; return true; }
+            return false;
+        case DW_OP_const1s:
+            if (block.size() >= 2) { out = (int8_t)block[1]; return true; }
+            return false;
+        case DW_OP_const2u:
+            if (block.size() >= 3) { out = (int64_t)readBlockUIntLE(block, 1, 2); return true; }
+            return false;
+        case DW_OP_const2s:
+            if (block.size() >= 3) { out = (int16_t)readBlockUIntLE(block, 1, 2); return true; }
+            return false;
+        case DW_OP_const4u:
+            if (block.size() >= 5) { out = (int64_t)readBlockUIntLE(block, 1, 4); return true; }
+            return false;
+        case DW_OP_const4s:
+            if (block.size() >= 5) { out = (int32_t)readBlockUIntLE(block, 1, 4); return true; }
+            return false;
+        default:
+            break;
+        }
+
+        // Some producers spell member offsets as "const, plus".
+        if ((block[0] == DW_OP_constu || block[0] == DW_OP_consts ||
+             block[0] == DW_OP_const1u || block[0] == DW_OP_const1s ||
+             block[0] == DW_OP_const2u || block[0] == DW_OP_const2s ||
+             block[0] == DW_OP_const4u || block[0] == DW_OP_const4s) &&
+            block.back() == DW_OP_plus) {
+            std::vector<uint8_t> prefix(block.begin(), block.end() - 1);
+            return dwarfBlockConstValue(prefix, out);
+        }
+        return false;
+    }
+
+    bool dwarfDataMemberByteOffset(const DwarfValue &value, int &offset) const {
+        if (!value.block.empty()) {
+            int64_t v = 0;
+            if (!dwarfBlockConstValue(value.block, v))
+                return false;
+            offset = (int)v;
+            return true;
+        }
+        offset = (int)value.u;
+        return true;
+    }
+
+    void fillDwarfType(uint32_t dieOffset, uint64_t tag,
+                       const DwarfUnit &unit,
+                       const std::map<uint64_t, DwarfValue> &attrs,
+                       std::map<uint32_t, TypeRef> &typeRefs) {
+        TypeRef ref = dwarfTypeRefForOffset(typeRefs, dieOffset);
+        StabsTypeInfo *ti = m_typeTable.getMutableType(ref);
+        if (!ti) return;
+
+        std::string name = dwarfStringAttr(attrs, DW_AT_name);
+        uint32_t sizeBytes = (uint32_t)dwarfUnsignedAttr(attrs, DW_AT_byte_size, ti->sizeBytes);
+
+        switch (tag) {
+        case DW_TAG_base_type: {
+            uint64_t encoding = dwarfUnsignedAttr(attrs, DW_AT_encoding, 0);
+            ti->kind = dwarfBaseKind(encoding, sizeBytes, name);
+            ti->name = name;
+            ti->sizeBytes = (int)sizeBytes;
+            break;
+        }
+        case DW_TAG_pointer_type:
+            ti->kind = StabsTypeKind::Pointer;
+            ti->name.clear();
+            ti->sizeBytes = unit.addressSize;
+            ti->targetType = dwarfTypeAttr(unit, attrs, DW_AT_type, typeRefs);
+            if (ti->targetType == NullType)
+                ti->targetType = dwarfBuiltinVoidType(typeRefs);
+            break;
+        case DW_TAG_reference_type:
+            ti->kind = StabsTypeKind::Reference;
+            ti->sizeBytes = unit.addressSize;
+            ti->targetType = dwarfTypeAttr(unit, attrs, DW_AT_type, typeRefs);
+            break;
+        case DW_TAG_const_type:
+            ti->kind = StabsTypeKind::Const;
+            ti->targetType = dwarfTypeAttr(unit, attrs, DW_AT_type, typeRefs);
+            if (ti->targetType == NullType)
+                ti->targetType = dwarfBuiltinVoidType(typeRefs);
+            break;
+        case DW_TAG_volatile_type:
+            ti->kind = StabsTypeKind::Volatile;
+            ti->targetType = dwarfTypeAttr(unit, attrs, DW_AT_type, typeRefs);
+            break;
+        case DW_TAG_typedef:
+            ti->kind = StabsTypeKind::Typedef;
+            ti->name = name;
+            ti->targetType = dwarfTypeAttr(unit, attrs, DW_AT_type, typeRefs);
+            break;
+        case DW_TAG_structure_type:
+        case DW_TAG_class_type:
+            ti->kind = StabsTypeKind::Struct;
+            ti->name = name;
+            ti->sizeBytes = (int)sizeBytes;
+            break;
+        case DW_TAG_union_type:
+            ti->kind = StabsTypeKind::Union;
+            ti->name = name;
+            ti->sizeBytes = (int)sizeBytes;
+            break;
+        case DW_TAG_enumeration_type:
+            ti->kind = StabsTypeKind::Enum;
+            ti->name = name;
+            ti->sizeBytes = (int)sizeBytes;
+            break;
+        case DW_TAG_array_type:
+            ti->kind = StabsTypeKind::Array;
+            ti->targetType = dwarfTypeAttr(unit, attrs, DW_AT_type, typeRefs);
+            ti->arrayLow = 0;
+            ti->arrayHigh = -1;
+            break;
+        case DW_TAG_subroutine_type:
+            ti->kind = StabsTypeKind::Function;
+            ti->targetType = dwarfTypeAttr(unit, attrs, DW_AT_type, typeRefs);
+            if (ti->targetType == NullType)
+                ti->targetType = dwarfBuiltinVoidType(typeRefs);
+            break;
+        default:
+            break;
+        }
+    }
+
+    void addDwarfMember(TypeRef compositeType,
+                        const DwarfUnit &unit,
+                        const std::map<uint64_t, DwarfValue> &attrs,
+                        std::map<uint32_t, TypeRef> &typeRefs) {
+        if (compositeType == NullType) return;
+        StabsTypeInfo *ti = m_typeTable.getMutableType(compositeType);
+        if (!ti || (ti->kind != StabsTypeKind::Struct && ti->kind != StabsTypeKind::Union))
+            return;
+        StabsTypeField field;
+        field.name = dwarfStringAttr(attrs, DW_AT_name);
+        field.typeRef = dwarfTypeAttr(unit, attrs, DW_AT_type, typeRefs);
+        if (ti->kind == StabsTypeKind::Union) {
+            field.bitOffset = 0;
+        } else {
+            if (dwarfHasAttr(attrs, DW_AT_data_bit_offset)) {
+                field.bitOffset = (int)dwarfUnsignedAttr(attrs, DW_AT_data_bit_offset);
+            } else {
+                auto it = attrs.find(DW_AT_data_member_location);
+                if (it != attrs.end() && it->second.present) {
+                    int byteOffset = 0;
+                    if (dwarfDataMemberByteOffset(it->second, byteOffset))
+                        field.bitOffset = byteOffset * 8;
+                }
+            }
+        }
+        if (dwarfHasAttr(attrs, DW_AT_bit_size))
+            field.bitSize = (int)dwarfUnsignedAttr(attrs, DW_AT_bit_size);
+        else if (auto *ft = m_typeTable.resolveType(field.typeRef))
+            field.bitSize = ft->sizeBytes > 0 ? ft->sizeBytes * 8 : 0;
+
+        if (!field.name.empty())
+            ti->fields.push_back(std::move(field));
+    }
+
+    void addDwarfEnumerator(TypeRef enumType,
+                            const std::map<uint64_t, DwarfValue> &attrs) {
+        if (enumType == NullType) return;
+        StabsTypeInfo *ti = m_typeTable.getMutableType(enumType);
+        if (!ti || ti->kind != StabsTypeKind::Enum) return;
+        StabsEnumVal ev;
+        ev.name = dwarfStringAttr(attrs, DW_AT_name);
+        auto it = attrs.find(DW_AT_const_value);
+        if (it != attrs.end())
+            ev.value = it->second.s;
+        if (!ev.name.empty())
+            ti->enumValues.push_back(std::move(ev));
+    }
+
+    void applyDwarfSubrange(TypeRef arrayType,
+                            const std::map<uint64_t, DwarfValue> &attrs) {
+        if (arrayType == NullType) return;
+        StabsTypeInfo *ti = m_typeTable.getMutableType(arrayType);
+        if (!ti || ti->kind != StabsTypeKind::Array) return;
+        int low = (int)dwarfUnsignedAttr(attrs, DW_AT_lower_bound, 0);
+        int high = -1;
+        if (dwarfHasAttr(attrs, DW_AT_upper_bound)) {
+            high = (int)dwarfUnsignedAttr(attrs, DW_AT_upper_bound);
+        } else if (dwarfHasAttr(attrs, DW_AT_count)) {
+            int count = (int)dwarfUnsignedAttr(attrs, DW_AT_count);
+            high = low + count - 1;
+        }
+        ti->arrayLow = low;
+        ti->arrayHigh = high;
+        auto *elem = m_typeTable.resolveType(ti->targetType);
+        int count = high >= low ? high - low + 1 : 0;
+        if (elem && elem->sizeBytes > 0 && count > 0)
+            ti->sizeBytes = elem->sizeBytes * count;
+    }
+
+    int dwarfTypeStorageSize(TypeRef ref, int depth = 0) const {
+        if (ref == NullType || depth > 12)
+            return 0;
+        auto *ti = m_typeTable.resolveType(ref);
+        if (!ti) return 0;
+        if (ti->sizeBytes > 0)
+            return ti->sizeBytes;
+        if (ti->kind == StabsTypeKind::Array) {
+            int elemSize = dwarfTypeStorageSize(ti->targetType, depth + 1);
+            int count = ti->arrayHigh >= ti->arrayLow
+                ? ti->arrayHigh - ti->arrayLow + 1 : 0;
+            return elemSize > 0 && count > 0 ? elemSize * count : 0;
+        }
+        return 0;
+    }
+
+    void finalizeDwarfTypes(const std::map<uint32_t, TypeRef> &typeRefs) {
+        for (int pass = 0; pass < 6; ++pass) {
+            bool changed = false;
+            for (const auto &kv : typeRefs) {
+                StabsTypeInfo *ti = m_typeTable.getMutableType(kv.second);
+                if (!ti) continue;
+                if (ti->kind == StabsTypeKind::Array) {
+                    int size = dwarfTypeStorageSize(kv.second);
+                    if (size > 0 && ti->sizeBytes != size) {
+                        ti->sizeBytes = size;
+                        changed = true;
+                    }
+                } else if (ti->kind == StabsTypeKind::Struct ||
+                           ti->kind == StabsTypeKind::Union) {
+                    int maxBitEnd = 0;
+                    for (auto &field : ti->fields) {
+                        if (field.bitSize == 0) {
+                            int fieldSize = dwarfTypeStorageSize(field.typeRef);
+                            if (fieldSize > 0) {
+                                field.bitSize = fieldSize * 8;
+                                changed = true;
+                            }
+                        }
+                        if (field.bitSize > 0)
+                            maxBitEnd = std::max(maxBitEnd,
+                                                 field.bitOffset + field.bitSize);
+                    }
+                    int byteSize = (maxBitEnd + 7) / 8;
+                    if (ti->sizeBytes == 0 && byteSize > 0) {
+                        ti->sizeBytes = byteSize;
+                        changed = true;
+                    }
+                }
+            }
+            if (!changed)
+                break;
+        }
     }
 
     std::string readDwarfLineStringEntry(size_t &pos, size_t end,
@@ -1809,8 +2266,20 @@ private:
         return (uint32_t)highVal.u;
     }
 
+    int dwarfSourceIndexForAttrs(const DwarfUnit &unit,
+                                 const std::map<uint64_t, DwarfValue> &attrs,
+                                 uint32_t address = 0) {
+        std::string sourcePath;
+        if (dwarfHasAttr(attrs, DW_AT_decl_file))
+            sourcePath = dwarfFileForIndex(unit, (uint32_t)dwarfUnsignedAttr(attrs, DW_AT_decl_file));
+        if (sourcePath.empty())
+            sourcePath = joinPath(unit.compDir, unit.name);
+        return sourcePath.empty() ? -1 : sourceIndexForPath(sourcePath, address);
+    }
+
     int addDwarfFunction(const DwarfUnit &unit,
-                         const std::map<uint64_t, DwarfValue> &attrs) {
+                         const std::map<uint64_t, DwarfValue> &attrs,
+                         std::map<uint32_t, TypeRef> &typeRefs) {
         if (!dwarfHasAttr(attrs, DW_AT_low_pc)) return -1;
         uint32_t lowPc = (uint32_t)dwarfUnsignedAttr(attrs, DW_AT_low_pc);
         if (!lowPc || !sectionForAddress(lowPc)) return -1;
@@ -1845,6 +2314,11 @@ private:
                     existing.rawName = rawName;
                 if (existing.size == 0 && highPc)
                     existing.size = highPc - lowPc;
+                if (existing.returnType == NullType) {
+                    existing.returnType = dwarfTypeAttr(unit, attrs, DW_AT_type, typeRefs);
+                    if (existing.returnType == NullType)
+                        existing.returnType = dwarfBuiltinVoidType(typeRefs);
+                }
                 if (existing.sourceFileIdx < 0 && srcIdx >= 0) {
                     existing.sourceFileIdx = srcIdx;
                     m_stabsSources[srcIdx].functionIndices.push_back(i);
@@ -1869,6 +2343,9 @@ private:
         fn.size = highPc ? highPc - lowPc : 0;
         fn.isGlobal = dwarfUnsignedAttr(attrs, DW_AT_external, 0) != 0;
         fn.sourceFileIdx = srcIdx;
+        fn.returnType = dwarfTypeAttr(unit, attrs, DW_AT_type, typeRefs);
+        if (fn.returnType == NullType)
+            fn.returnType = dwarfBuiltinVoidType(typeRefs);
         if (unit.lineTable) {
             for (const auto &row : unit.lineTable->rows) {
                 if (row.endSequence) continue;
@@ -1899,12 +2376,18 @@ private:
     void parseDwarfDIEs(size_t &pos, size_t end,
                         const std::map<uint64_t, DwarfAbbrev> &abbrevs,
                         DwarfUnit &unit,
+                        const ELFSectionRecord *debugInfo,
                         const ELFSectionRecord *debugStr,
                         const ELFSectionRecord *debugLineStr,
+                        std::map<uint32_t, TypeRef> &typeRefs,
                         int currentFuncIdx,
+                        TypeRef currentCompositeType,
+                        TypeRef currentArrayType,
+                        TypeRef currentEnumType,
                         int depth) {
         if (depth > 64) return;
         while (pos < end) {
+            uint32_t dieOffset = debugInfo ? (uint32_t)(pos - debugInfo->offset) : 0;
             uint64_t code = readULEB(pos, end);
             if (code == 0)
                 return;
@@ -1921,35 +2404,101 @@ private:
             }
 
             int childFuncIdx = currentFuncIdx;
+            TypeRef childCompositeType = currentCompositeType;
+            TypeRef childArrayType = currentArrayType;
+            TypeRef childEnumType = currentEnumType;
             if (abbr.tag == DW_TAG_compile_unit) {
                 unit.name = dwarfStringAttr(attrs, DW_AT_name);
                 unit.compDir = dwarfStringAttr(attrs, DW_AT_comp_dir);
                 if (dwarfHasAttr(attrs, DW_AT_stmt_list))
                     unit.stmtList = (uint32_t)dwarfUnsignedAttr(attrs, DW_AT_stmt_list);
+            } else if (abbr.tag == DW_TAG_base_type ||
+                       abbr.tag == DW_TAG_pointer_type ||
+                       abbr.tag == DW_TAG_reference_type ||
+                       abbr.tag == DW_TAG_const_type ||
+                       abbr.tag == DW_TAG_volatile_type ||
+                       abbr.tag == DW_TAG_typedef ||
+                       abbr.tag == DW_TAG_structure_type ||
+                       abbr.tag == DW_TAG_class_type ||
+                       abbr.tag == DW_TAG_union_type ||
+                       abbr.tag == DW_TAG_enumeration_type ||
+                       abbr.tag == DW_TAG_array_type ||
+                       abbr.tag == DW_TAG_subroutine_type) {
+                fillDwarfType(dieOffset, abbr.tag, unit, attrs, typeRefs);
+                TypeRef thisType = dwarfTypeRefForOffset(typeRefs, dieOffset);
+                if (abbr.tag == DW_TAG_structure_type || abbr.tag == DW_TAG_class_type ||
+                    abbr.tag == DW_TAG_union_type)
+                    childCompositeType = thisType;
+                if (abbr.tag == DW_TAG_array_type)
+                    childArrayType = thisType;
+                if (abbr.tag == DW_TAG_enumeration_type)
+                    childEnumType = thisType;
+            } else if (abbr.tag == DW_TAG_member) {
+                addDwarfMember(currentCompositeType, unit, attrs, typeRefs);
+            } else if (abbr.tag == DW_TAG_enumerator) {
+                addDwarfEnumerator(currentEnumType, attrs);
+            } else if (abbr.tag == DW_TAG_subrange_type) {
+                applyDwarfSubrange(currentArrayType, attrs);
             } else if (abbr.tag == DW_TAG_subprogram) {
-                int fnIdx = addDwarfFunction(unit, attrs);
+                int fnIdx = addDwarfFunction(unit, attrs, typeRefs);
                 if (fnIdx >= 0)
                     childFuncIdx = fnIdx;
             } else if (abbr.tag == DW_TAG_formal_parameter && currentFuncIdx >= 0) {
                 std::string pname = dwarfStringAttr(attrs, DW_AT_name);
                 if (!pname.empty()) {
                     StabsFunction &fn = m_stabsFuncs[(size_t)currentFuncIdx];
-                    bool dup = false;
-                    for (const auto &p : fn.params)
-                        if (p.name == pname) { dup = true; break; }
-                    if (!dup) {
+                    StabsTypedVar *existingParam = nullptr;
+                    for (auto &p : fn.params)
+                        if (p.name == pname) { existingParam = &p; break; }
+                    TypeRef ptype = dwarfTypeAttr(unit, attrs, DW_AT_type, typeRefs);
+                    int stackOff = 0;
+                    auto lit = attrs.find(DW_AT_location);
+                    int fbreg = 0;
+                    if (lit != attrs.end() && dwarfLocationFBReg(lit->second, fbreg))
+                        stackOff = fbreg + 8;
+                    if (existingParam) {
+                        if (existingParam->typeRef == NullType)
+                            existingParam->typeRef = ptype;
+                        if (existingParam->stackOffset == 0)
+                            existingParam->stackOffset = stackOff;
+                    }
+                    if (!existingParam) {
                         StabsTypedVar param;
                         param.name = pname;
-                        param.typeRef = NullType;
-                        param.stackOffset = 0;
+                        param.typeRef = ptype;
+                        param.stackOffset = stackOff;
                         fn.params.push_back(std::move(param));
+                    }
+                }
+            } else if (abbr.tag == DW_TAG_variable) {
+                std::string vname = dwarfStringAttr(attrs, DW_AT_name);
+                if (!vname.empty()) {
+                    TypeRef vtype = dwarfTypeAttr(unit, attrs, DW_AT_type, typeRefs);
+                    auto lit = attrs.find(DW_AT_location);
+                    if (currentFuncIdx >= 0) {
+                        int fbreg = 0;
+                        if (lit != attrs.end() && dwarfLocationFBReg(lit->second, fbreg)) {
+                            StabsTypedVar local;
+                            local.name = vname;
+                            local.typeRef = vtype;
+                            local.stackOffset = fbreg + 8;
+                            m_stabsFuncs[(size_t)currentFuncIdx].locals.push_back(std::move(local));
+                        }
+                    } else if (lit != attrs.end()) {
+                        uint32_t addr = dwarfLocationAddress(lit->second, unit.addressSize);
+                        if (addr) {
+                            bool isStatic = dwarfUnsignedAttr(attrs, DW_AT_external, 0) == 0;
+                            int srcIdx = dwarfSourceIndexForAttrs(unit, attrs, addr);
+                            m_typeTable.addGlobal(vname, addr, vtype, isStatic, srcIdx);
+                        }
                     }
                 }
             }
 
             if (abbr.hasChildren)
-                parseDwarfDIEs(pos, end, abbrevs, unit, debugStr, debugLineStr,
-                               childFuncIdx, depth + 1);
+                parseDwarfDIEs(pos, end, abbrevs, unit, debugInfo, debugStr, debugLineStr,
+                               typeRefs, childFuncIdx, childCompositeType,
+                               childArrayType, childEnumType, depth + 1);
         }
     }
 
@@ -1962,6 +2511,7 @@ private:
             return;
 
         std::map<uint32_t, DwarfLineTable> lineCache;
+        std::map<uint32_t, TypeRef> typeRefs;
         size_t pos = debugInfo->offset;
         size_t infoEnd = debugInfo->offset + debugInfo->size;
         while (pos + 11 <= infoEnd && pos + 11 <= m_size) {
@@ -2032,7 +2582,10 @@ private:
             }
 
             pos = dieStart;
-            parseDwarfDIEs(pos, unitEnd, abbrevs, unit, debugStr, debugLineStr, -1, 0);
+            parseDwarfDIEs(pos, unitEnd, abbrevs, unit, debugInfo, debugStr,
+                           debugLineStr, typeRefs, -1, NullType, NullType,
+                           NullType, 0);
+            finalizeDwarfTypes(typeRefs);
             pos = unitEnd;
         }
     }

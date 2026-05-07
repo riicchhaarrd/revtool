@@ -1955,14 +1955,16 @@ private:
 
     std::unique_ptr<IRExpr> readImm(int64_t imm) {
         uint32_t v = (uint32_t)imm;
-        // String literal?
-        std::string s = tryString(v);
-        if (!s.empty()) return IRExpr::mkString(s);
         // Global variable address (from STABS)?
         // An immediate that matches a global address is &global, not *global.
         // Loading the value would be mov eax, [addr] (memory operand), not mov eax, addr (imm).
         auto *g = m_types.globalAtAddress(v, m_curSourceFileIdx);
         if (g) return IRExpr::mkAddrOf(IRExpr::mkVar(g->name, g->typeRef));
+        if (auto elem = globalArrayElementAtAddress(v, true))
+            return elem;
+        // String literal?
+        std::string s = tryString(v);
+        if (!s.empty()) return IRExpr::mkString(s);
         // Don't resolve function addresses here — they'd be misidentified as data.
         // Function refs are handled in the 'call' and 'lea' instruction handlers.
         return IRExpr::mkConst(imm);
@@ -2037,6 +2039,8 @@ private:
         // PIC-relative (EBX + disp)
         if (m_hasPIC && m.base == X86_REG_EBX && m.index == X86_REG_INVALID && m_picBase) {
             uint32_t addr = m_picBase + (int)m.disp;
+            if (auto elem = globalArrayElementAtAddress(addr, false))
+                return elem;
             auto *g = m_types.globalAtAddress(addr, m_curSourceFileIdx);
             if (g) return IRExpr::mkVar(g->name, g->typeRef);
             std::string s = tryString(addr);
@@ -2164,6 +2168,8 @@ private:
         // Direct address: [disp]
         if (m.base == X86_REG_INVALID && m.index == X86_REG_INVALID && m.disp) {
             uint32_t addr = (uint32_t)m.disp;
+            if (auto elem = globalArrayElementAtAddress(addr, false))
+                return elem;
             auto *g = m_types.globalAtAddress(addr, m_curSourceFileIdx);
             if (g) return IRExpr::mkVar(g->name, g->typeRef);
             // Check function map for import pointers
@@ -2479,6 +2485,53 @@ private:
     }
 
     // ── String resolution ───────────────────────────────────────────
+    bool appendArrayIndexForOffset(TypeRef arrayRef, int byteOffset,
+                                   std::string &suffix,
+                                   TypeRef &elemRef,
+                                   int depth = 0) const {
+        if (arrayRef == NullType || byteOffset < 0 || depth > 8)
+            return false;
+        auto *array = m_types.resolveType(arrayRef);
+        if (!array || array->kind != StabsTypeKind::Array)
+            return false;
+        elemRef = array->targetType;
+        auto *elem = m_types.resolveType(elemRef);
+        if (!elem || elem->sizeBytes <= 0)
+            return false;
+        int idx = byteOffset / elem->sizeBytes;
+        int rem = byteOffset % elem->sizeBytes;
+        int count = array->arrayHigh >= array->arrayLow
+            ? array->arrayHigh - array->arrayLow + 1 : 0;
+        if (count > 0 && idx >= count)
+            return false;
+        suffix += "[" + std::to_string(idx) + "]";
+        if (rem == 0)
+            return true;
+        if (elem->kind == StabsTypeKind::Array)
+            return appendArrayIndexForOffset(elemRef, rem, suffix, elemRef, depth + 1);
+        return false;
+    }
+
+    std::unique_ptr<IRExpr> globalArrayElementAtAddress(uint32_t addr,
+                                                        bool addressOf) const {
+        int byteOffset = 0;
+        auto *g = m_types.globalContainingAddress(addr, byteOffset,
+                                                  m_curSourceFileIdx);
+        if (!g || g->typeRef == NullType)
+            return nullptr;
+        auto *gt = m_types.resolveType(g->typeRef);
+        if (!gt || gt->kind != StabsTypeKind::Array)
+            return nullptr;
+        std::string suffix;
+        TypeRef elemRef = NullType;
+        if (!appendArrayIndexForOffset(g->typeRef, byteOffset, suffix, elemRef))
+            return nullptr;
+        auto elem = IRExpr::mkVar(g->name + suffix, elemRef);
+        if (addressOf)
+            return IRExpr::mkAddrOf(std::move(elem));
+        return elem;
+    }
+
     std::string tryString(uint32_t addr) const {
         int64_t off = m_mf.fileOffsetForAddress(addr);
         if (off < 0) return "";
@@ -2992,6 +3045,8 @@ private:
                 uint32_t target = m_picBase + (int)o[1].mem.disp;
                 auto *g = m_types.globalAtAddress(target, m_curSourceFileIdx);
                 if (g) addr = IRExpr::mkAddrOf(IRExpr::mkVar(g->name, g->typeRef));
+                else if (auto elem = globalArrayElementAtAddress(target, true))
+                    addr = std::move(elem);
                 else {
                     std::string s = tryString(target);
                     if (!s.empty()) addr = IRExpr::mkString(s);
