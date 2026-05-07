@@ -2367,8 +2367,14 @@ private:
                               debugStr, debugStrOffsets, typeRefs);
                 TypeRef thisType = dwarfTypeRefForOffset(typeRefs, dwarfDieKey(unit, dieOffset));
                 if (abbr.tag == DW_TAG_structure_type || abbr.tag == DW_TAG_class_type ||
-                    abbr.tag == DW_TAG_union_type)
+                    abbr.tag == DW_TAG_union_type) {
                     childCompositeType = thisType;
+                    std::string typeName = dwarfStringAttr(unit, attrs, DW_AT_name,
+                                                           debugStr, debugStrOffsets);
+                    if (!typeName.empty())
+                        childNamespace = currentNamespace.empty()
+                            ? typeName : currentNamespace + "::" + typeName;
+                }
                 if (abbr.tag == DW_TAG_array_type)
                     childArrayType = thisType;
                 if (abbr.tag == DW_TAG_enumeration_type)
