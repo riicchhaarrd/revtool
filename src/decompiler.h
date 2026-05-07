@@ -210,6 +210,10 @@ public:
                 for (auto &p : fn.params) if (p.typeRef != NullType) usedTypes.insert(p.typeRef);
                 for (auto &l : fn.locals) if (l.typeRef != NullType) usedTypes.insert(l.typeRef);
             }
+            for (auto &g : types.globals()) {
+                if (g.sourceFileIdx == srcIdx && g.typeRef != NullType)
+                    usedTypes.insert(g.typeRef);
+            }
             emitTypeDefs(out, types, usedTypes);
         }
 
@@ -12270,6 +12274,40 @@ private:
                                 calledFn2->params[i].typeRef, e->kids[i]->value);
                             if (!enumName.empty())
                                 arg = enumName;
+                        }
+                        if (calledFn2 && i < calledFn2->params.size() && i < argCount &&
+                            e->kids[i] && e->kids[i]->op == IROp::AddrOf &&
+                            !e->kids[i]->kids.empty()) {
+                            auto sameResolvedType = [&](TypeRef a, TypeRef b) -> bool {
+                                if (a == NullType || b == NullType)
+                                    return false;
+                                if (a == b)
+                                    return true;
+                                auto *ta = m_types.resolveType(a);
+                                auto *tb = m_types.resolveType(b);
+                                if (!ta || !tb || ta->kind != tb->kind)
+                                    return false;
+                                return !ta->name.empty() && ta->name == tb->name;
+                            };
+                            TypeRef expected = m_types.derefPointer(
+                                calledFn2->params[i].typeRef);
+                            IRExpr *inner = e->kids[i]->kids[0].get();
+                            inner = const_cast<IRExpr *>(stripCastsForAddress(inner));
+                            if (expected != NullType && inner &&
+                                inner->op == IROp::Var && !inner->name.empty()) {
+                                TypeRef objType = exprType(inner);
+                                if (objType == NullType)
+                                    objType = namedObjectType(inner->name);
+                                auto *obj = m_types.resolveType(objType);
+                                if (obj && (obj->kind == StabsTypeKind::Struct ||
+                                            obj->kind == StabsTypeKind::Union)) {
+                                    auto *field = m_types.findFieldAtOffset(objType, 0);
+                                    if (field && !field->name.empty() &&
+                                        sameResolvedType(field->typeRef, expected)) {
+                                        arg = "&" + emitExpr(inner) + "." + field->name;
+                                    }
+                                }
+                            }
                         }
                         if (s_portMode && i < argCount &&
                             (e->name == "strcmp" || e->name == "strlen")) {
