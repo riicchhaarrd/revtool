@@ -2,7 +2,7 @@
 
 [![Build and Publish Web UI](https://github.com/riicchhaarrd/revtool/actions/workflows/pages.yml/badge.svg)](https://github.com/riicchhaarrd/revtool/actions/workflows/pages.yml)
 
-Revtool is a reverse engineering workbench for 32-bit x86 binaries. It combines a native Qt desktop UI, a scriptable CLI, and a WebAssembly browser interface for inspecting binaries, navigating recovered symbols, and generating readable C-like decompiler output.
+Revtool is a reverse engineering workbench for x86 binaries. It combines a native Qt desktop UI, a scriptable CLI, and a WebAssembly browser interface for inspecting binaries, navigating recovered symbols, and generating readable C-like decompiler output.
 
 Try the hosted web UI: [riicchhaarrd.github.io/revtool](https://riicchhaarrd.github.io/revtool/)
 
@@ -23,6 +23,7 @@ The browser version runs the same decompiler core through WebAssembly. Files are
 - STABS-aware symbol, type, local, parameter, and line metadata recovery.
 - DWARF source file, function, parameter name, and line metadata recovery for ELF.
 - Function-level and source-file-level C-like decompilation.
+- Web Project DB for persisted function renames and custom type/struct notes.
 - Optional SSA-based simplification and cosmetic output mode.
 - JSON output modes for machine-readable automation.
 
@@ -74,6 +75,7 @@ Useful options:
 -n <name>          Decompile function by name substring
 -s <idx>           Decompile source file by index
 -a                 Decompile all source files
+--project <file>   Apply exported web Project DB edits
 --json             Emit machine-readable JSON for the selected action
 --gcc              Pipe decompiled output through gcc -fsyntax-only
 ```
@@ -85,6 +87,7 @@ Examples:
 ./build/decomp sample.bin --strings --json
 ./build/decomp sample.bin -f 0x000027B6
 ./build/decomp sample.bin -n main --gcc
+./build/decomp sample.bin -F --project sample.bin.revtool.json
 ```
 
 ## WebAssembly Build
