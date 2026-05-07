@@ -1,4 +1,4 @@
-name: Build and Deploy Web UI
+name: Build and Publish Web UI
 
 on:
   push:
@@ -6,17 +6,17 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
-  group: pages
-  cancel-in-progress: false
+  group: gh-pages
+  cancel-in-progress: true
 
 env:
   EMSDK_VERSION: "4.0.20"
 
 jobs:
-  build:
+  build-and-publish:
     runs-on: ubuntu-latest
 
     steps:
@@ -53,34 +53,30 @@ jobs:
           EMSDK_DIR: ${{ github.workspace }}/emsdk
         run: ./build_wasm.sh
 
-      - name: Prepare Pages artifact
+      - name: Prepare web bundle
         run: |
           test -s web/index.html
           test -s web/dis.js
           test -s web/dis.wasm
-          touch web/.nojekyll
 
-      - name: Configure GitHub Pages
-        uses: actions/configure-pages@v5
-
-      - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v4
-        with:
-          path: web
-
-  deploy:
-    needs: build
-    runs-on: ubuntu-latest
-
-    permissions:
-      pages: write
-      id-token: write
-
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-
-    steps:
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4
+      - name: Publish gh-pages branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git ls-remote --exit-code --heads origin gh-pages; then
+            git fetch origin gh-pages --depth=1
+            git worktree add gh-pages origin/gh-pages
+          else
+            git worktree add --detach gh-pages
+            git -C gh-pages switch --orphan gh-pages
+          fi
+          find gh-pages -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+          cp web/index.html web/dis.js web/dis.wasm gh-pages/
+          touch gh-pages/.nojekyll
+          git -C gh-pages add -A
+          if git -C gh-pages diff --cached --quiet; then
+            echo "No changes to publish"
+          else
+            git -C gh-pages commit -m "deploy: update web UI"
+            git -C gh-pages push origin HEAD:gh-pages
+          fi
