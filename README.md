@@ -20,7 +20,8 @@ The browser version runs the same decompiler core through WebAssembly. Files are
 - 32-bit x86 Mach-O, PE32, and ELF parsing.
 - Capstone-backed x86 disassembly.
 - Function, source file, string, and string cross-reference views.
-- STABS-aware symbol, type, source file, local, parameter, and line metadata recovery.
+- STABS-aware symbol, type, local, parameter, and line metadata recovery.
+- DWARF source file, function, parameter name, and line metadata recovery for ELF.
 - Function-level and source-file-level C-like decompilation.
 - Optional SSA-based simplification and cosmetic output mode.
 - JSON output modes for machine-readable automation.

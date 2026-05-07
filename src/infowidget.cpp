@@ -149,6 +149,7 @@ void InfoWidget::setMachO(MachOFile *macho) {
     if (!macho) return;
     setTabText(1, m_macho->isPE() ? "Directories" :
                   m_macho->isELF() ? "Program Hdrs" : "Load Cmds");
+    setTabText(6, m_macho->isELF() ? "Debug" : "STABS");
     setTabText(7, m_macho->isPE() ? "DLLs" :
                   m_macho->isELF() ? "Needed" : "Dylibs");
     buildHeaderTab();
@@ -220,7 +221,9 @@ void InfoWidget::buildHeaderTab() {
     info += QString("  Total:     %1\n").arg(m_macho->symbols().size());
     int stabsCount = 0;
     for (auto &s : m_macho->symbols()) if (s.n_type & N_STAB) stabsCount++;
-    info += QString("  STABS:     %1\n").arg(stabsCount);
+    info += QString("  %1:%2\n")
+                .arg(m_macho->isELF() ? "STABS syms" : "STABS", -10)
+                .arg(stabsCount);
     info += QString("  Regular:   %1\n").arg(m_macho->symbols().size() - stabsCount);
     info += QString("  Functions: %1\n").arg(m_macho->stabsFunctions().size());
     info += QString("  Sources:   %1\n").arg(m_macho->stabsSourceFiles().size());
@@ -780,7 +783,7 @@ void InfoWidget::buildStabsTab() {
     unattached->setText(3, QString("%1 functions").arg(count));
 
     auto *summaryItem = new QTreeWidgetItem(m_stabsTree);
-    summaryItem->setText(0, "[STABS Summary]");
+    summaryItem->setText(0, m_macho->isELF() ? "[Debug Summary]" : "[STABS Summary]");
     std::unordered_map<uint8_t, int> typeCounts;
     for (auto &sym : m_macho->symbols())
         if (sym.n_type & N_STAB) typeCounts[sym.n_type]++;

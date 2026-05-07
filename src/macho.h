@@ -196,6 +196,98 @@ constexpr uint32_t SHN_UNDEF = 0;
 constexpr uint32_t SHN_ABS   = 0xFFF1;
 constexpr int32_t  DT_NEEDED = 1;
 
+// DWARF tags
+constexpr uint64_t DW_TAG_formal_parameter = 0x05;
+constexpr uint64_t DW_TAG_compile_unit     = 0x11;
+constexpr uint64_t DW_TAG_subprogram       = 0x2E;
+
+// DWARF children flag
+constexpr uint8_t DW_CHILDREN_no  = 0;
+constexpr uint8_t DW_CHILDREN_yes = 1;
+
+// DWARF attributes
+constexpr uint64_t DW_AT_location          = 0x02;
+constexpr uint64_t DW_AT_name              = 0x03;
+constexpr uint64_t DW_AT_stmt_list         = 0x10;
+constexpr uint64_t DW_AT_low_pc            = 0x11;
+constexpr uint64_t DW_AT_high_pc           = 0x12;
+constexpr uint64_t DW_AT_comp_dir          = 0x1B;
+constexpr uint64_t DW_AT_external          = 0x3F;
+constexpr uint64_t DW_AT_decl_file         = 0x3A;
+constexpr uint64_t DW_AT_decl_line         = 0x3B;
+constexpr uint64_t DW_AT_abstract_origin   = 0x31;
+constexpr uint64_t DW_AT_specification     = 0x47;
+constexpr uint64_t DW_AT_type              = 0x49;
+constexpr uint64_t DW_AT_ranges            = 0x55;
+constexpr uint64_t DW_AT_linkage_name      = 0x6E;
+constexpr uint64_t DW_AT_str_offsets_base  = 0x72;
+constexpr uint64_t DW_AT_addr_base         = 0x73;
+constexpr uint64_t DW_AT_rnglists_base     = 0x74;
+constexpr uint64_t DW_AT_MIPS_linkage_name = 0x2007;
+
+// DWARF forms
+constexpr uint64_t DW_FORM_addr           = 0x01;
+constexpr uint64_t DW_FORM_block2         = 0x03;
+constexpr uint64_t DW_FORM_block4         = 0x04;
+constexpr uint64_t DW_FORM_data2          = 0x05;
+constexpr uint64_t DW_FORM_data4          = 0x06;
+constexpr uint64_t DW_FORM_data8          = 0x07;
+constexpr uint64_t DW_FORM_string         = 0x08;
+constexpr uint64_t DW_FORM_block          = 0x09;
+constexpr uint64_t DW_FORM_block1         = 0x0A;
+constexpr uint64_t DW_FORM_data1          = 0x0B;
+constexpr uint64_t DW_FORM_flag           = 0x0C;
+constexpr uint64_t DW_FORM_sdata          = 0x0D;
+constexpr uint64_t DW_FORM_strp           = 0x0E;
+constexpr uint64_t DW_FORM_udata          = 0x0F;
+constexpr uint64_t DW_FORM_ref_addr       = 0x10;
+constexpr uint64_t DW_FORM_ref1           = 0x11;
+constexpr uint64_t DW_FORM_ref2           = 0x12;
+constexpr uint64_t DW_FORM_ref4           = 0x13;
+constexpr uint64_t DW_FORM_ref8           = 0x14;
+constexpr uint64_t DW_FORM_ref_udata      = 0x15;
+constexpr uint64_t DW_FORM_indirect       = 0x16;
+constexpr uint64_t DW_FORM_sec_offset     = 0x17;
+constexpr uint64_t DW_FORM_exprloc        = 0x18;
+constexpr uint64_t DW_FORM_flag_present   = 0x19;
+constexpr uint64_t DW_FORM_strx           = 0x1A;
+constexpr uint64_t DW_FORM_addrx          = 0x1B;
+constexpr uint64_t DW_FORM_ref_sup4       = 0x1C;
+constexpr uint64_t DW_FORM_strp_sup       = 0x1D;
+constexpr uint64_t DW_FORM_data16         = 0x1E;
+constexpr uint64_t DW_FORM_line_strp      = 0x1F;
+constexpr uint64_t DW_FORM_ref_sig8       = 0x20;
+constexpr uint64_t DW_FORM_implicit_const = 0x21;
+constexpr uint64_t DW_FORM_loclistx       = 0x22;
+constexpr uint64_t DW_FORM_rnglistx       = 0x23;
+constexpr uint64_t DW_FORM_ref_sup8       = 0x24;
+constexpr uint64_t DW_FORM_strx1          = 0x25;
+constexpr uint64_t DW_FORM_strx2          = 0x26;
+constexpr uint64_t DW_FORM_strx3          = 0x27;
+constexpr uint64_t DW_FORM_strx4          = 0x28;
+constexpr uint64_t DW_FORM_addrx1         = 0x29;
+constexpr uint64_t DW_FORM_addrx2         = 0x2A;
+constexpr uint64_t DW_FORM_addrx3         = 0x2B;
+constexpr uint64_t DW_FORM_addrx4         = 0x2C;
+
+// DWARF line opcodes
+constexpr uint8_t DW_LNS_copy              = 1;
+constexpr uint8_t DW_LNS_advance_pc        = 2;
+constexpr uint8_t DW_LNS_advance_line      = 3;
+constexpr uint8_t DW_LNS_set_file          = 4;
+constexpr uint8_t DW_LNS_set_column        = 5;
+constexpr uint8_t DW_LNS_negate_stmt       = 6;
+constexpr uint8_t DW_LNS_set_basic_block   = 7;
+constexpr uint8_t DW_LNS_const_add_pc      = 8;
+constexpr uint8_t DW_LNS_fixed_advance_pc  = 9;
+constexpr uint8_t DW_LNS_set_prologue_end  = 10;
+constexpr uint8_t DW_LNS_set_epilogue_begin= 11;
+constexpr uint8_t DW_LNS_set_isa           = 12;
+constexpr uint8_t DW_LNE_end_sequence      = 1;
+constexpr uint8_t DW_LNE_set_address       = 2;
+constexpr uint8_t DW_LNE_define_file       = 3;
+constexpr uint8_t DW_LNE_set_discriminator = 4;
+
 struct DataDirectoryEntry {
     std::string name;
     uint32_t rva = 0;
@@ -765,6 +857,55 @@ private:
         uint32_t entsize = 0;
     };
 
+    struct DwarfAbbrevAttr {
+        uint64_t name = 0;
+        uint64_t form = 0;
+        int64_t implicitConst = 0;
+    };
+
+    struct DwarfAbbrev {
+        uint64_t code = 0;
+        uint64_t tag = 0;
+        bool hasChildren = false;
+        std::vector<DwarfAbbrevAttr> attrs;
+    };
+
+    struct DwarfValue {
+        uint64_t u = 0;
+        int64_t s = 0;
+        std::string str;
+        uint64_t form = 0;
+        bool present = false;
+        bool isString = false;
+    };
+
+    struct DwarfLineRow {
+        uint32_t address = 0;
+        uint32_t file = 0;
+        uint32_t line = 0;
+        bool endSequence = false;
+    };
+
+    struct DwarfLineTable {
+        uint16_t version = 0;
+        uint8_t addressSize = 4;
+        std::string compDir;
+        std::vector<std::string> includeDirs;
+        std::vector<std::string> files;
+        std::vector<DwarfLineRow> rows;
+    };
+
+    struct DwarfUnit {
+        uint32_t offset = 0;
+        uint32_t end = 0;
+        uint16_t version = 0;
+        uint8_t addressSize = 4;
+        std::string name;
+        std::string compDir;
+        uint32_t stmtList = UINT32_MAX;
+        const DwarfLineTable *lineTable = nullptr;
+    };
+
     bool parse() {
         if (m_size >= 0x40 && readLE<uint16_t>(0) == 0x5A4D)
             return parsePE();
@@ -1121,6 +1262,781 @@ private:
         return stringAtBounded(strtab.offset, strtab.size, nameIdx);
     }
 
+    const ELFSectionRecord* findELFSection(const std::vector<ELFSectionRecord> &sections,
+                                           const std::string &name) const {
+        for (const auto &sec : sections)
+            if (sec.name == name)
+                return &sec;
+        return nullptr;
+    }
+
+    uint64_t readULEB(size_t &pos, size_t end) const {
+        uint64_t result = 0;
+        unsigned shift = 0;
+        while (pos < end && shift < 64) {
+            uint8_t b = m_data[pos++];
+            result |= (uint64_t)(b & 0x7F) << shift;
+            if ((b & 0x80) == 0) break;
+            shift += 7;
+        }
+        return result;
+    }
+
+    int64_t readSLEB(size_t &pos, size_t end) const {
+        int64_t result = 0;
+        unsigned shift = 0;
+        uint8_t b = 0;
+        while (pos < end && shift < 64) {
+            b = m_data[pos++];
+            result |= (int64_t)(b & 0x7F) << shift;
+            shift += 7;
+            if ((b & 0x80) == 0) break;
+        }
+        if (shift < 64 && (b & 0x40))
+            result |= -((int64_t)1 << shift);
+        return result;
+    }
+
+    uint64_t readUIntLE(size_t pos, size_t width) const {
+        uint64_t value = 0;
+        for (size_t i = 0; i < width && pos + i < m_size && i < 8; ++i)
+            value |= (uint64_t)m_data[pos + i] << (i * 8);
+        return value;
+    }
+
+    std::string stringFromSection(const ELFSectionRecord *sec, uint64_t off) const {
+        if (!sec || off >= sec->size) return "";
+        return stringAtBounded(sec->offset, sec->size, (uint32_t)off);
+    }
+
+    static bool isAbsolutePath(const std::string &path) {
+        return !path.empty() && (path[0] == '/' || path[0] == '\\' ||
+               (path.size() > 2 && path[1] == ':'));
+    }
+
+    static std::string joinPath(const std::string &dir, const std::string &name) {
+        if (name.empty() || isAbsolutePath(name) || dir.empty())
+            return name;
+        if (dir.back() == '/' || dir.back() == '\\')
+            return dir + name;
+        return dir + "/" + name;
+    }
+
+    int sourceIndexForPath(const std::string &path, uint32_t address = 0) {
+        std::string norm = path;
+        for (char &c : norm) if (c == '\\') c = '/';
+        std::string dir;
+        std::string file = norm;
+        size_t slash = norm.rfind('/');
+        if (slash != std::string::npos) {
+            dir = norm.substr(0, slash + 1);
+            file = norm.substr(slash + 1);
+        }
+        for (size_t i = 0; i < m_stabsSources.size(); ++i) {
+            if (m_stabsSources[i].directory == dir && m_stabsSources[i].filename == file)
+                return (int)i;
+        }
+        StabsSourceFile sf;
+        sf.directory = dir;
+        sf.filename = file.empty() ? norm : file;
+        sf.address = address;
+        m_stabsSources.push_back(std::move(sf));
+        return (int)m_stabsSources.size() - 1;
+    }
+
+    std::map<uint64_t, DwarfAbbrev> parseDwarfAbbrevs(const ELFSectionRecord *debugAbbrev,
+                                                       uint32_t abbrevOffset) const {
+        std::map<uint64_t, DwarfAbbrev> out;
+        if (!debugAbbrev || abbrevOffset >= debugAbbrev->size) return out;
+        size_t pos = debugAbbrev->offset + abbrevOffset;
+        size_t end = debugAbbrev->offset + debugAbbrev->size;
+        while (pos < end) {
+            uint64_t code = readULEB(pos, end);
+            if (code == 0) break;
+            DwarfAbbrev abbr;
+            abbr.code = code;
+            abbr.tag = readULEB(pos, end);
+            if (pos >= end) break;
+            abbr.hasChildren = m_data[pos++] == DW_CHILDREN_yes;
+            while (pos < end) {
+                DwarfAbbrevAttr attr;
+                attr.name = readULEB(pos, end);
+                attr.form = readULEB(pos, end);
+                if (attr.name == 0 && attr.form == 0)
+                    break;
+                if (attr.form == DW_FORM_implicit_const)
+                    attr.implicitConst = readSLEB(pos, end);
+                abbr.attrs.push_back(attr);
+            }
+            out[abbr.code] = std::move(abbr);
+        }
+        return out;
+    }
+
+    DwarfValue readDwarfFormValue(size_t &pos, size_t end, uint64_t form,
+                                  int64_t implicitConst, uint8_t addressSize,
+                                  const ELFSectionRecord *debugStr,
+                                  const ELFSectionRecord *debugLineStr) const {
+        DwarfValue value;
+        value.form = form;
+        value.present = true;
+        if (form == DW_FORM_indirect) {
+            uint64_t actual = readULEB(pos, end);
+            return readDwarfFormValue(pos, end, actual, 0, addressSize, debugStr, debugLineStr);
+        }
+
+        auto need = [&](size_t n) -> bool {
+            return pos + n <= end && pos + n <= m_size;
+        };
+
+        switch (form) {
+        case DW_FORM_addr:
+            if (need(addressSize)) {
+                value.u = readUIntLE(pos, addressSize);
+                value.s = (int64_t)value.u;
+                pos += addressSize;
+            }
+            break;
+        case DW_FORM_data1:
+        case DW_FORM_flag:
+        case DW_FORM_ref1:
+        case DW_FORM_strx1:
+        case DW_FORM_addrx1:
+            if (need(1)) { value.u = readLE<uint8_t>(pos); value.s = (int64_t)value.u; pos += 1; }
+            break;
+        case DW_FORM_data2:
+        case DW_FORM_ref2:
+        case DW_FORM_strx2:
+        case DW_FORM_addrx2:
+            if (need(2)) { value.u = readLE<uint16_t>(pos); value.s = (int64_t)value.u; pos += 2; }
+            break;
+        case DW_FORM_data4:
+        case DW_FORM_ref4:
+        case DW_FORM_ref_addr:
+        case DW_FORM_sec_offset:
+        case DW_FORM_strp:
+        case DW_FORM_line_strp:
+        case DW_FORM_strx4:
+        case DW_FORM_addrx4:
+        case DW_FORM_ref_sup4:
+        case DW_FORM_strp_sup:
+            if (need(4)) { value.u = readLE<uint32_t>(pos); value.s = (int64_t)value.u; pos += 4; }
+            if (form == DW_FORM_strp) {
+                value.str = stringFromSection(debugStr, value.u);
+                value.isString = true;
+            } else if (form == DW_FORM_line_strp) {
+                value.str = stringFromSection(debugLineStr, value.u);
+                value.isString = true;
+            }
+            break;
+        case DW_FORM_data8:
+        case DW_FORM_ref8:
+        case DW_FORM_ref_sig8:
+        case DW_FORM_ref_sup8:
+            if (need(8)) { value.u = readLE<uint64_t>(pos); value.s = (int64_t)value.u; pos += 8; }
+            break;
+        case DW_FORM_data16:
+            if (need(16)) pos += 16;
+            break;
+        case DW_FORM_sdata:
+            value.s = readSLEB(pos, end);
+            value.u = (uint64_t)value.s;
+            break;
+        case DW_FORM_udata:
+        case DW_FORM_ref_udata:
+        case DW_FORM_strx:
+        case DW_FORM_addrx:
+        case DW_FORM_loclistx:
+        case DW_FORM_rnglistx:
+            value.u = readULEB(pos, end);
+            value.s = (int64_t)value.u;
+            break;
+        case DW_FORM_string:
+            if (pos < end && pos < m_size) {
+                value.str = readString(pos);
+                value.isString = true;
+                pos += value.str.size() + 1;
+            }
+            break;
+        case DW_FORM_flag_present:
+            value.u = 1;
+            value.s = 1;
+            break;
+        case DW_FORM_implicit_const:
+            value.s = implicitConst;
+            value.u = (uint64_t)implicitConst;
+            break;
+        case DW_FORM_block1:
+            if (need(1)) { uint8_t n = readLE<uint8_t>(pos); pos += 1 + n; }
+            break;
+        case DW_FORM_block2:
+            if (need(2)) { uint16_t n = readLE<uint16_t>(pos); pos += 2 + n; }
+            break;
+        case DW_FORM_block4:
+            if (need(4)) { uint32_t n = readLE<uint32_t>(pos); pos += 4 + n; }
+            break;
+        case DW_FORM_block:
+        case DW_FORM_exprloc: {
+            uint64_t n = readULEB(pos, end);
+            pos += (size_t)std::min<uint64_t>(n, end > pos ? end - pos : 0);
+            break;
+        }
+        case DW_FORM_strx3:
+        case DW_FORM_addrx3:
+            if (need(3)) {
+                value.u = readUIntLE(pos, 3);
+                value.s = (int64_t)value.u;
+                pos += 3;
+            }
+            break;
+        default:
+            value.present = false;
+            break;
+        }
+        if (pos > end) pos = end;
+        return value;
+    }
+
+    std::string dwarfStringAttr(const std::map<uint64_t, DwarfValue> &attrs,
+                                uint64_t attr) const {
+        auto it = attrs.find(attr);
+        if (it == attrs.end()) return "";
+        if (it->second.isString) return it->second.str;
+        return "";
+    }
+
+    uint64_t dwarfUnsignedAttr(const std::map<uint64_t, DwarfValue> &attrs,
+                               uint64_t attr, uint64_t def = 0) const {
+        auto it = attrs.find(attr);
+        return it != attrs.end() && it->second.present ? it->second.u : def;
+    }
+
+    bool dwarfHasAttr(const std::map<uint64_t, DwarfValue> &attrs, uint64_t attr) const {
+        auto it = attrs.find(attr);
+        return it != attrs.end() && it->second.present;
+    }
+
+    std::string readDwarfLineStringEntry(size_t &pos, size_t end,
+                                         const std::vector<DwarfAbbrevAttr> &formats,
+                                         uint64_t contentType,
+                                         const ELFSectionRecord *debugLine,
+                                         const ELFSectionRecord *debugLineStr,
+                                         uint8_t addressSize,
+                                         uint64_t &dirIndex) const {
+        std::string text;
+        dirIndex = 0;
+        for (const auto &fmt : formats) {
+            DwarfValue v = readDwarfFormValue(pos, end, fmt.form, fmt.implicitConst,
+                                              addressSize, debugLine, debugLineStr);
+            if (fmt.name == 0x01 || fmt.name == contentType) { // DW_LNCT_path
+                if (v.isString) text = v.str;
+                else if (v.form == DW_FORM_line_strp)
+                    text = stringFromSection(debugLineStr, v.u);
+            } else if (fmt.name == 0x02) { // DW_LNCT_directory_index
+                dirIndex = v.u;
+            }
+        }
+        return text;
+    }
+
+    DwarfLineTable parseDwarfLineTable(const std::vector<ELFSectionRecord> &sections,
+                                       uint32_t offset,
+                                       const std::string &compDir) const {
+        DwarfLineTable table;
+        table.compDir = compDir;
+        const ELFSectionRecord *debugLine = findELFSection(sections, ".debug_line");
+        const ELFSectionRecord *debugLineStr = findELFSection(sections, ".debug_line_str");
+        const ELFSectionRecord *debugStr = findELFSection(sections, ".debug_str");
+        if (!debugLine || offset >= debugLine->size) return table;
+
+        size_t pos = debugLine->offset + offset;
+        size_t secEnd = debugLine->offset + debugLine->size;
+        if (pos + 10 > secEnd || pos + 10 > m_size) return table;
+
+        uint32_t unitLength = readLE<uint32_t>(pos); pos += 4;
+        if (unitLength == 0xFFFFFFFF) return table; // DWARF64 not supported here.
+        size_t unitEnd = std::min<size_t>(pos + unitLength, secEnd);
+        if (unitEnd > m_size || pos + 2 > unitEnd) return table;
+
+        table.version = readLE<uint16_t>(pos); pos += 2;
+        if (table.version < 2 || table.version > 5) return table;
+
+        if (table.version >= 5) {
+            if (pos + 2 > unitEnd) return table;
+            table.addressSize = readLE<uint8_t>(pos); pos += 1;
+            pos += 1; // segment selector size
+        } else {
+            table.addressSize = 4;
+        }
+
+        if (pos + 4 > unitEnd) return table;
+        uint32_t headerLength = readLE<uint32_t>(pos); pos += 4;
+        size_t headerEnd = std::min<size_t>(pos + headerLength, unitEnd);
+        if (headerEnd > unitEnd) return table;
+        if (pos + (table.version >= 4 ? 6 : 5) > headerEnd) return table;
+
+        uint8_t minInstrLen = readLE<uint8_t>(pos); pos += 1;
+        if (table.version >= 4) pos += 1; // max_ops_per_instruction
+        uint8_t defaultIsStmt = readLE<uint8_t>(pos); pos += 1;
+        int8_t lineBase = (int8_t)readLE<uint8_t>(pos); pos += 1;
+        uint8_t lineRange = readLE<uint8_t>(pos); pos += 1;
+        uint8_t opcodeBase = readLE<uint8_t>(pos); pos += 1;
+        std::vector<uint8_t> stdOpLens(opcodeBase, 0);
+        for (uint8_t i = 1; i < opcodeBase && pos < headerEnd; ++i)
+            stdOpLens[i] = readLE<uint8_t>(pos++);
+
+        if (table.version < 5) {
+            while (pos < headerEnd) {
+                std::string dir = readString(pos);
+                pos += dir.size() + 1;
+                if (dir.empty()) break;
+                table.includeDirs.push_back(dir);
+            }
+            while (pos < headerEnd) {
+                std::string name = readString(pos);
+                pos += name.size() + 1;
+                if (name.empty()) break;
+                uint64_t dirIdx = readULEB(pos, headerEnd);
+                (void)readULEB(pos, headerEnd); // mtime
+                (void)readULEB(pos, headerEnd); // file length
+                std::string dir = compDir;
+                if (dirIdx > 0 && dirIdx - 1 < table.includeDirs.size())
+                    dir = table.includeDirs[(size_t)dirIdx - 1];
+                table.files.push_back(joinPath(dir, name));
+            }
+        } else {
+            uint64_t dirFmtCount = readULEB(pos, headerEnd);
+            std::vector<DwarfAbbrevAttr> dirFormats;
+            for (uint64_t i = 0; i < dirFmtCount && pos < headerEnd; ++i) {
+                DwarfAbbrevAttr fmt;
+                fmt.name = readULEB(pos, headerEnd);
+                fmt.form = readULEB(pos, headerEnd);
+                dirFormats.push_back(fmt);
+            }
+            uint64_t dirCount = readULEB(pos, headerEnd);
+            for (uint64_t i = 0; i < dirCount && pos < headerEnd; ++i) {
+                uint64_t ignoredDirIndex = 0;
+                std::string dir = readDwarfLineStringEntry(pos, headerEnd, dirFormats,
+                                                           0x01, debugStr, debugLineStr,
+                                                           table.addressSize, ignoredDirIndex);
+                table.includeDirs.push_back(dir);
+            }
+
+            uint64_t fileFmtCount = readULEB(pos, headerEnd);
+            std::vector<DwarfAbbrevAttr> fileFormats;
+            for (uint64_t i = 0; i < fileFmtCount && pos < headerEnd; ++i) {
+                DwarfAbbrevAttr fmt;
+                fmt.name = readULEB(pos, headerEnd);
+                fmt.form = readULEB(pos, headerEnd);
+                fileFormats.push_back(fmt);
+            }
+            uint64_t fileCount = readULEB(pos, headerEnd);
+            for (uint64_t i = 0; i < fileCount && pos < headerEnd; ++i) {
+                uint64_t dirIdx = 0;
+                std::string name = readDwarfLineStringEntry(pos, headerEnd, fileFormats,
+                                                            0x01, debugStr, debugLineStr,
+                                                            table.addressSize, dirIdx);
+                std::string dir = compDir;
+                if (dirIdx < table.includeDirs.size())
+                    dir = table.includeDirs[(size_t)dirIdx];
+                table.files.push_back(joinPath(dir, name));
+            }
+        }
+
+        pos = headerEnd;
+        struct LineState {
+            uint32_t address = 0;
+            uint32_t file = 1;
+            uint32_t line = 1;
+            bool isStmt = false;
+            bool endSequence = false;
+        } state;
+        auto reset = [&]() {
+            state.address = 0;
+            state.file = table.version >= 5 ? 0 : 1;
+            state.line = 1;
+            state.isStmt = defaultIsStmt != 0;
+            state.endSequence = false;
+        };
+        auto addRow = [&]() {
+            DwarfLineRow row;
+            row.address = state.address;
+            row.file = state.file;
+            row.line = state.line;
+            row.endSequence = state.endSequence;
+            table.rows.push_back(row);
+        };
+        reset();
+
+        while (pos < unitEnd) {
+            uint8_t op = readLE<uint8_t>(pos++);
+            if (op >= opcodeBase) {
+                uint8_t adjusted = op - opcodeBase;
+                if (lineRange) {
+                    state.address += (adjusted / lineRange) * minInstrLen;
+                    state.line = (uint32_t)((int32_t)state.line + lineBase + (adjusted % lineRange));
+                }
+                addRow();
+                state.endSequence = false;
+                continue;
+            }
+            if (op == 0) {
+                uint64_t extLen = readULEB(pos, unitEnd);
+                size_t extEnd = std::min<size_t>(pos + extLen, unitEnd);
+                if (pos >= extEnd) { pos = extEnd; continue; }
+                uint8_t subop = readLE<uint8_t>(pos++);
+                switch (subop) {
+                case DW_LNE_end_sequence:
+                    state.endSequence = true;
+                    addRow();
+                    reset();
+                    break;
+                case DW_LNE_set_address:
+                    if (pos + table.addressSize <= extEnd) {
+                        state.address = (uint32_t)readUIntLE(pos, table.addressSize);
+                        pos += table.addressSize;
+                    }
+                    break;
+                case DW_LNE_define_file:
+                    // Rare in modern output; skip the payload.
+                    break;
+                default:
+                    break;
+                }
+                pos = extEnd;
+                continue;
+            }
+
+            switch (op) {
+            case DW_LNS_copy:
+                addRow();
+                state.endSequence = false;
+                break;
+            case DW_LNS_advance_pc:
+                state.address += (uint32_t)(readULEB(pos, unitEnd) * minInstrLen);
+                break;
+            case DW_LNS_advance_line:
+                state.line = (uint32_t)((int32_t)state.line + readSLEB(pos, unitEnd));
+                break;
+            case DW_LNS_set_file:
+                state.file = (uint32_t)readULEB(pos, unitEnd);
+                break;
+            case DW_LNS_set_column:
+                (void)readULEB(pos, unitEnd);
+                break;
+            case DW_LNS_negate_stmt:
+                state.isStmt = !state.isStmt;
+                break;
+            case DW_LNS_set_basic_block:
+                break;
+            case DW_LNS_const_add_pc: {
+                uint8_t adjusted = 255 - opcodeBase;
+                if (lineRange)
+                    state.address += (adjusted / lineRange) * minInstrLen;
+                break;
+            }
+            case DW_LNS_fixed_advance_pc:
+                if (pos + 2 <= unitEnd) {
+                    state.address += readLE<uint16_t>(pos);
+                    pos += 2;
+                }
+                break;
+            case DW_LNS_set_prologue_end:
+            case DW_LNS_set_epilogue_begin:
+                break;
+            case DW_LNS_set_isa:
+                (void)readULEB(pos, unitEnd);
+                break;
+            default:
+                if (op < stdOpLens.size()) {
+                    for (uint8_t i = 0; i < stdOpLens[op]; ++i)
+                        (void)readULEB(pos, unitEnd);
+                }
+                break;
+            }
+        }
+
+        std::sort(table.rows.begin(), table.rows.end(), [](const auto &a, const auto &b) {
+            if (a.address != b.address) return a.address < b.address;
+            if (a.file != b.file) return a.file < b.file;
+            return a.line < b.line;
+        });
+        return table;
+    }
+
+    std::string dwarfFileForIndex(const DwarfUnit &unit, uint32_t fileIdx) const {
+        if (!unit.lineTable) return "";
+        const auto &files = unit.lineTable->files;
+        if (files.empty()) return "";
+        if (unit.lineTable->version >= 5) {
+            if (fileIdx < files.size()) return files[(size_t)fileIdx];
+        } else {
+            if (fileIdx > 0 && fileIdx - 1 < files.size())
+                return files[(size_t)fileIdx - 1];
+        }
+        return files.front();
+    }
+
+    std::string bestDwarfFileForRange(const DwarfUnit &unit, uint32_t low, uint32_t high) const {
+        if (!unit.lineTable || unit.lineTable->files.empty()) return "";
+        std::map<uint32_t, int> counts;
+        for (const auto &row : unit.lineTable->rows) {
+            if (row.endSequence || row.address < low || row.address >= high) continue;
+            counts[row.file]++;
+        }
+        uint32_t bestFile = unit.lineTable->version >= 5 ? 0 : 1;
+        int bestCount = -1;
+        for (const auto &[file, count] : counts) {
+            if (count > bestCount) {
+                bestFile = file;
+                bestCount = count;
+            }
+        }
+        return dwarfFileForIndex(unit, bestFile);
+    }
+
+    uint32_t dwarfHighPC(uint32_t lowPc, const DwarfValue &highVal, uint16_t version) const {
+        if (!highVal.present) return 0;
+        if (highVal.form == DW_FORM_addr)
+            return (uint32_t)highVal.u;
+        // DWARF4+ defines constant-class high_pc as an offset from low_pc.
+        if (version >= 4)
+            return lowPc + (uint32_t)highVal.u;
+        // Older producers were less consistent; prefer offset when the value
+        // is not a plausible absolute address above low_pc.
+        if (highVal.u <= lowPc)
+            return lowPc + (uint32_t)highVal.u;
+        return (uint32_t)highVal.u;
+    }
+
+    int addDwarfFunction(const DwarfUnit &unit,
+                         const std::map<uint64_t, DwarfValue> &attrs) {
+        if (!dwarfHasAttr(attrs, DW_AT_low_pc)) return -1;
+        uint32_t lowPc = (uint32_t)dwarfUnsignedAttr(attrs, DW_AT_low_pc);
+        if (!lowPc || !sectionForAddress(lowPc)) return -1;
+        const Section *sec = sectionForAddress(lowPc);
+        if (!sec || !isCodeSection(*sec)) return -1;
+
+        auto highIt = attrs.find(DW_AT_high_pc);
+        uint32_t highPc = highIt != attrs.end()
+            ? dwarfHighPC(lowPc, highIt->second, unit.version) : 0;
+        if (highPc && highPc <= lowPc) highPc = 0;
+
+        std::string rawName = dwarfStringAttr(attrs, DW_AT_linkage_name);
+        if (rawName.empty()) rawName = dwarfStringAttr(attrs, DW_AT_MIPS_linkage_name);
+        if (rawName.empty()) rawName = dwarfStringAttr(attrs, DW_AT_name);
+        if (rawName.empty()) return -1;
+
+        std::string sourcePath;
+        if (dwarfHasAttr(attrs, DW_AT_decl_file))
+            sourcePath = dwarfFileForIndex(unit, (uint32_t)dwarfUnsignedAttr(attrs, DW_AT_decl_file));
+        if (sourcePath.empty() && highPc)
+            sourcePath = bestDwarfFileForRange(unit, lowPc, highPc);
+        if (sourcePath.empty())
+            sourcePath = joinPath(unit.compDir, unit.name);
+
+        int srcIdx = sourcePath.empty() ? -1 : sourceIndexForPath(sourcePath, lowPc);
+        for (size_t i = 0; i < m_stabsFuncs.size(); ++i) {
+            if (m_stabsFuncs[i].address == lowPc) {
+                StabsFunction &existing = m_stabsFuncs[i];
+                if (existing.name.empty() || existing.name.find("sub_") == 0)
+                    existing.name = symbolDisplayName(rawName);
+                if (existing.rawName.empty())
+                    existing.rawName = rawName;
+                if (existing.size == 0 && highPc)
+                    existing.size = highPc - lowPc;
+                if (existing.sourceFileIdx < 0 && srcIdx >= 0) {
+                    existing.sourceFileIdx = srcIdx;
+                    m_stabsSources[srcIdx].functionIndices.push_back(i);
+                }
+                if (existing.lineMap.empty() && unit.lineTable && highPc) {
+                    for (const auto &row : unit.lineTable->rows) {
+                        if (row.endSequence || row.address < lowPc || row.address >= highPc)
+                            continue;
+                        existing.lineMap.push_back({row.address, (int)row.line});
+                    }
+                    std::sort(existing.lineMap.begin(), existing.lineMap.end(),
+                              [](const auto &a, const auto &b) { return a.first < b.first; });
+                }
+                return (int)i;
+            }
+        }
+
+        StabsFunction fn;
+        fn.name = symbolDisplayName(rawName);
+        fn.rawName = rawName;
+        fn.address = lowPc;
+        fn.size = highPc ? highPc - lowPc : 0;
+        fn.isGlobal = dwarfUnsignedAttr(attrs, DW_AT_external, 0) != 0;
+        fn.sourceFileIdx = srcIdx;
+        if (unit.lineTable) {
+            for (const auto &row : unit.lineTable->rows) {
+                if (row.endSequence) continue;
+                if (row.address < lowPc) continue;
+                if (highPc && row.address >= highPc) continue;
+                if (!sourcePath.empty()) {
+                    std::string rowPath = dwarfFileForIndex(unit, row.file);
+                    if (!rowPath.empty() && rowPath != sourcePath) continue;
+                }
+                fn.lineMap.push_back({row.address, (int)row.line});
+            }
+            std::sort(fn.lineMap.begin(), fn.lineMap.end(), [](const auto &a, const auto &b) {
+                return a.first < b.first;
+            });
+            fn.lineMap.erase(std::unique(fn.lineMap.begin(), fn.lineMap.end(),
+                [](const auto &a, const auto &b) {
+                    return a.first == b.first && a.second == b.second;
+                }), fn.lineMap.end());
+        }
+
+        m_stabsFuncs.push_back(std::move(fn));
+        int fnIdx = (int)m_stabsFuncs.size() - 1;
+        if (srcIdx >= 0)
+            m_stabsSources[srcIdx].functionIndices.push_back((size_t)fnIdx);
+        return fnIdx;
+    }
+
+    void parseDwarfDIEs(size_t &pos, size_t end,
+                        const std::map<uint64_t, DwarfAbbrev> &abbrevs,
+                        DwarfUnit &unit,
+                        const ELFSectionRecord *debugStr,
+                        const ELFSectionRecord *debugLineStr,
+                        int currentFuncIdx,
+                        int depth) {
+        if (depth > 64) return;
+        while (pos < end) {
+            uint64_t code = readULEB(pos, end);
+            if (code == 0)
+                return;
+            auto ait = abbrevs.find(code);
+            if (ait == abbrevs.end())
+                return;
+            const DwarfAbbrev &abbr = ait->second;
+            std::map<uint64_t, DwarfValue> attrs;
+            for (const auto &adef : abbr.attrs) {
+                DwarfValue val = readDwarfFormValue(pos, end, adef.form, adef.implicitConst,
+                                                    unit.addressSize, debugStr, debugLineStr);
+                if (val.present)
+                    attrs[adef.name] = std::move(val);
+            }
+
+            int childFuncIdx = currentFuncIdx;
+            if (abbr.tag == DW_TAG_compile_unit) {
+                unit.name = dwarfStringAttr(attrs, DW_AT_name);
+                unit.compDir = dwarfStringAttr(attrs, DW_AT_comp_dir);
+                if (dwarfHasAttr(attrs, DW_AT_stmt_list))
+                    unit.stmtList = (uint32_t)dwarfUnsignedAttr(attrs, DW_AT_stmt_list);
+            } else if (abbr.tag == DW_TAG_subprogram) {
+                int fnIdx = addDwarfFunction(unit, attrs);
+                if (fnIdx >= 0)
+                    childFuncIdx = fnIdx;
+            } else if (abbr.tag == DW_TAG_formal_parameter && currentFuncIdx >= 0) {
+                std::string pname = dwarfStringAttr(attrs, DW_AT_name);
+                if (!pname.empty()) {
+                    StabsFunction &fn = m_stabsFuncs[(size_t)currentFuncIdx];
+                    bool dup = false;
+                    for (const auto &p : fn.params)
+                        if (p.name == pname) { dup = true; break; }
+                    if (!dup) {
+                        StabsTypedVar param;
+                        param.name = pname;
+                        param.typeRef = NullType;
+                        param.stackOffset = 0;
+                        fn.params.push_back(std::move(param));
+                    }
+                }
+            }
+
+            if (abbr.hasChildren)
+                parseDwarfDIEs(pos, end, abbrevs, unit, debugStr, debugLineStr,
+                               childFuncIdx, depth + 1);
+        }
+    }
+
+    void parseDWARF(const std::vector<ELFSectionRecord> &sections) {
+        const ELFSectionRecord *debugInfo = findELFSection(sections, ".debug_info");
+        const ELFSectionRecord *debugAbbrev = findELFSection(sections, ".debug_abbrev");
+        const ELFSectionRecord *debugStr = findELFSection(sections, ".debug_str");
+        const ELFSectionRecord *debugLineStr = findELFSection(sections, ".debug_line_str");
+        if (!debugInfo || !debugAbbrev || debugInfo->size == 0 || debugAbbrev->size == 0)
+            return;
+
+        std::map<uint32_t, DwarfLineTable> lineCache;
+        size_t pos = debugInfo->offset;
+        size_t infoEnd = debugInfo->offset + debugInfo->size;
+        while (pos + 11 <= infoEnd && pos + 11 <= m_size) {
+            uint32_t unitStart = (uint32_t)(pos - debugInfo->offset);
+            uint32_t unitLength = readLE<uint32_t>(pos); pos += 4;
+            if (unitLength == 0xFFFFFFFF) break; // DWARF64 not supported.
+            if (unitLength == 0) break;
+            size_t unitEnd = std::min<size_t>(pos + unitLength, infoEnd);
+            if (unitEnd > m_size || pos + 2 > unitEnd) break;
+
+            DwarfUnit unit;
+            unit.offset = unitStart;
+            unit.end = (uint32_t)(unitEnd - debugInfo->offset);
+            unit.version = readLE<uint16_t>(pos); pos += 2;
+            if (unit.version < 2 || unit.version > 5) {
+                pos = unitEnd;
+                continue;
+            }
+
+            uint32_t abbrevOffset = 0;
+            if (unit.version >= 5) {
+                if (pos + 6 > unitEnd) break;
+                uint8_t unitType = readLE<uint8_t>(pos); pos += 1;
+                unit.addressSize = readLE<uint8_t>(pos); pos += 1;
+                abbrevOffset = readLE<uint32_t>(pos); pos += 4;
+                (void)unitType;
+            } else {
+                if (pos + 5 > unitEnd) break;
+                abbrevOffset = readLE<uint32_t>(pos); pos += 4;
+                unit.addressSize = readLE<uint8_t>(pos); pos += 1;
+            }
+            if (unit.addressSize == 0 || unit.addressSize > 8)
+                unit.addressSize = 4;
+
+            auto abbrevs = parseDwarfAbbrevs(debugAbbrev, abbrevOffset);
+            if (abbrevs.empty()) {
+                pos = unitEnd;
+                continue;
+            }
+
+            // First pass over the root CU DIE to learn comp_dir/stmt_list before
+            // subprogram DIEs need line-table paths.
+            size_t dieStart = pos;
+            size_t probe = pos;
+            uint64_t rootCode = readULEB(probe, unitEnd);
+            auto rootIt = abbrevs.find(rootCode);
+            if (rootCode && rootIt != abbrevs.end()) {
+                std::map<uint64_t, DwarfValue> rootAttrs;
+                for (const auto &adef : rootIt->second.attrs) {
+                    DwarfValue val = readDwarfFormValue(probe, unitEnd, adef.form,
+                                                        adef.implicitConst, unit.addressSize,
+                                                        debugStr, debugLineStr);
+                    if (val.present)
+                        rootAttrs[adef.name] = std::move(val);
+                }
+                unit.name = dwarfStringAttr(rootAttrs, DW_AT_name);
+                unit.compDir = dwarfStringAttr(rootAttrs, DW_AT_comp_dir);
+                if (dwarfHasAttr(rootAttrs, DW_AT_stmt_list))
+                    unit.stmtList = (uint32_t)dwarfUnsignedAttr(rootAttrs, DW_AT_stmt_list);
+            }
+            if (unit.stmtList != UINT32_MAX) {
+                auto lit = lineCache.find(unit.stmtList);
+                if (lit == lineCache.end()) {
+                    DwarfLineTable lt = parseDwarfLineTable(sections, unit.stmtList, unit.compDir);
+                    lit = lineCache.emplace(unit.stmtList, std::move(lt)).first;
+                }
+                unit.lineTable = &lit->second;
+            }
+
+            pos = dieStart;
+            parseDwarfDIEs(pos, unitEnd, abbrevs, unit, debugStr, debugLineStr, -1, 0);
+            pos = unitEnd;
+        }
+    }
+
     void parseELFSymbolTable(const std::vector<ELFSectionRecord> &sections,
                              uint32_t symtabIdx) {
         if (symtabIdx >= sections.size()) return;
@@ -1369,6 +2285,7 @@ private:
         parseELFDynamicNeeded(sections);
         parseELFPltRelocations(sections);
         parseSTABS();
+        parseDWARF(sections);
         buildFunctionMap();
         if (m_entryPoint && m_funcMap.find(m_entryPoint) == m_funcMap.end())
             m_funcMap[m_entryPoint] = "entry_point";
