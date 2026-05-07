@@ -923,6 +923,7 @@ public:
             "D3DTRANSFORMSTATETYPE","D3DRENDERSTATETYPE","D3DTEXTURESTAGESTATETYPE",
             "D3DSAMPLERSTATETYPE","D3DSTATEBLOCKTYPE","D3DMULTISAMPLE_TYPE",
             "D3DSWAPEFFECT","D3DRESOURCETYPE",
+            "jpeg_c_main_controller","jpeg_d_post_controller","jpeg_upsampler",
             "Byte","ColorSearchUPP","ColorComplementUPP","CTabHandle","ITabHandle",
             "CSpecArray","PixPatHandle","CCrsrHandle","CIconHandle","Rect",
             "MacRGBColor","QElemPtr","FSVolumeRefNum","StrFileName","EventKind",
@@ -947,10 +948,12 @@ public:
 
         // Emit full type definitions (skip names already in platform typedefs)
         std::set<std::string> emittedTypeNames(platformNames);
+        auto preferredAggregates = preferredNamedAggregates(types);
         {
             std::set<TypeRef> emitted;
             for (auto ref : allTypes)
-                emitTypeDefsRecursive(out, types, ref, emitted, emittedTypeNames);
+                emitTypeDefsRecursive(out, types, ref, emitted, emittedTypeNames,
+                                      0, &preferredAggregates);
             if (!emitted.empty()) out += "\n";
         }
         std::set<std::string> emittedAnonGlobalNames;
@@ -2933,20 +2936,77 @@ private:
         out += "};\n\n";
     }
 
+    static std::string aggregateEmitKey(const StabsTypeInfo &t) {
+        if (t.kind == StabsTypeKind::Union)
+            return "union " + t.name;
+        if (t.kind == StabsTypeKind::Struct)
+            return "struct " + t.name;
+        if (t.kind == StabsTypeKind::ForwardRef && !t.forwardTag.empty())
+            return std::string(t.isUnionFwd ? "union " : "struct ") + t.forwardTag;
+        return "";
+    }
+
+    static int aggregateDefinitionScore(const StabsTypeInfo &t) {
+        int realFields = 0;
+        for (auto &f : t.fields) {
+            if (f.name.empty() || f.name[0] == '/' || f.name[0] == '!' ||
+                f.name[0] == '#' || f.name[0] == '$' || f.name[0] == '~')
+                continue;
+            if (f.name == "dummy")
+                continue;
+            realFields++;
+        }
+        return realFields * 100000 + (int)t.fields.size() * 1000 + t.sizeBytes;
+    }
+
+    static std::map<std::string, TypeRef> preferredNamedAggregates(const StabsTypeTable &types) {
+        std::map<std::string, TypeRef> preferred;
+        for (auto &[ref, ti] : types.allTypes()) {
+            if (ti.kind != StabsTypeKind::Struct && ti.kind != StabsTypeKind::Union)
+                continue;
+            if (ti.name.empty() || ti.name.find("$_") == 0 ||
+                ti.name.find('<') != std::string::npos)
+                continue;
+            std::string key = aggregateEmitKey(ti);
+            auto it = preferred.find(key);
+            if (it == preferred.end()) {
+                preferred[key] = ref;
+                continue;
+            }
+            auto *prev = types.getType(it->second);
+            if (!prev || aggregateDefinitionScore(ti) > aggregateDefinitionScore(*prev))
+                preferred[key] = ref;
+        }
+        return preferred;
+    }
+
     static void emitTypeDefsRecursive(QString &out, const StabsTypeTable &types,
                                       TypeRef ref, std::set<TypeRef> &emitted,
-                                      std::set<std::string> &emittedNames, int depth = 0) {
-        if (ref == NullType || emitted.count(ref) || depth > 30) return;
-        emitted.insert(ref); // mark visited BEFORE recursing to break cycles
+                                      std::set<std::string> &emittedNames, int depth = 0,
+                                      const std::map<std::string, TypeRef> *preferredAggregates = nullptr) {
+        if (ref == NullType || depth > 30) return;
         auto *t = types.getType(ref);
         if (!t) return;
+        if (preferredAggregates &&
+            (((t->kind == StabsTypeKind::Struct || t->kind == StabsTypeKind::Union) &&
+              !t->name.empty()) ||
+             (t->kind == StabsTypeKind::ForwardRef && !t->forwardTag.empty()))) {
+            auto it = preferredAggregates->find(aggregateEmitKey(*t));
+            if (it != preferredAggregates->end())
+                ref = it->second;
+            t = types.getType(ref);
+            if (!t) return;
+        }
+        if (emitted.count(ref)) return;
+        emitted.insert(ref); // mark visited BEFORE recursing to break cycles
 
         // Resolve through pointers/typedefs/arrays to find underlying struct/enum
         if (t->kind == StabsTypeKind::Pointer || t->kind == StabsTypeKind::Typedef ||
             t->kind == StabsTypeKind::Const || t->kind == StabsTypeKind::Volatile ||
             t->kind == StabsTypeKind::Array) {
             if (t->targetType != NullType)
-                emitTypeDefsRecursive(out, types, t->targetType, emitted, emittedNames, depth + 1);
+                emitTypeDefsRecursive(out, types, t->targetType, emitted, emittedNames,
+                                      depth + 1, preferredAggregates);
             return;
         }
         if (t->kind == StabsTypeKind::Struct || t->kind == StabsTypeKind::Union) {
@@ -2989,7 +3049,8 @@ private:
                 if (ft && ft->kind == StabsTypeKind::Union &&
                     !ft->name.empty() && ft->name != t->name &&
                     !emittedNames.count(ft->name))
-                    emitTypeDefsRecursive(out, types, f.typeRef, emitted, emittedNames, depth + 1);
+                    emitTypeDefsRecursive(out, types, f.typeRef, emitted, emittedNames,
+                                          depth + 1, preferredAggregates);
             }
             // Check if all field types compile without undefined types.
             // Emit structs with unknown field types as offset-based int arrays.
@@ -3073,6 +3134,20 @@ private:
                     }
                 }
                 if (!allFieldsOk) {
+                    for (auto &f : t->fields) {
+                        if (f.bitSize == 0 && f.bitOffset == 0) continue;
+                        if (f.name.empty() || f.name[0] == '/' || f.name[0] == '~') continue;
+                        if (f.name.find("::") != std::string::npos) continue;
+                        if (f.name.find("(") != std::string::npos) continue;
+                        if (f.name.find("<") != std::string::npos) continue;
+                        if (f.name.find("=") != std::string::npos) continue;
+                        if (f.name[0] == '!' || f.name[0] == '#' || f.name[0] == '$') continue;
+                        auto *rawFt = types.getType(f.typeRef);
+                        if (rawFt && (rawFt->kind == StabsTypeKind::Pointer ||
+                                      rawFt->kind == StabsTypeKind::Reference))
+                            emitTypeDefsRecursive(out, types, f.typeRef, emitted, emittedNames,
+                                                  depth + 1, preferredAggregates);
+                    }
                     // Emit struct with STABS field names but simplified types.
                     // Use int/pointer for fields whose types can't be resolved.
                     std::string kw = (t->kind == StabsTypeKind::Union) ? "union" : "struct";
@@ -3173,7 +3248,8 @@ private:
             }
             // Emit fields' types first
             for (auto &f : t->fields)
-                emitTypeDefsRecursive(out, types, f.typeRef, emitted, emittedNames, depth + 1);
+                emitTypeDefsRecursive(out, types, f.typeRef, emitted, emittedNames,
+                                      depth + 1, preferredAggregates);
             auto fieldDeclOverride =
                 [](const std::string &structName, const std::string &fieldName) -> std::string {
                     if (!s_portMode)
