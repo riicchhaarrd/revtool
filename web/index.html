@@ -276,7 +276,7 @@ body.light #icon-moon { display: none; }
   padding: 7px 8px 9px; border-bottom: 1px solid var(--border-bin);
   display: flex; flex-direction: column; gap: 7px;
 }
-.db-actions { display: grid; grid-template-columns: repeat(4, 1fr); gap: 5px; }
+.db-actions { display: grid; grid-template-columns: repeat(5, 1fr); gap: 5px; }
 .db-btn {
   background: var(--bg-input); border: 1px solid var(--border-input);
   color: var(--text); border-radius: 3px; padding: 4px 6px;
@@ -339,6 +339,7 @@ body.light #icon-moon { display: none; }
 .item.manual .lbl { color: var(--text-bi-val); }
 .item.active .cnt { background: rgba(0,59,142,.15); }
 body:not(.light) .item.active .cnt { background: rgba(255,255,255,.12); color: #aaa; }
+.item.type-item .cnt { text-transform: uppercase; }
 .list-empty { padding: 10px 12px; color: var(--text-placeholder); font-style: italic; font-size: 12px; text-align: center; }
 
 /* ── Editor area ──────────────────────────────────────────────────── */
@@ -599,12 +600,36 @@ body:not(.light) .toast.ok  { color: #4ec9b0; }
         <div class="db-panel">
           <div class="db-actions">
             <button class="db-btn" id="db-save-btn" onclick="saveProjectDb()">Save</button>
+            <button class="db-btn" id="db-new-type-btn" onclick="newStructType()">Type</button>
             <button class="db-btn" id="db-infer-btn" onclick="inferStructs()">Infer</button>
             <button class="db-btn" id="db-export-btn" onclick="exportProjectDb()">Export</button>
             <button class="db-btn" id="db-load-btn" onclick="document.getElementById('db-file-input').click()">Load</button>
           </div>
           <textarea id="custom-types" spellcheck="false" placeholder="typedefs / structs" oninput="onCustomTypesChanged()"></textarea>
           <div id="db-status">No binary loaded</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Manual and inferred types -->
+    <div class="sb-section grow" id="sec-types">
+      <div class="sb-head" onclick="toggleSec('sec-types')">
+        Types
+        <span class="badge" id="type-badge" style="display:none">0</span>
+        <span class="chev">
+          <svg width="9" height="9" viewBox="0 0 9 9" fill="none"><path d="M1.5 3 4.5 6.5 7.5 3" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </span>
+      </div>
+      <div class="sb-body">
+        <div class="sb-search">
+          <svg width="11" height="11" viewBox="0 0 11 11" fill="none">
+            <circle cx="4.5" cy="4.5" r="3" stroke="currentColor" stroke-width="1.2"/>
+            <line x1="7" y1="7" x2="10" y2="10" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+          </svg>
+          <input id="type-filter" type="text" placeholder="Search types…" oninput="filterTypes()">
+        </div>
+        <div class="item-list" id="type-list">
+          <div class="list-empty">Load a binary</div>
         </div>
       </div>
     </div>
@@ -797,6 +822,7 @@ let allFns   = [];
 let allSrcs  = [];
 let allStrings = [];
 let curXrefs = [];
+let allTypes = [];
 let activeStringAddr = null;
 let activeXrefAddr = null;
 let currentFormat = '';
@@ -1154,14 +1180,48 @@ function inferStructs() {
   }, 10);
 }
 
+function newStructType() {
+  if (!currentBinaryHash) { toast('Load a binary first', 'err'); return; }
+  const raw = prompt('Struct name', 'custom_type_t');
+  if (raw === null) return;
+  const name = raw.trim();
+  if (!isValidCIdentifier(name)) {
+    toast('Struct name must be a C identifier', 'err');
+    return;
+  }
+  if (!projectDb) projectDb = emptyProjectDb(currentBinaryHash, currentBinaryName);
+  projectDb.customTypes = document.getElementById('custom-types').value;
+  if (new RegExp('\\b(struct|union|enum|typedef)\\s+' + name + '\\b').test(projectDb.customTypes)) {
+    toast('Type already exists: ' + name, 'err');
+    return;
+  }
+
+  const prefix = projectDb.customTypes && projectDb.customTypes.trim()
+    ? projectDb.customTypes.trimEnd() + '\n\n'
+    : '';
+  const start = prefix.length;
+  projectDb.customTypes = prefix +
+    'struct ' + name + ' {\n' +
+    '    unsigned int field_0x0;\n' +
+    '};\n';
+  clearTimeout(projectDbSaveTimer);
+  saveProjectDb({ quiet: true });
+  renderProjectDb();
+  refreshActiveView();
+  focusCustomType(start);
+  toast('Struct added: ' + name, 'ok');
+}
+
 function renderProjectDb() {
   const loaded = !!currentBinaryHash;
   const db = projectDb || emptyProjectDb('', '');
   const count = Object.keys(db.functionNames || {}).length;
+  allTypes = parseCustomTypeEntries(db.customTypes || '');
   const badge = document.getElementById('db-badge');
-  badge.textContent = count;
+  badge.textContent = count + allTypes.length;
   badge.style.display = loaded ? '' : 'none';
   document.getElementById('db-save-btn').disabled = !loaded;
+  document.getElementById('db-new-type-btn').disabled = !loaded;
   document.getElementById('db-infer-btn').disabled =
     !loaded || !mod || typeof mod.inferStructCandidatesJson !== 'function';
   document.getElementById('db-export-btn').disabled = !loaded;
@@ -1172,8 +1232,11 @@ function renderProjectDb() {
     ta.value = db.customTypes || '';
   const typeLines = (db.customTypes || '').trim() ? countLines(db.customTypes || '') : 0;
   document.getElementById('db-status').textContent = loaded
-    ? (count + ' names · ' + typeLines + ' type lines')
+    ? (count + ' names · ' + allTypes.length + ' types · ' + typeLines + ' type lines')
     : 'No binary loaded';
+  document.getElementById('type-badge').textContent = allTypes.length;
+  document.getElementById('type-badge').style.display = loaded ? '' : 'none';
+  filterTypes();
 }
 
 function onCustomTypesChanged() {
@@ -1186,6 +1249,47 @@ function onCustomTypesChanged() {
 
 function customTypePrelude() {
   return projectDb && projectDb.customTypes ? projectDb.customTypes.trim() : '';
+}
+
+function parseCustomTypeEntries(text) {
+  const src = String(text || '');
+  const entries = [];
+  const seen = new Set();
+
+  function add(kind, name, index) {
+    if (!isValidCIdentifier(name)) return;
+    const key = kind + ':' + name + ':' + index;
+    if (seen.has(key)) return;
+    seen.add(key);
+    entries.push({ kind, name, index });
+  }
+
+  const namedDecls = [
+    { kind: 'struct', re: /\bstruct\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{/g },
+    { kind: 'union',  re: /\bunion\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{/g },
+    { kind: 'enum',   re: /\benum\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{/g }
+  ];
+  for (const spec of namedDecls) {
+    let m;
+    while ((m = spec.re.exec(src)) !== null)
+      add(spec.kind, m[1], m.index);
+  }
+
+  const typedefRe = /\btypedef\b[\s\S]*?;/g;
+  let m;
+  while ((m = typedefRe.exec(src)) !== null) {
+    const segment = m[0]
+      .replace(/\/\*[\s\S]*?\*\//g, ' ')
+      .replace(/\/\/.*$/gm, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    const alias = /([A-Za-z_][A-Za-z0-9_]*)\s*(?:\[[^\]]*\]\s*)*;$/.exec(segment);
+    if (alias)
+      add('typedef', alias[1], m.index);
+  }
+
+  entries.sort((a, b) => a.index - b.index || a.name.localeCompare(b.name));
+  return entries;
 }
 
 function codeWithCustomTypes(code) {
@@ -1317,11 +1421,13 @@ function populateSidebar(filename, sizeBytes) {
   document.getElementById('src-filter').value = '';
   document.getElementById('str-filter').value = '';
   document.getElementById('xref-filter').value = '';
+  document.getElementById('type-filter').value = '';
 
   renderFnList(allFns);
   renderSrcList(allSrcs);
   renderStringList(allStrings);
   renderXrefList([]);
+  filterTypes();
 }
 
 function row(lbl, val) {
@@ -1413,6 +1519,36 @@ function renderXrefList(xrefs) {
   if (activeXrefAddr !== null) markActive('xref-list', 'data-xref', activeXrefAddr);
 }
 
+function renderTypeList(types) {
+  const el = document.getElementById('type-list');
+  if (!currentBinaryHash) { el.innerHTML = '<div class="list-empty">Load a binary</div>'; return; }
+  if (!allTypes.length) { el.innerHTML = '<div class="list-empty">No custom types</div>'; return; }
+  if (!types.length) { el.innerHTML = '<div class="list-empty">No matches</div>'; return; }
+  el.innerHTML = types.map(t =>
+    `<div class="item type-item" data-index="${t.index}" onclick="focusCustomType(${t.index})" title="${esc(t.kind + ' ' + t.name)}">
+      <svg class="icon" width="11" height="11" viewBox="0 0 11 11" fill="none">
+        <path d="M2 2.5h7M2 5.5h7M2 8.5h7" stroke="var(--c-type)" stroke-width="1.1" stroke-linecap="round"/>
+        <path d="M2 2.5v6M9 2.5v6" stroke="var(--c-type)" stroke-width="1.1" stroke-linecap="round"/>
+      </svg>
+      <span class="lbl">${esc(t.name)}</span>
+      <span class="cnt">${esc(t.kind)}</span>
+     </div>`
+  ).join('');
+}
+
+function focusCustomType(index) {
+  const ta = document.getElementById('custom-types');
+  if (!ta) return;
+  document.getElementById('sec-project').classList.remove('closed');
+  const pos = Math.max(0, Math.min(Number(index) || 0, ta.value.length));
+  ta.focus();
+  ta.setSelectionRange(pos, pos);
+  const before = ta.value.slice(0, pos);
+  const line = before.split('\n').length - 1;
+  ta.scrollTop = Math.max(0, (line - 2) * 16);
+  markActive('type-list', 'data-index', pos);
+}
+
 function filterFns() {
   const q = document.getElementById('fn-filter').value;
   renderFnList(fuzzyFilter(allFns, q, f => [f.name, shortHex(f.addr), String(f.addr)]));
@@ -1433,6 +1569,11 @@ function filterXrefs() {
     x.operands || '',
     x.xref_address_hex || shortHex(x.xref_address || 0)
   ]));
+}
+function filterTypes() {
+  const el = document.getElementById('type-filter');
+  const q = el ? el.value : '';
+  renderTypeList(fuzzyFilter(allTypes, q, t => [t.name, t.kind]));
 }
 
 // ── Tabs & decompilation ─────────────────────────────────────────────
@@ -1646,6 +1787,7 @@ document.addEventListener('keydown',e=>{
     document.getElementById('src-filter').blur();
     document.getElementById('str-filter').blur();
     document.getElementById('xref-filter').blur();
+    document.getElementById('type-filter').blur();
   }
 });
 
