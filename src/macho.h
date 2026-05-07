@@ -15,27 +15,6 @@
 #include <map>
 #include <unordered_map>
 
-struct StabsFunction {
-    std::string name;
-    std::string rawName;     // with type info
-    uint32_t    address = 0;
-    uint32_t    size = 0;
-    bool        isGlobal = false;
-    int         sourceFileIdx = -1;
-    TypeRef     returnType = NullType;
-    std::vector<std::pair<uint32_t, int>> lineMap; // addr -> line number
-    std::vector<StabsTypedVar> params;
-    std::vector<StabsTypedVar> locals;
-    bool isRegparm = false;  // true if function uses regparm(3) calling convention
-};
-
-struct StabsSourceFile {
-    std::string directory;
-    std::string filename;
-    uint32_t    address = 0;
-    std::vector<size_t> functionIndices;
-};
-
 // ── MachOFile ───────────────────────────────────────────────────────
 
 class MachOFile {
