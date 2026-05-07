@@ -107,6 +107,7 @@ constexpr uint64_t DW_TAG_enumerator       = 0x28;
 constexpr uint64_t DW_TAG_subprogram       = 0x2E;
 constexpr uint64_t DW_TAG_variable         = 0x34;
 constexpr uint64_t DW_TAG_volatile_type    = 0x35;
+constexpr uint64_t DW_TAG_restrict_type    = 0x37;
 constexpr uint64_t DW_TAG_rvalue_reference_type = 0x42;
 
 constexpr uint8_t DW_CHILDREN_no  = 0;

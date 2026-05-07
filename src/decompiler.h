@@ -3018,7 +3018,8 @@ private:
         auto *t = types.getType(ref);
         if (!t) return;
         if (t->kind == StabsTypeKind::Typedef || t->kind == StabsTypeKind::Const ||
-            t->kind == StabsTypeKind::Volatile || t->kind == StabsTypeKind::Array ||
+            t->kind == StabsTypeKind::Volatile || t->kind == StabsTypeKind::Restrict ||
+            t->kind == StabsTypeKind::Array ||
             t->kind == StabsTypeKind::Pointer || t->kind == StabsTypeKind::Reference) {
             if (t->targetType != NullType)
                 emitAnonymousTypeDefs(out, types, t->targetType, emitted,
@@ -3196,6 +3197,7 @@ private:
         }
         if (t->kind == StabsTypeKind::Pointer ||
             t->kind == StabsTypeKind::Const || t->kind == StabsTypeKind::Volatile ||
+            t->kind == StabsTypeKind::Restrict ||
             t->kind == StabsTypeKind::Array) {
             if (t->targetType != NullType)
                 emitTypeDefsRecursive(out, types, t->targetType, emitted, emittedNames,

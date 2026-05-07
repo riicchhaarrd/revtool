@@ -1486,6 +1486,10 @@ private:
             ti->kind = StabsTypeKind::Volatile;
             ti->targetType = dwarfTypeAttr(unit, attrs, DW_AT_type, typeRefs);
             break;
+        case DW_TAG_restrict_type:
+            ti->kind = StabsTypeKind::Restrict;
+            ti->targetType = dwarfTypeAttr(unit, attrs, DW_AT_type, typeRefs);
+            break;
         case DW_TAG_typedef:
             ti->kind = StabsTypeKind::Typedef;
             ti->name = name;
@@ -2156,6 +2160,7 @@ private:
                        abbr.tag == DW_TAG_rvalue_reference_type ||
                        abbr.tag == DW_TAG_const_type ||
                        abbr.tag == DW_TAG_volatile_type ||
+                       abbr.tag == DW_TAG_restrict_type ||
                        abbr.tag == DW_TAG_typedef ||
                        abbr.tag == DW_TAG_structure_type ||
                        abbr.tag == DW_TAG_class_type ||
