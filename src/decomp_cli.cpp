@@ -152,6 +152,10 @@ static void listFunctionsText(const std::vector<FunctionInfo> &funcs,
                 else
                     printf("int %s", par.name.c_str());
             }
+            if (fn.stabsFn->isVariadic) {
+                if (!fn.stabsFn->params.empty()) printf(", ");
+                printf("...");
+            }
             printf(")\n");
         } else {
             printf("  %08X  int %s()\n", fn.address, fn.name.c_str());

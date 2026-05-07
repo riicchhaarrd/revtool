@@ -1599,6 +1599,13 @@ private:
             ti->functionParams.push_back(paramType);
     }
 
+    void markDwarfSubroutineVariadic(TypeRef functionType) {
+        if (functionType == NullType) return;
+        StabsTypeInfo *ti = m_typeTable.getMutableType(functionType);
+        if (ti && ti->kind == StabsTypeKind::Function)
+            ti->functionVariadic = true;
+    }
+
     void applyDwarfSubrange(TypeRef arrayType,
                             const std::map<uint64_t, DwarfValue> &attrs) {
         if (arrayType == NullType) return;
@@ -2198,6 +2205,11 @@ private:
                                              debugStrOffsets, debugAddr, typeRefs);
                 if (fnIdx >= 0)
                     childFuncIdx = fnIdx;
+            } else if (abbr.tag == DW_TAG_unspecified_parameters) {
+                if (currentSubroutineType != NullType)
+                    markDwarfSubroutineVariadic(currentSubroutineType);
+                else if (currentFuncIdx >= 0)
+                    m_stabsFuncs[(size_t)currentFuncIdx].isVariadic = true;
             } else if (abbr.tag == DW_TAG_formal_parameter &&
                        currentSubroutineType != NullType) {
                 addDwarfSubroutineParameter(currentSubroutineType, unit, attrs, typeRefs);

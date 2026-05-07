@@ -48,6 +48,7 @@ struct StabsTypeInfo {
     // pointer, reference, const, volatile, typedef, array element, function return
     TypeRef targetType = NullType;
     std::vector<TypeRef> functionParams;
+    bool functionVariadic = false;
 
     // struct / union
     std::vector<StabsTypeField> fields;
@@ -97,6 +98,7 @@ struct StabsFunction {
     std::vector<StabsTypedVar> locals;
     int frameBaseBias = 8; // DWARF fbreg-to-ebp adjustment; STABS keeps the default.
     bool isRegparm = false;  // true if function uses regparm(3) calling convention
+    bool isVariadic = false;
 };
 
 struct StabsSourceFile {
@@ -1235,12 +1237,14 @@ public:
 private:
     std::string formatFunctionParamTypes(const StabsTypeInfo &t, int depth = 0) const {
         if (t.functionParams.empty())
-            return "void";
+            return t.functionVariadic ? "..." : "void";
         std::string out;
         for (size_t i = 0; i < t.functionParams.size(); ++i) {
             if (i) out += ", ";
             out += formatType(t.functionParams[i], depth + 1);
         }
+        if (t.functionVariadic)
+            out += ", ...";
         return out;
     }
 
@@ -1323,7 +1327,7 @@ private:
             std::string sig = "fn:" + typedefTargetSignature(t->targetType, depth + 1) + "(";
             for (auto paramRef : t->functionParams)
                 sig += typedefTargetSignature(paramRef, depth + 1) + ",";
-            sig += ")";
+            sig += t->functionVariadic ? "...)" : ")";
             return sig;
         }
         case StabsTypeKind::Struct:

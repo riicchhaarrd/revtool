@@ -310,6 +310,7 @@ struct IRFunc {
     uint32_t                 address = 0;
     TypeRef                  returnType = NullType;
     bool                     isStatic = false;
+    bool                     isVariadic = false;
     bool                     detectedVoid = false; // heuristic: function returns void despite STABS saying int
     std::set<int>            phiTemps;    // temps from phi nodes — don't const-propagate
     std::set<int>            pointerTemps; // temps known to be pointers (from type inference)

@@ -45,6 +45,7 @@ public:
         if (sfn) {
             func.returnType = sfn->returnType;
             func.isStatic = !sfn->isGlobal;
+            func.isVariadic = sfn->isVariadic;
             func.params = sfn->params;
             func.locals = sfn->locals;
             func.sourceFileIdx = sfn->sourceFileIdx;

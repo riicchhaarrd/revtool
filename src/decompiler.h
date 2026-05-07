@@ -339,7 +339,7 @@ public:
                     }
                 }
                 // Detect variadic functions: format string param followed by args
-                if (isKnownVariadicFunction(calleeName)) {
+                if (callee->isVariadic || isKnownVariadicFunction(calleeName)) {
                     if (proto.back() != '(' && !callee->params.empty())
                         proto += ", ...";
                     else
@@ -388,7 +388,7 @@ public:
                     }
                 }
             }
-            if (isKnownVariadicFunction(fn.name)) {
+            if (fn.isVariadic || isKnownVariadicFunction(fn.name)) {
                 if (!fn.params.empty())
                     proto += ", ...";
                 else
@@ -1227,7 +1227,8 @@ public:
                 continue;
             protoDeclared.insert(cname);
             out += QString::fromStdString(retStr + " " + cname + "(");
-            bool variadic = isKnownVariadicFunction(fn.name) ||
+            bool variadic = fn.isVariadic ||
+                            isKnownVariadicFunction(fn.name) ||
                             isKnownVariadicFunction(cname);
             if (fn.params.empty()) {
                 if (variadic)
@@ -3549,8 +3550,10 @@ private:
                     }
                     out += QString::fromStdString(decl);
                 }
+                if (m_func.isVariadic)
+                    out += ", ...";
             } else {
-                out += "void";
+                out += m_func.isVariadic ? "..." : "void";
             }
             out += ")\n{\n";
 
@@ -12090,7 +12093,8 @@ private:
                     // from leftover register values)
                     size_t argCount = e->kids.size();
                     const StabsFunction *calledFn2 = m_mf.stabsFunctionByName(e->name);
-                    if (calledFn2 && !Decompiler::isKnownVariadicFunction(e->name)) {
+                    if (calledFn2 && !calledFn2->isVariadic &&
+                        !Decompiler::isKnownVariadicFunction(e->name)) {
                         if (calledFn2->params.empty() && calledFn2->returnType != NullType) {
                             argCount = 0;
                         } else if (calledFn2->params.size() < argCount) {
@@ -12105,7 +12109,8 @@ private:
                     size_t protoArgCount = argCount;
                     if (s_portMode && calledFn2 && !calledFn2->params.empty() &&
                         calledFn2->params.size() > argCount) {
-                        if (!Decompiler::isKnownVariadicFunction(e->name))
+                        if (!calledFn2->isVariadic &&
+                            !Decompiler::isKnownVariadicFunction(e->name))
                             protoArgCount = calledFn2->params.size();
                     }
                     result = funcName + "(";
