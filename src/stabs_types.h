@@ -379,6 +379,11 @@ public:
         return NullType;
     }
 
+    static std::string arrayDimension(const StabsTypeInfo &t) {
+        int count = t.arrayHigh - t.arrayLow + 1;
+        return count > 0 ? std::to_string(count) : std::string();
+    }
+
     // Format a C type name string
     std::string formatType(TypeRef ref, int depth = 0) const {
         if (depth > 20 || ref == NullType) return "int";
@@ -449,8 +454,7 @@ public:
 
         case StabsTypeKind::Array: {
             std::string elem = formatType(t->targetType, depth + 1);
-            int count = t->arrayHigh - t->arrayLow + 1;
-            return elem + "[" + std::to_string(count) + "]";
+            return elem + "[" + arrayDimension(*t) + "]";
         }
         case StabsTypeKind::Function: {
             std::string ret = formatType(t->targetType, depth + 1);
@@ -497,8 +501,7 @@ public:
 
             std::string dims;
             while (ct && ct->kind == StabsTypeKind::Array) {
-                int count = ct->arrayHigh - ct->arrayLow + 1;
-                dims += "[" + std::to_string(count) + "]";
+                dims += "[" + arrayDimension(*ct) + "]";
                 cur = ct->targetType;
                 ct = getType(cur);
             }
@@ -559,8 +562,7 @@ public:
             TypeRef cur = ref;
             auto *ct = t;
             while (ct && ct->kind == StabsTypeKind::Array) {
-                int count = ct->arrayHigh - ct->arrayLow + 1;
-                dims += "[" + std::to_string(count) + "]";
+                dims += "[" + arrayDimension(*ct) + "]";
                 cur = ct->targetType;
                 ct = getType(cur);
             }
