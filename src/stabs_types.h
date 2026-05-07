@@ -23,7 +23,7 @@ static const TypeRef NullType = {-1, -1};
 enum class StabsTypeKind {
     Unknown, Void, Int, UInt, Float, Char, UChar, Bool, Long, ULong,
     LongLong, ULongLong, Short, UShort, Double, LongDouble,
-    Pointer, Reference, Const, Volatile, Restrict,
+    Pointer, Reference, Const, Volatile, Restrict, Atomic,
     Struct, Union, Enum, Array, Function, Typedef,
     ForwardRef
 };
@@ -209,7 +209,8 @@ public:
                 return false;
             if (t->kind == StabsTypeKind::Typedef ||
                 t->kind == StabsTypeKind::Volatile ||
-                t->kind == StabsTypeKind::Restrict) {
+                t->kind == StabsTypeKind::Restrict ||
+                t->kind == StabsTypeKind::Atomic) {
                 ref = t->targetType;
                 continue;
             }
@@ -269,7 +270,8 @@ public:
         auto *t = getType(ref);
         if (!t) return nullptr;
         if (t->kind == StabsTypeKind::Typedef || t->kind == StabsTypeKind::Const ||
-            t->kind == StabsTypeKind::Volatile || t->kind == StabsTypeKind::Restrict) {
+            t->kind == StabsTypeKind::Volatile || t->kind == StabsTypeKind::Restrict ||
+            t->kind == StabsTypeKind::Atomic) {
             if (t->targetType != NullType && t->targetType != ref)
                 return resolveType(t->targetType, depth + 1);
         }
@@ -358,7 +360,8 @@ public:
         auto *t = getType(ref);
         if (!t) return ref;
         if (t->kind == StabsTypeKind::Typedef || t->kind == StabsTypeKind::Const ||
-            t->kind == StabsTypeKind::Volatile || t->kind == StabsTypeKind::Restrict) {
+            t->kind == StabsTypeKind::Volatile || t->kind == StabsTypeKind::Restrict ||
+            t->kind == StabsTypeKind::Atomic) {
             if (t->targetType != NullType && t->targetType != ref)
                 return resolveTypeRef(t->targetType, depth + 1);
         }
@@ -424,6 +427,11 @@ public:
             if (inner.find("restrict") != std::string::npos) return inner;
             return inner + " restrict";
         }
+        case StabsTypeKind::Atomic: {
+            std::string inner = formatType(t->targetType, depth + 1);
+            if (inner.find("_Atomic ") == 0) return inner;
+            return "_Atomic " + inner;
+        }
 
         case StabsTypeKind::Typedef:
             if (!t->name.empty()) return typedefCName(ref);
@@ -464,10 +472,12 @@ public:
             auto *ct = getType(cur);
             while (ct && (ct->kind == StabsTypeKind::Const ||
                           ct->kind == StabsTypeKind::Volatile ||
-                          ct->kind == StabsTypeKind::Restrict)) {
+                          ct->kind == StabsTypeKind::Restrict ||
+                          ct->kind == StabsTypeKind::Atomic)) {
                 qualifiers.push_back(ct->kind == StabsTypeKind::Const
                     ? "const " : ct->kind == StabsTypeKind::Volatile
-                    ? "volatile " : "restrict ");
+                    ? "volatile " : ct->kind == StabsTypeKind::Restrict
+                    ? "restrict " : "_Atomic ");
                 cur = ct->targetType;
                 ct = getType(cur);
             }
@@ -581,7 +591,8 @@ public:
         if (t->kind == StabsTypeKind::Typedef ||
             t->kind == StabsTypeKind::Const ||
             t->kind == StabsTypeKind::Volatile ||
-            t->kind == StabsTypeKind::Restrict)
+            t->kind == StabsTypeKind::Restrict ||
+            t->kind == StabsTypeKind::Atomic)
             return aggregateRefForType(t->targetType, depth + 1);
         if (t->kind == StabsTypeKind::Struct || t->kind == StabsTypeKind::Union)
             return ref;
@@ -1302,6 +1313,8 @@ private:
             return "volatile:" + typedefTargetSignature(t->targetType, depth + 1);
         case StabsTypeKind::Restrict:
             return "restrict:" + typedefTargetSignature(t->targetType, depth + 1);
+        case StabsTypeKind::Atomic:
+            return "atomic:" + typedefTargetSignature(t->targetType, depth + 1);
         case StabsTypeKind::Array:
             return "array:" + std::to_string(t->arrayLow) + ":" +
                    std::to_string(t->arrayHigh) + ":" +
