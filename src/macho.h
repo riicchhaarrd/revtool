@@ -1476,6 +1476,12 @@ private:
             ti->sizeBytes = unit.addressSize;
             ti->targetType = dwarfTypeAttr(unit, attrs, DW_AT_type, typeRefs);
             break;
+        case DW_TAG_ptr_to_member_type:
+            ti->kind = StabsTypeKind::Unknown;
+            ti->name = "ptrdiff_t";
+            ti->sizeBytes = sizeBytes > 0 ? (int)sizeBytes : unit.addressSize;
+            ti->targetType = dwarfTypeAttr(unit, attrs, DW_AT_type, typeRefs);
+            break;
         case DW_TAG_const_type:
             ti->kind = StabsTypeKind::Const;
             ti->targetType = dwarfTypeAttr(unit, attrs, DW_AT_type, typeRefs);
@@ -2234,6 +2240,7 @@ private:
                        abbr.tag == DW_TAG_pointer_type ||
                        abbr.tag == DW_TAG_reference_type ||
                        abbr.tag == DW_TAG_rvalue_reference_type ||
+                       abbr.tag == DW_TAG_ptr_to_member_type ||
                        abbr.tag == DW_TAG_const_type ||
                        abbr.tag == DW_TAG_volatile_type ||
                        abbr.tag == DW_TAG_restrict_type ||
