@@ -1591,12 +1591,31 @@ private:
             int count = (int)dwarfUnsignedAttr(attrs, DW_AT_count);
             high = low + count - 1;
         }
-        ti->arrayLow = low;
-        ti->arrayHigh = high;
-        auto *elem = m_typeTable.resolveType(ti->targetType);
+        StabsTypeInfo *dim = ti;
+        while (true) {
+            StabsTypeInfo *next = m_typeTable.getMutableType(dim->targetType);
+            if (!next || next->kind != StabsTypeKind::Array)
+                break;
+            dim = next;
+        }
+
+        if (dim->arrayHigh >= dim->arrayLow) {
+            TypeRef oldElem = dim->targetType;
+            TypeRef nestedRef = m_typeTable.createSyntheticType(StabsTypeKind::Array);
+            StabsTypeInfo *nested = m_typeTable.getMutableType(nestedRef);
+            if (!nested) return;
+            nested->targetType = oldElem;
+            dim->targetType = nestedRef;
+            dim = nested;
+        }
+
+        dim->arrayLow = low;
+        dim->arrayHigh = high;
+        ti->sizeBytes = 0;
+        auto *elem = m_typeTable.resolveType(dim->targetType);
         int count = high >= low ? high - low + 1 : 0;
         if (elem && elem->sizeBytes > 0 && count > 0)
-            ti->sizeBytes = elem->sizeBytes * count;
+            dim->sizeBytes = elem->sizeBytes * count;
     }
 
     int dwarfTypeStorageSize(TypeRef ref, int depth = 0) const {
