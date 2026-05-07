@@ -1285,12 +1285,14 @@ private:
                 auto cpos = (gpos != std::string::npos) ? gpos :
                             (spos2 != std::string::npos) ? spos2 : std::string::npos;
                 if (cpos != std::string::npos && cpos > 0 && cpos < 60) {
+                    bool isStaticEntry = (entry.compare(cpos, 3, ":S(") == 0);
                     std::string gname = entry.substr(0, cpos);
                     auto it = nlSyms.find(gname);
                     if (it != nlSyms.end()) {
                         bool alreadyTyped = false;
                         for (auto &g : m_typeTable.globals()) {
-                            if (g.name == gname && g.address == it->second &&
+                            if (g.isStatic == isStaticEntry &&
+                                g.name == gname && g.address == it->second &&
                                 g.typeRef != NullType) {
                                 alreadyTyped = true;
                                 break;
@@ -1331,7 +1333,7 @@ private:
                                 for (auto &c : sn) c = tolower(c);
                                 for (auto &c : gn) c = tolower(c);
                                 // Check if either contains the other (partial match)
-                                bool related = false;
+                                bool related = gname.size() < 5;
                                 if (sn.size() >= 3 && gn.size() >= 5) {  // skip for short names
                                     // Strip common prefixes/suffixes
                                     std::string sn2 = sn;
@@ -1351,7 +1353,7 @@ private:
                                 if (!related)
                                     useType = NullType;
                             }
-                            m_typeTable.addGlobal(gname, it->second, useType, false);
+                            m_typeTable.addGlobal(gname, it->second, useType, isStaticEntry);
                         }
                     }
                 }

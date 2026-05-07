@@ -492,8 +492,12 @@ public:
         m_insn = insn;
         m_insnCount = funcEndIdx;
         m_regTemps.clear();
+        m_regGlobalSource.clear();
+        m_regFuncPtrName.clear();
+        m_blockExitState.clear();
         m_espArgs.clear();
         m_pushArgs.clear();
+        m_tailStackArgs.clear();
         m_fpuStack.clear();
         m_lastFpuTop = -1;
         m_regParamInjected.clear();
@@ -617,17 +621,31 @@ public:
             if (bit != addrToBlock.end()) {
                 // Save previous block's register state
                 blockEndRegs[curBlock] = m_regTemps;
+                saveBlockState(curBlock);
                 int prevBlock = curBlock;
                 curBlock = bit->second;
-                // For large functions (30+ blocks): clear stale register state
-                // when the previous linear block is NOT a CFG predecessor.
-                // This prevents register values from one code path leaking into
-                // an unrelated block reached via a different jump.
-                // Only for large functions — small functions work correctly with
-                // linear state because their code layout matches execution order.
-                if (nBlocks >= 50 && curBlock > 0 && curBlock < nBlocks &&
+                // Restore register state from the block's real CFG
+                // predecessors. Address order often places an unrelated block
+                // between a conditional branch and its taken target; carrying
+                // registers linearly through that unrelated block leaks stale
+                // call-clobbered values into the target.
+                if (curBlock > 0 && curBlock < nBlocks &&
                     prevBlock >= 0 && prevBlock != curBlock) {
-                    if (!prePreds[curBlock].count(prevBlock)) {
+                    bool allPredsProcessed = !prePreds[curBlock].empty();
+                    for (int p : prePreds[curBlock]) {
+                        if (!m_blockExitState.count(p)) {
+                            allPredsProcessed = false;
+                            break;
+                        }
+                    }
+                    bool isLoopHeader =
+                        domLoopHeaders.count(curBlock) ||
+                        loopHeaderAddrs.count(in.address);
+                    bool linearPredecessor = prePreds[curBlock].count(prevBlock) != 0;
+                    if (!isLoopHeader && !linearPredecessor && allPredsProcessed &&
+                        prePreds[curBlock].size() == 1) {
+                        mergeBlockState(curBlock, prePreds, func);
+                    } else if (nBlocks >= 50 && !linearPredecessor) {
                         m_regTemps.clear();
                         m_regGlobalSource.clear();
                         m_regFuncPtrName.clear();
@@ -724,6 +742,7 @@ public:
             liftInsn(in, func.blocks[curBlock], func, addrToBlock);
         }
         blockEndRegs[curBlock] = m_regTemps; // save final block's state
+        saveBlockState(curBlock);
 
         // ── Pass 5b: ensure float functions have proper return ───────
         // The ret instruction may fall outside STABS-reported function size.
@@ -1037,6 +1056,197 @@ public:
             }
         }
 
+        // ── Pass 7c: fix GP register conflicts at non-loop joins ───
+        // Forward joins can be reached before all address-later predecessors
+        // have been lifted.  In that case the join block is emitted using one
+        // predecessor's register temps, and equivalent temps from later
+        // predecessors look unused.  Materialize a phi-like temp at the end of
+        // each predecessor and use it inside the join block.
+        {
+            auto insertBeforeTerminator = [](BasicBlock &predBlock, IRStmt copy) {
+                if (!predBlock.stmts.empty()) {
+                    auto k = predBlock.stmts.back().kind;
+                    if (k == IRStmtKind::Branch || k == IRStmtKind::Jump ||
+                        k == IRStmtKind::Switch || k == IRStmtKind::Return)
+                        predBlock.stmts.insert(predBlock.stmts.end() - 1, std::move(copy));
+                    else
+                        predBlock.stmts.push_back(std::move(copy));
+                } else {
+                    predBlock.stmts.push_back(std::move(copy));
+                }
+            };
+            auto exprUsesAnyTemp = [](const IRExpr *e, const std::set<int> &temps) -> bool {
+                if (!e) return false;
+                std::vector<const IRExpr*> stk = {e};
+                while (!stk.empty()) {
+                    auto *n = stk.back();
+                    stk.pop_back();
+                    if (n->op == IROp::Temp && temps.count(n->tempId()))
+                        return true;
+                    for (auto &k : n->kids)
+                        if (k) stk.push_back(k.get());
+                }
+                return false;
+            };
+            auto replaceTemps = [](std::unique_ptr<IRExpr> &e,
+                                   const std::set<int> &oldTemps,
+                                   int newTemp, TypeRef newType) {
+                if (!e) return;
+                if (e->op == IROp::Temp && oldTemps.count(e->tempId())) {
+                    e = IRExpr::mkTemp(newTemp, newType);
+                    return;
+                }
+                std::vector<IRExpr*> stk = {e.get()};
+                while (!stk.empty()) {
+                    auto *n = stk.back();
+                    stk.pop_back();
+                    for (auto &k : n->kids) {
+                        if (k && k->op == IROp::Temp &&
+                            oldTemps.count(k->tempId()))
+                            k = IRExpr::mkTemp(newTemp, newType);
+                        else if (k)
+                            stk.push_back(k.get());
+                    }
+                }
+            };
+            auto tempIsAggregateValue = [&](int tid) -> bool {
+                bool hasDrilledFieldDef = false;
+                for (auto &pb : func.blocks) {
+                    for (auto &s : pb.stmts) {
+                        if (s.kind == IRStmtKind::Assign && s.destTemp == tid &&
+                            s.expr && s.expr->op == IROp::Field &&
+                            (s.expr->name.find('.') != std::string::npos ||
+                             s.expr->name.find('[') != std::string::npos)) {
+                            hasDrilledFieldDef = true;
+                            break;
+                        }
+                    }
+                    if (hasDrilledFieldDef)
+                        break;
+                }
+                if (hasDrilledFieldDef)
+                    return false;
+                TypeRef tr = func.tempType(tid);
+                if (tr != NullType) {
+                    auto *tt = m_types.resolveType(tr);
+                    if (tt && (tt->kind == StabsTypeKind::Struct ||
+                               tt->kind == StabsTypeKind::Union ||
+                               tt->kind == StabsTypeKind::Array))
+                        return true;
+                }
+                for (auto &pb : func.blocks) {
+                    for (auto &s : pb.stmts) {
+                        if (s.kind != IRStmtKind::Assign || s.destTemp != tid ||
+                            !s.expr)
+                            continue;
+                        TypeRef et = s.expr->typeRef;
+                        if (et == NullType && s.expr->op == IROp::Var) {
+                            if (auto *g = m_types.globalByName(s.expr->name))
+                                et = g->typeRef;
+                            if (et == NullType) {
+                                for (auto &p : func.params)
+                                    if (p.name == s.expr->name) { et = p.typeRef; break; }
+                            }
+                            if (et == NullType) {
+                                for (auto &l : func.locals)
+                                    if (l.name == s.expr->name) { et = l.typeRef; break; }
+                            }
+                        }
+                        if (et != NullType) {
+                            auto *etInfo = m_types.resolveType(et);
+                            if (etInfo && (etInfo->kind == StabsTypeKind::Struct ||
+                                           etInfo->kind == StabsTypeKind::Union ||
+                                           etInfo->kind == StabsTypeKind::Array))
+                                return true;
+                        }
+                    }
+                }
+                return false;
+            };
+
+            static const x86_reg gpRegs[] = {
+                X86_REG_EAX, X86_REG_EBX, X86_REG_ECX,
+                X86_REG_EDX, X86_REG_ESI, X86_REG_EDI
+            };
+            for (auto &bb : func.blocks) {
+                if (bb.preds.size() < 2 || bb.isLoopHeader ||
+                    domLoopHeaders.count(bb.id) ||
+                    loopHeaderAddrs.count(bb.startAddr))
+                    continue;
+                for (x86_reg reg : gpRegs) {
+                    std::map<int, int> predTempForReg;
+                    int firstTemp = -1;
+                    bool hasConflict = false;
+                    bool missingPred = false;
+                    for (int pid : bb.preds) {
+                        auto bit = blockEndRegs.find(pid);
+                        if (bit == blockEndRegs.end()) { missingPred = true; break; }
+                        auto rit = bit->second.find(reg);
+                        if (rit == bit->second.end()) { missingPred = true; break; }
+                        predTempForReg[pid] = rit->second;
+                        if (firstTemp < 0)
+                            firstTemp = rit->second;
+                        else if (rit->second != firstTemp)
+                            hasConflict = true;
+                    }
+                    if (missingPred || !hasConflict)
+                        continue;
+
+                    std::set<int> sourceTemps;
+                    for (auto &[pid, tid] : predTempForReg)
+                        sourceTemps.insert(tid);
+                    bool hasAggregateSource = false;
+                    for (int tid : sourceTemps) {
+                        if (tempIsAggregateValue(tid)) {
+                            hasAggregateSource = true;
+                            break;
+                        }
+                    }
+                    if (hasAggregateSource)
+                        continue;
+
+                    bool usedInJoin = false;
+                    for (auto &stmt : bb.stmts) {
+                        if (exprUsesAnyTemp(stmt.expr.get(), sourceTemps) ||
+                            exprUsesAnyTemp(stmt.addr.get(), sourceTemps)) {
+                            usedInJoin = true;
+                            break;
+                        }
+                        for (auto &a : stmt.args) {
+                            if (exprUsesAnyTemp(a.get(), sourceTemps)) {
+                                usedInJoin = true;
+                                break;
+                            }
+                        }
+                        if (usedInJoin)
+                            break;
+                    }
+                    if (!usedInJoin)
+                        continue;
+
+                    TypeRef phiType = func.tempType(firstTemp);
+                    int phiTemp = func.newTemp(phiType);
+                    func.phiTemps.insert(phiTemp);
+                    for (auto &[pid, tid] : predTempForReg) {
+                        if (pid < 0 || pid >= (int)func.blocks.size())
+                            continue;
+                        auto copy = IRStmt::mkAssign(
+                            phiTemp, IRExpr::mkTemp(tid, func.tempType(tid)),
+                            func.tempType(tid));
+                        insertBeforeTerminator(func.blocks[pid], std::move(copy));
+                        blockEndRegs[pid][reg] = phiTemp;
+                    }
+
+                    for (auto &stmt : bb.stmts) {
+                        replaceTemps(stmt.expr, sourceTemps, phiTemp, phiType);
+                        replaceTemps(stmt.addr, sourceTemps, phiTemp, phiType);
+                        for (auto &a : stmt.args)
+                            replaceTemps(a, sourceTemps, phiTemp, phiType);
+                    }
+                }
+            }
+        }
+
         // ── Pass 8: fix loop-carried register state ────────────────
         if ((int)func.blocks.size() >= 3) {
             // Compute dominators
@@ -1287,6 +1497,116 @@ private:
     // Cache: which call target addresses use regparm(3) (static — shared across all lifts)
     static inline std::map<uint32_t, bool> m_regparmCache;
 
+    struct StackArrayAccess {
+        const StabsTypedVar *local = nullptr;
+        TypeRef arrayType = NullType;
+        TypeRef elemType = NullType;
+        int elemSize = 0;
+        int arraySize = 0;
+        int byteOffset = 0;
+        int elemIndex = 0;
+    };
+
+    int arrayElemSize(const StabsTypeInfo *arrayType) const {
+        if (!arrayType || arrayType->kind != StabsTypeKind::Array)
+            return 0;
+        auto *elem = m_types.resolveType(arrayType->targetType);
+        return elem && elem->sizeBytes > 0 ? elem->sizeBytes : 0;
+    }
+
+    int arrayStorageSize(const StabsTypeInfo *arrayType) const {
+        if (!arrayType || arrayType->kind != StabsTypeKind::Array)
+            return 0;
+        if (arrayType->sizeBytes > 0)
+            return arrayType->sizeBytes;
+        int elemSz = arrayElemSize(arrayType);
+        int count = arrayType->arrayHigh - arrayType->arrayLow + 1;
+        if (elemSz > 0 && count > 0)
+            return elemSz * count;
+        return 0;
+    }
+
+    bool stackArrayAtOffset(int disp, StackArrayAccess &out) const {
+        const StabsTypedVar *bestLocal = nullptr;
+        const StabsTypeInfo *bestArray = nullptr;
+        int bestByteOffset = 0x7fffffff;
+
+        for (auto &[off, loc] : m_localByOffset) {
+            auto *arrayType = m_types.resolveType(loc->typeRef);
+            if (!arrayType || arrayType->kind != StabsTypeKind::Array)
+                continue;
+            int elemSz = arrayElemSize(arrayType);
+            int arraySz = arrayStorageSize(arrayType);
+            if (elemSz <= 0 || arraySz <= 0)
+                continue;
+            if (disp < off || disp >= off + arraySz)
+                continue;
+            int byteOffset = disp - off;
+            if (byteOffset < bestByteOffset) {
+                bestLocal = loc;
+                bestArray = arrayType;
+                bestByteOffset = byteOffset;
+            }
+        }
+
+        if (!bestLocal || !bestArray)
+            return false;
+        int elemSz = arrayElemSize(bestArray);
+        if (elemSz <= 0 || bestByteOffset % elemSz != 0)
+            return false;
+        out.local = bestLocal;
+        out.arrayType = bestLocal->typeRef;
+        out.elemType = bestArray->targetType;
+        out.elemSize = elemSz;
+        out.arraySize = arrayStorageSize(bestArray);
+        out.byteOffset = bestByteOffset;
+        out.elemIndex = bestByteOffset / elemSz;
+        return true;
+    }
+
+    static std::string stackArrayElementName(const StackArrayAccess &access) {
+        char name[256];
+        snprintf(name, sizeof(name), "%s[%d]",
+                 access.local->name.c_str(), access.elemIndex);
+        return name;
+    }
+
+    std::unique_ptr<IRExpr> stackIndexedArrayAddress(x86_op_mem &m,
+                                                     int accessSize,
+                                                     StackArrayAccess *outAccess = nullptr) {
+        if (m.base != X86_REG_EBP || m.index == X86_REG_INVALID ||
+            m.disp >= 0 || accessSize <= 0)
+            return nullptr;
+
+        StackArrayAccess access;
+        if (!stackArrayAtOffset((int)m.disp, access))
+            return nullptr;
+        if (access.elemSize <= 0 || accessSize != access.elemSize)
+            return nullptr;
+
+        auto index = readReg(m.index);
+        if (!index)
+            return nullptr;
+
+        if ((int)m.scale != access.elemSize) {
+            if (access.elemSize != 1 || m.scale <= 1)
+                return nullptr;
+            index = IRExpr::mkBinary(IROp::Mul, std::move(index),
+                                     IRExpr::mkConst((int)m.scale));
+        }
+        if (access.elemIndex != 0) {
+            index = IRExpr::mkBinary(IROp::Add, std::move(index),
+                                     IRExpr::mkConst(access.elemIndex));
+        }
+
+        if (outAccess)
+            *outAccess = access;
+        return IRExpr::mkBinary(
+            IROp::Add,
+            IRExpr::mkVar(access.local->name, access.arrayType),
+            std::move(index));
+    }
+
     // Detect if a function at the given address uses regparm calling convention
     // by scanning its prologue bytes for: mov [ebp-N], eax/edx/ecx patterns.
     // Uses raw byte scanning for speed (no Capstone disassembly needed).
@@ -1448,6 +1768,13 @@ private:
     std::map<int, std::unique_ptr<IRExpr>> m_espArgs;
     std::vector<std::unique_ptr<IRExpr>>   m_pushArgs;
     std::unique_ptr<IRExpr>                m_fpTableIndex; // index for fptable_ calls
+
+    struct TailStackArg {
+        std::unique_ptr<IRExpr> expr;
+        int blockId = -1;
+        size_t stmtIndex = 0;
+    };
+    std::map<int, TailStackArg> m_tailStackArgs;
 
     // FPU stack: tracks temp IDs for ST0..STn (index 0 = top of stack)
     std::vector<int> m_fpuStack;
@@ -1611,7 +1938,7 @@ private:
         case X86_OP_REG: return readReg(op.reg);
         case X86_OP_IMM: return readImm(op.imm);
         case X86_OP_MEM: {
-            auto result = readMem(op.mem);
+            auto result = readMem(op.mem, op.size);
             // Propagate operand size for correct cast width
             if (result && op.size > 0 && op.size < 4) {
                 if (result->op == IROp::Load)
@@ -1641,7 +1968,30 @@ private:
         return IRExpr::mkConst(imm);
     }
 
-    std::unique_ptr<IRExpr> readMem(x86_op_mem &m) {
+    static std::pair<std::string, int> syntheticStackSlot(int disp) {
+        char buf[32];
+        if (disp > 0) {
+            snprintf(buf, sizeof(buf), "arg_%x", (disp - 8) / 4);
+            return {buf, 0};
+        }
+        int q = -disp;
+        int slot = (q + 3) / 4;
+        int baseQ = slot * 4;
+        int byteOffset = baseQ - q;
+        snprintf(buf, sizeof(buf), "var_%x", slot);
+        return {buf, byteOffset};
+    }
+
+    static std::unique_ptr<IRExpr> syntheticStackAddress(const std::string &name,
+                                                        int byteOffset) {
+        auto addr = IRExpr::mkAddrOf(IRExpr::mkVar(name));
+        if (byteOffset == 0)
+            return addr;
+        return IRExpr::mkBinary(IROp::Add, std::move(addr),
+                                IRExpr::mkConst(byteOffset));
+    }
+
+    std::unique_ptr<IRExpr> readMem(x86_op_mem &m, int accessSize = 4) {
         // EBP-relative: param or local
         if (m.base == X86_REG_EBP && m.index == X86_REG_INVALID) {
             int d = (int)m.disp;
@@ -1651,6 +2001,12 @@ private:
                     return IRExpr::mkVar(it->second->name, it->second->typeRef);
             }
             if (d < 0) {
+                StackArrayAccess arrayAccess;
+                if (stackArrayAtOffset(d, arrayAccess) &&
+                    accessSize > 0 && accessSize == arrayAccess.elemSize) {
+                    return IRExpr::mkVar(stackArrayElementName(arrayAccess),
+                                         arrayAccess.elemType);
+                }
                 auto it = m_localByOffset.find(d);
                 if (it != m_localByOffset.end()) {
                     auto var = IRExpr::mkVar(it->second->name, it->second->typeRef);
@@ -1661,34 +2017,21 @@ private:
                         return IRExpr::mkLoad(std::move(var));
                     return var;
                 }
-                // Check if offset falls within an array local
-                for (auto &[off, loc] : m_localByOffset) {
-                    if (off > d) continue;
-                    auto *lt = m_types.resolveType(loc->typeRef);
-                    if (lt && lt->kind == StabsTypeKind::Array) {
-                        int arrSz = lt->sizeBytes;
-                        if (arrSz <= 0 && lt->arrayHigh >= lt->arrayLow) {
-                            auto *et = m_types.resolveType(lt->targetType);
-                            arrSz = (lt->arrayHigh - lt->arrayLow + 1) * (et && et->sizeBytes > 0 ? et->sizeBytes : 4);
-                        }
-                        if (arrSz <= 0) arrSz = 64;
-                        int elemSz = 4;
-                        { auto *et = m_types.resolveType(lt->targetType); if (et && et->sizeBytes > 0) elemSz = et->sizeBytes; }
-                        int arrayEnd = off + arrSz;
-                        if (d >= off && d < arrayEnd) {
-                            int idx = (d - off) / elemSz;
-                            char idxBuf[64];
-                            snprintf(idxBuf, sizeof(idxBuf), "%s[%d]", loc->name.c_str(), idx);
-                            return IRExpr::mkVar(idxBuf, lt->targetType);
-                        }
-                    }
-                }
             }
             // Unnamed stack slot
-            char buf[32];
-            if (d > 0) snprintf(buf, sizeof(buf), "arg_%x", (d - 8) / 4);
-            else snprintf(buf, sizeof(buf), "var_%x", (-d) / 4);
-            return IRExpr::mkVar(buf);
+            auto [name, byteOffset] = syntheticStackSlot(d);
+            if (byteOffset == 0)
+                return IRExpr::mkVar(name);
+            auto load = IRExpr::mkLoad(syntheticStackAddress(name, byteOffset));
+            load->loadSize = accessSize;
+            return load;
+        }
+
+        StackArrayAccess indexedAccess;
+        if (auto addr = stackIndexedArrayAddress(m, accessSize, &indexedAccess)) {
+            auto load = IRExpr::mkLoad(std::move(addr), indexedAccess.elemType);
+            load->loadSize = accessSize;
+            return load;
         }
 
         // PIC-relative (EBX + disp)
@@ -1917,44 +2260,42 @@ private:
             if (d > 0) {
                 auto it = m_paramByOffset.find(d);
                 if (it != m_paramByOffset.end()) {
+                    size_t stmtIndex = bb.stmts.size();
+                    rememberTailStackArg(d, val.get(), bb.id, stmtIndex);
                     bb.stmts.push_back(IRStmt::mkVarSet(it->second->name, std::move(val), it->second->typeRef));
                     return;
                 }
             }
             if (d < 0) {
+                StackArrayAccess arrayAccess;
+                if (stackArrayAtOffset(d, arrayAccess) &&
+                    storeSize > 0 && storeSize == arrayAccess.elemSize) {
+                    bb.stmts.push_back(IRStmt::mkVarSet(
+                        stackArrayElementName(arrayAccess), std::move(val),
+                        arrayAccess.elemType, storeSize));
+                    return;
+                }
                 auto it = m_localByOffset.find(d);
                 if (it != m_localByOffset.end()) {
                     bb.stmts.push_back(IRStmt::mkVarSet(it->second->name, std::move(val), it->second->typeRef));
                     return;
                 }
-                // Check if offset falls within an array local
-                for (auto &[off, loc] : m_localByOffset) {
-                    if (off > d) continue;
-                    auto *lt = m_types.resolveType(loc->typeRef);
-                    if (lt && lt->kind == StabsTypeKind::Array) {
-                        int arrSz = lt->sizeBytes;
-                        if (arrSz <= 0 && lt->arrayHigh >= lt->arrayLow) {
-                            auto *et = m_types.resolveType(lt->targetType);
-                            arrSz = (lt->arrayHigh - lt->arrayLow + 1) * (et && et->sizeBytes > 0 ? et->sizeBytes : 4);
-                        }
-                        if (arrSz <= 0) arrSz = 64;
-                        int elemSz = 4;
-                        { auto *et = m_types.resolveType(lt->targetType); if (et && et->sizeBytes > 0) elemSz = et->sizeBytes; }
-                        int arrayEnd = off + arrSz;
-                        if (d >= off && d < arrayEnd) {
-                            int idx = (d - off) / elemSz;
-                            char idxBuf[64];
-                            snprintf(idxBuf, sizeof(idxBuf), "%s[%d]", loc->name.c_str(), idx);
-                            bb.stmts.push_back(IRStmt::mkVarSet(idxBuf, std::move(val), lt->targetType));
-                            return;
-                        }
-                    }
-                }
             }
-            char buf[32];
-            if (d > 0) snprintf(buf, sizeof(buf), "arg_%x", (d - 8) / 4);
-            else snprintf(buf, sizeof(buf), "var_%x", (-d) / 4);
-            bb.stmts.push_back(IRStmt::mkVarSet(buf, std::move(val)));
+            auto [name, byteOffset] = syntheticStackSlot(d);
+            if (byteOffset == 0 && storeSize == 4) {
+                size_t stmtIndex = bb.stmts.size();
+                if (d > 0)
+                    rememberTailStackArg(d, val.get(), bb.id, stmtIndex);
+                bb.stmts.push_back(IRStmt::mkVarSet(name, std::move(val)));
+            } else {
+                bb.stmts.push_back(IRStmt::mkStore(
+                    syntheticStackAddress(name, byteOffset), std::move(val),
+                    storeSize));
+            }
+            return;
+        }
+        if (auto addr = stackIndexedArrayAddress(m, storeSize)) {
+            bb.stmts.push_back(IRStmt::mkStore(std::move(addr), std::move(val), storeSize));
             return;
         }
         // Struct field write (skip offset 0: [reg+0] = *reg, not field access)
@@ -2247,6 +2588,107 @@ private:
         for (size_t i = 0; i < a->kids.size(); ++i)
             if (!irExprEqual(a->kids[i].get(), b->kids[i].get())) return false;
         return true;
+    }
+
+    int abiArgWords(TypeRef ref) const {
+        int size = 4;
+        if (ref != NullType) {
+            auto *t = m_types.resolveType(ref);
+            if (t) {
+                if (t->kind == StabsTypeKind::Void)
+                    return 0;
+                if (t->sizeBytes > 0)
+                    size = t->sizeBytes;
+            }
+        }
+        return std::max(1, (size + 3) / 4);
+    }
+
+    int stackWordsAfterRegparm(const StabsFunction &callee, int regArgs) const {
+        int words = 0;
+        for (int i = regArgs; i < (int)callee.params.size(); ++i)
+            words += abiArgWords(callee.params[(size_t)i].typeRef);
+        return words;
+    }
+
+    int inferRegparmArgCount(const StabsFunction &callee, int capturedStackWords) const {
+        int maxRegs = std::min(3, (int)callee.params.size());
+        for (int r = maxRegs; r >= 0; --r) {
+            if (stackWordsAfterRegparm(callee, r) == capturedStackWords)
+                return r;
+        }
+
+        // Fallback for incomplete prototypes or missed stack writes: preserve the
+        // old scalar count heuristic when ABI-width matching cannot decide.
+        return std::min(3, std::max(0, (int)callee.params.size() - capturedStackWords));
+    }
+
+    std::vector<std::unique_ptr<IRExpr>>
+    collectRegparmArgs(const StabsFunction &callee, int capturedStackWords) {
+        static const x86_reg regparmOrder[] = {X86_REG_EAX, X86_REG_EDX, X86_REG_ECX};
+        int nRegArgs = inferRegparmArgCount(callee, capturedStackWords);
+        std::vector<std::unique_ptr<IRExpr>> regArgs;
+        for (int ri = 0; ri < nRegArgs; ++ri) {
+            auto it = m_regTemps.find(regparmOrder[ri]);
+            if (it == m_regTemps.end())
+                break;
+            regArgs.push_back(IRExpr::mkTemp(it->second, m_func->tempType(it->second)));
+        }
+        if ((int)regArgs.size() != nRegArgs)
+            regArgs.clear();
+        return regArgs;
+    }
+
+    void prependRegparmArgs(const StabsFunction &callee,
+                            std::vector<std::unique_ptr<IRExpr>> &args) {
+        auto regArgs = collectRegparmArgs(callee, (int)args.size());
+        for (int ri = (int)regArgs.size() - 1; ri >= 0; --ri)
+            args.insert(args.begin(), std::move(regArgs[(size_t)ri]));
+    }
+
+    void rememberTailStackArg(int offset, const IRExpr *expr,
+                              int blockId, size_t stmtIndex) {
+        if (!expr)
+            return;
+        TailStackArg arg;
+        arg.expr = expr->clone();
+        arg.blockId = blockId;
+        arg.stmtIndex = stmtIndex;
+        m_tailStackArgs[offset] = std::move(arg);
+    }
+
+    void removeTailStackSetupStores(const std::set<int> &offsets) {
+        std::map<int, std::vector<size_t>> byBlock;
+        for (int off : offsets) {
+            auto it = m_tailStackArgs.find(off);
+            if (it == m_tailStackArgs.end() || it->second.blockId < 0)
+                continue;
+            byBlock[it->second.blockId].push_back(it->second.stmtIndex);
+        }
+        for (auto &[blockId, indices] : byBlock) {
+            if (!m_func || blockId < 0 || blockId >= (int)m_func->blocks.size())
+                continue;
+            auto &stmts = m_func->blocks[(size_t)blockId].stmts;
+            std::sort(indices.begin(), indices.end());
+            indices.erase(std::unique(indices.begin(), indices.end()), indices.end());
+            for (auto rit = indices.rbegin(); rit != indices.rend(); ++rit) {
+                if (*rit < stmts.size())
+                    stmts.erase(stmts.begin() + (ptrdiff_t)*rit);
+            }
+        }
+    }
+
+    std::vector<std::unique_ptr<IRExpr>>
+    collectTailStackArgs(std::set<int> *usedOffsets = nullptr) const {
+        std::vector<std::unique_ptr<IRExpr>> args;
+        for (auto &kv : m_tailStackArgs) {
+            if (!kv.second.expr)
+                continue;
+            if (usedOffsets)
+                usedOffsets->insert(kv.first);
+            args.push_back(kv.second.expr->clone());
+        }
+        return args;
     }
 
     std::vector<std::unique_ptr<IRExpr>>
@@ -2895,11 +3337,35 @@ private:
                 if (!callee) callee = m_mf.stabsFunctionByName(target);
                 if (callee) retType = callee->returnType;
                 // Build tail call: return target(args)
-                // Use callee's param count if known; otherwise reuse caller's params
                 std::vector<std::unique_ptr<IRExpr>> args;
-                int nCalleeParams = callee ? (int)callee->params.size() : (int)func.params.size();
-                for (int pi = 0; pi < std::min(nCalleeParams, (int)func.params.size()); ++pi)
-                    args.push_back(IRExpr::mkVar(func.params[pi].name, func.params[pi].typeRef));
+                bool recoveredTailArgs = false;
+                std::set<int> usedTailOffsets;
+                auto stackArgs = collectTailStackArgs(&usedTailOffsets);
+                if (callee && callee->address && isCalleeRegparm(callee->address)) {
+                    auto regArgs = collectRegparmArgs(*callee, (int)stackArgs.size());
+                    if (!regArgs.empty() || !stackArgs.empty() || callee->params.empty()) {
+                        for (auto &arg : regArgs)
+                            args.push_back(std::move(arg));
+                        for (auto &arg : stackArgs)
+                            args.push_back(std::move(arg));
+                        recoveredTailArgs = true;
+                    }
+                } else if (!stackArgs.empty()) {
+                    for (auto &arg : stackArgs)
+                        args.push_back(std::move(arg));
+                    recoveredTailArgs = true;
+                }
+
+                if (recoveredTailArgs) {
+                    removeTailStackSetupStores(usedTailOffsets);
+                } else {
+                    // Fallback for unresolved tail calls: reuse caller params by
+                    // position, which is the best information available here.
+                    int nCalleeParams = callee ? (int)callee->params.size() : (int)func.params.size();
+                    for (int pi = 0; pi < std::min(nCalleeParams, (int)func.params.size()); ++pi)
+                        args.push_back(IRExpr::mkVar(func.params[pi].name, func.params[pi].typeRef));
+                }
+                args = consolidateStructByValueArgs(target, std::move(args));
                 auto callExpr = IRExpr::mkCall(target, std::move(args), retType);
                 bb.stmts.push_back(IRStmt::mkReturn(std::move(callExpr)));
             }
@@ -3156,24 +3622,7 @@ private:
                 const StabsFunction *callee = m_mf.stabsFunctionByName(target);
                 if (callee && callee->address && isCalleeRegparm(callee->address) &&
                     !callee->params.empty()) {
-                    static const x86_reg regparmOrder[] = {X86_REG_EAX, X86_REG_EDX, X86_REG_ECX};
-                    int nStackArgs = (int)args.size();
-                    int nRegArgs = std::min(3, (int)callee->params.size() - nStackArgs);
-                    if (nRegArgs > 0) {
-                        std::vector<std::unique_ptr<IRExpr>> regArgs;
-                        for (int ri = 0; ri < nRegArgs; ++ri) {
-                            auto it = m_regTemps.find(regparmOrder[ri]);
-                            if (it != m_regTemps.end())
-                                regArgs.push_back(IRExpr::mkTemp(it->second,
-                                    m_func->tempType(it->second)));
-                            else
-                                break;
-                        }
-                        if ((int)regArgs.size() == nRegArgs) {
-                            for (int ri = nRegArgs - 1; ri >= 0; --ri)
-                                args.insert(args.begin(), std::move(regArgs[ri]));
-                        }
-                    }
+                    prependRegparmArgs(*callee, args);
                 }
             }
             m_espArgs.clear();
@@ -3312,12 +3761,12 @@ private:
             }
             int t = func.newTemp();
             bb.stmts.push_back(IRStmt::mkAssign(t, IRExpr::mkCall(fname, std::move(args))));
-            // repne scasb produces ~(strlen+1) in ECX. The typical idiom is:
-            //   repne scasb; not ecx  → ecx = strlen+1
-            //   lea reg, -1(%ecx, %esi) → reg = strlen + esi
-            // Assign strlen() directly to ECX. Suppress the next 'not ecx' (part of idiom).
-            // The lea's -1 cancels the +1 that NOT would produce.
-            assignReg(X86_REG_ECX, IRExpr::mkTemp(t), bb);
+            // repne scasb produces ~(strlen+1) in ECX. The usual following
+            // `not ecx` yields strlen+1, which is often passed to memcpy so
+            // the copied string includes its terminator.  Model that post-NOT
+            // value directly and suppress the explicit NOT.
+            assignReg(X86_REG_ECX,
+                IRExpr::mkBinary(IROp::Add, IRExpr::mkTemp(t), IRExpr::mkConst(1)), bb);
             m_suppressNextNot = true;
             return;
         }
