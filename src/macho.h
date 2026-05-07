@@ -1234,6 +1234,19 @@ private:
         return ref;
     }
 
+    TypeRef dwarfBuiltinVoidPointerType(const DwarfUnit &unit,
+                                        std::map<uint32_t, TypeRef> &typeRefs) {
+        constexpr uint32_t kVoidPointerOffset = 0xFFFFFF01u;
+        TypeRef ref = dwarfTypeRefForOffset(typeRefs, kVoidPointerOffset);
+        if (auto *ti = m_typeTable.getMutableType(ref)) {
+            ti->kind = StabsTypeKind::Pointer;
+            ti->name.clear();
+            ti->sizeBytes = unit.addressSize;
+            ti->targetType = dwarfBuiltinVoidType(typeRefs);
+        }
+        return ref;
+    }
+
     uint32_t dwarfRefOffset(const DwarfUnit &unit, const DwarfValue &value) const {
         switch (value.form) {
         case DW_FORM_ref1:
@@ -1599,6 +1612,15 @@ private:
             field.bitSize = (int)dwarfUnsignedAttr(attrs, DW_AT_bit_size);
         else if (auto *ft = m_typeTable.resolveType(field.typeRef))
             field.bitSize = ft->sizeBytes > 0 ? ft->sizeBytes * 8 : 0;
+
+        if (dwarfUnsignedAttr(attrs, DW_AT_artificial, 0) != 0 &&
+            field.name.find("_vptr") == 0) {
+            int byteOffset = field.bitOffset / 8;
+            field.name = byteOffset == 0 ? "_vptr" :
+                "_vptr_" + std::to_string(byteOffset);
+            field.typeRef = dwarfBuiltinVoidPointerType(unit, typeRefs);
+            field.bitSize = unit.addressSize * 8;
+        }
 
         if (!field.name.empty())
             ti->fields.push_back(std::move(field));

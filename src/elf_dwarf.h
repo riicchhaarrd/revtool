@@ -137,6 +137,7 @@ constexpr uint64_t DW_AT_declaration       = 0x3C;
 constexpr uint64_t DW_AT_encoding          = 0x3E;
 constexpr uint64_t DW_AT_frame_base        = 0x40;
 constexpr uint64_t DW_AT_abstract_origin   = 0x31;
+constexpr uint64_t DW_AT_artificial        = 0x34;
 constexpr uint64_t DW_AT_count             = 0x37;
 constexpr uint64_t DW_AT_data_member_location = 0x38;
 constexpr uint64_t DW_AT_specification     = 0x47;
