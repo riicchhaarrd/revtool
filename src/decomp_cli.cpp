@@ -10,12 +10,14 @@
 //   -n <name>          Decompile function by name (substring match)
 //   -s <idx>           Decompile source file by index
 //   -a                 Decompile all source files
+//   --project <file>   Apply exported web Project DB edits
 //   --json             Emit machine-readable JSON for the selected action
 //   --gcc              Pipe decompiled output through gcc -fsyntax-only
 
 #include "decompiler.h"
 #include "macho.h"
 #include <QCoreApplication>
+#include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -25,6 +27,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <set>
@@ -637,6 +640,64 @@ static void printJson(const QJsonObject &obj) {
     printf("%s\n", out.constData());
 }
 
+static bool isValidCIdentifier(const QString &name) {
+    if (name.isEmpty()) return false;
+    const QChar first = name[0];
+    if (!(first == '_' || first.isLetter())) return false;
+    for (QChar ch : name) {
+        if (!(ch == '_' || ch.isLetterOrNumber()))
+            return false;
+    }
+    return true;
+}
+
+static uint32_t parseProjectAddr(const QString &key) {
+    QByteArray bytes = key.trimmed().toUtf8();
+    if (bytes.isEmpty()) return 0;
+    char *end = nullptr;
+    unsigned long v = strtoul(bytes.constData(), &end, 0);
+    if (!end || *end != '\0' || v > UINT32_MAX)
+        return 0;
+    return (uint32_t)v;
+}
+
+static int applyProjectDb(MachOFile &mf, const char *path,
+                          QString &customTypes, QString &error) {
+    QFile file(QString::fromUtf8(path));
+    if (!file.open(QIODevice::ReadOnly)) {
+        error = QString("Cannot open project DB: %1").arg(QString::fromUtf8(path));
+        return -1;
+    }
+    QJsonParseError parseErr{};
+    QJsonDocument doc = QJsonDocument::fromJson(file.readAll(), &parseErr);
+    if (parseErr.error != QJsonParseError::NoError || !doc.isObject()) {
+        error = QString("Invalid project DB JSON: %1").arg(parseErr.errorString());
+        return -1;
+    }
+
+    QJsonObject root = doc.object();
+    customTypes = root.value("customTypes").toString();
+
+    int applied = 0;
+    QJsonObject names = root.value("functionNames").toObject();
+    for (auto it = names.begin(); it != names.end(); ++it) {
+        uint32_t addr = parseProjectAddr(it.key());
+        QString name = it.value().toString().trimmed();
+        if (!addr || !isValidCIdentifier(name))
+            continue;
+        if (mf.setFunctionName(addr, name.toStdString()))
+            applied++;
+    }
+    return applied;
+}
+
+static QString withProjectTypes(const QString &code, const QString &customTypes) {
+    QString prelude = customTypes.trimmed();
+    if (prelude.isEmpty() || code.startsWith("error:"))
+        return code;
+    return prelude + "\n\n" + code;
+}
+
 int main(int argc, char *argv[]) {
     QCoreApplication app(argc, argv);
 
@@ -653,6 +714,7 @@ int main(int argc, char *argv[]) {
             "  -a                 Decompile all source files\n"
             "  -o <dir>           Write -a output to individual .c files\n"
             "  --only <file>      Limit -a to basenames listed in file\n"
+            "  --project <file>   Apply exported web Project DB edits\n"
             "  --json             Emit machine-readable JSON\n"
             "  --gcc              Pipe output through gcc to count errors\n"
             "  --ssa              Enable full SSA pass (experimental)\n"
@@ -674,6 +736,7 @@ int main(int argc, char *argv[]) {
     const char *xrefString = nullptr;
     const char *outDir = nullptr;
     const char *onlyList = nullptr;
+    const char *projectPath = nullptr;
 
     for (int i = 2; i < argc; ++i) {
         if (strcmp(argv[i], "-l") == 0) doList = true;
@@ -702,6 +765,8 @@ int main(int argc, char *argv[]) {
             outDir = argv[++i];
         else if (strcmp(argv[i], "--only") == 0 && i + 1 < argc)
             onlyList = argv[++i];
+        else if (strcmp(argv[i], "--project") == 0 && i + 1 < argc)
+            projectPath = argv[++i];
     }
 
     auto fail = [&](int code, const QString &msg) {
@@ -723,6 +788,15 @@ int main(int argc, char *argv[]) {
                           .arg(QString::fromUtf8(binPath)));
     }
 
+    QString projectCustomTypes;
+    int projectAppliedNames = 0;
+    if (projectPath) {
+        QString err;
+        projectAppliedNames = applyProjectDb(mf, projectPath, projectCustomTypes, err);
+        if (projectAppliedNames < 0)
+            return fail(1, err);
+    }
+
     auto makeMeta = [&](const char *action) {
         QJsonObject obj;
         obj["status"] = QString("ok");
@@ -732,6 +806,11 @@ int main(int argc, char *argv[]) {
         obj["size"] = (int)mf.size();
         obj["debug_function_count"] = (int)mf.stabsFunctions().size();
         obj["source_file_count"] = (int)mf.stabsSourceFiles().size();
+        if (projectPath) {
+            obj["project_db"] = QString::fromUtf8(projectPath);
+            obj["project_function_names"] = projectAppliedNames;
+            obj["project_custom_type_bytes"] = projectCustomTypes.toUtf8().size();
+        }
         return obj;
     };
 
@@ -739,6 +818,9 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "Loaded %s [%s]: %zu bytes, %zu functions, %zu source files\n",
                 binPath, mf.formatName(), mf.size(), mf.stabsFunctions().size(),
                 mf.stabsSourceFiles().size());
+        if (projectPath)
+            fprintf(stderr, "Applied project DB: %d function names, %d custom type bytes\n",
+                    projectAppliedNames, projectCustomTypes.toUtf8().size());
     }
 
     std::vector<FunctionInfo> funcs = collectFunctions(mf);
@@ -820,7 +902,7 @@ int main(int argc, char *argv[]) {
     }
 
     if (doTypes) {
-        QString hdr = Decompiler::dumpTypes(mf);
+        QString hdr = withProjectTypes(Decompiler::dumpTypes(mf), projectCustomTypes);
         if (jsonMode) {
             QJsonObject obj = makeMeta("dump_types");
             obj["code"] = hdr;
@@ -857,7 +939,7 @@ int main(int argc, char *argv[]) {
     QString output;
 
     if (funcAddr != 0) {
-        output = Decompiler::decompile(mf, funcAddr);
+        output = withProjectTypes(Decompiler::decompile(mf, funcAddr), projectCustomTypes);
         if (jsonMode) {
             QJsonObject obj = makeMeta("decompile_function");
             obj["function_address"] = (int)funcAddr;
@@ -875,6 +957,7 @@ int main(int argc, char *argv[]) {
             if (!jsonMode)
                 fprintf(stderr, "Decompiling: %s @ 0x%08X\n", fn.name.c_str(), fn.address);
             QString code = Decompiler::decompile(mf, fn.address);
+            code = withProjectTypes(code, projectCustomTypes);
             if (jsonMode) {
                 QJsonObject match = functionToJson(fn);
                 match["code"] = code;
@@ -894,7 +977,7 @@ int main(int argc, char *argv[]) {
             return 0;
         }
     } else if (srcIdx >= 0) {
-        output = Decompiler::decompileFile(mf, srcIdx);
+        output = withProjectTypes(Decompiler::decompileFile(mf, srcIdx), projectCustomTypes);
         if (jsonMode) {
             QJsonObject obj = makeMeta("decompile_source");
             obj["source_index"] = srcIdx;
@@ -943,7 +1026,8 @@ int main(int argc, char *argv[]) {
             if (!jsonMode)
                 fprintf(stderr, "Decompiling [%zu] %s%s...\n",
                         i, sf.directory.c_str(), sf.filename.c_str());
-            QString fileOut = Decompiler::decompileFile(mf, (int)i);
+            QString fileOut = withProjectTypes(Decompiler::decompileFile(mf, (int)i),
+                                               projectCustomTypes);
             int errs = 0;
             if (doGcc) {
                 errs = gccCheck(fileOut);
