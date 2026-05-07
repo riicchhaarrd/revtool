@@ -112,6 +112,7 @@ constexpr uint64_t DW_TAG_variable         = 0x34;
 constexpr uint64_t DW_TAG_volatile_type    = 0x35;
 constexpr uint64_t DW_TAG_restrict_type    = 0x37;
 constexpr uint64_t DW_TAG_unspecified_type = 0x3B;
+constexpr uint64_t DW_TAG_type_unit        = 0x41;
 constexpr uint64_t DW_TAG_rvalue_reference_type = 0x42;
 constexpr uint64_t DW_TAG_atomic_type      = 0x47;
 
@@ -144,6 +145,7 @@ constexpr uint64_t DW_AT_specification     = 0x47;
 constexpr uint64_t DW_AT_type              = 0x49;
 constexpr uint64_t DW_AT_virtuality        = 0x4C;
 constexpr uint64_t DW_AT_ranges            = 0x55;
+constexpr uint64_t DW_AT_signature         = 0x69;
 constexpr uint64_t DW_AT_linkage_name      = 0x6E;
 constexpr uint64_t DW_AT_data_bit_offset   = 0x6B;
 constexpr uint64_t DW_AT_str_offsets_base  = 0x72;
@@ -279,6 +281,7 @@ struct DwarfLineTable {
 struct DwarfUnit {
     uint32_t offset = 0;
     uint32_t end = 0;
+    uint32_t offsetKeyBase = 0;
     uint16_t version = 0;
     uint8_t addressSize = 4;
     std::string name;

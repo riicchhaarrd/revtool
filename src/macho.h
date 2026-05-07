@@ -243,6 +243,8 @@ public:
         return nameOnly ? demangleNameOnly(name) : demangle(name);
     }
 
+    static constexpr uint32_t kDwarfDebugTypesKeyBase = 0x80000000u;
+
     // LC name
     static const char* lcName(uint32_t cmd) {
         switch (cmd) {
@@ -1240,6 +1242,10 @@ private:
         return it != attrs.end() && it->second.present;
     }
 
+    uint32_t dwarfDieKey(const DwarfUnit &unit, uint32_t dieOffset) const {
+        return unit.offsetKeyBase + dieOffset;
+    }
+
     TypeRef dwarfTypeRefForOffset(std::map<uint32_t, TypeRef> &typeRefs,
                                   uint32_t dieOffset) {
         auto it = typeRefs.find(dieOffset);
@@ -1281,11 +1287,13 @@ private:
         case DW_FORM_ref4:
         case DW_FORM_ref8:
         case DW_FORM_ref_udata:
-            return unit.offset + (uint32_t)value.u;
+            return unit.offsetKeyBase + unit.offset + (uint32_t)value.u;
         case DW_FORM_ref_addr:
             return (uint32_t)value.u;
+        case DW_FORM_ref_sig8:
+            return 0;
         default:
-            return unit.offset + (uint32_t)value.u;
+            return unit.offsetKeyBase + unit.offset + (uint32_t)value.u;
         }
     }
 
@@ -1296,6 +1304,10 @@ private:
         auto it = attrs.find(attr);
         if (it == attrs.end() || !it->second.present)
             return NullType;
+        if (it->second.form == DW_FORM_ref_sig8) {
+            auto sit = m_dwarfSignatureTypes.find(it->second.u);
+            return sit != m_dwarfSignatureTypes.end() ? sit->second : NullType;
+        }
         return dwarfTypeRefForOffset(typeRefs, dwarfRefOffset(unit, it->second));
     }
 
@@ -1327,7 +1339,7 @@ private:
                 if (val.present)
                     record.attrs[adef.name] = std::move(val);
             }
-            dieRecords[dieOffset] = std::move(record);
+            dieRecords[dwarfDieKey(unit, dieOffset)] = std::move(record);
             if (abbr.hasChildren)
                 indexDwarfDIEs(pos, end, abbrevs, unit, debugInfo,
                                debugStr, debugLineStr, dieRecords, depth + 1);
@@ -1486,9 +1498,22 @@ private:
                        const ELFSectionRecord *debugStr,
                        const ELFSectionRecord *debugStrOffsets,
                        std::map<uint32_t, TypeRef> &typeRefs) {
-        TypeRef ref = dwarfTypeRefForOffset(typeRefs, dieOffset);
+        TypeRef ref = dwarfTypeRefForOffset(typeRefs, dwarfDieKey(unit, dieOffset));
         StabsTypeInfo *ti = m_typeTable.getMutableType(ref);
         if (!ti) return;
+
+        auto sigIt = attrs.find(DW_AT_signature);
+        if (sigIt != attrs.end() && sigIt->second.present) {
+            auto targetIt = m_dwarfSignatureTypes.find(sigIt->second.u);
+            if (targetIt != m_dwarfSignatureTypes.end()) {
+                ti->kind = StabsTypeKind::Typedef;
+                ti->name.clear();
+                ti->targetType = targetIt->second;
+                if (auto *target = m_typeTable.resolveType(ti->targetType))
+                    ti->sizeBytes = target->sizeBytes;
+                return;
+            }
+        }
 
         std::string name = dwarfStringAttr(unit, attrs, DW_AT_name,
                                            debugStr, debugStrOffsets);
@@ -2320,7 +2345,7 @@ private:
                        abbr.tag == DW_TAG_subroutine_type) {
                 fillDwarfType(dieOffset, abbr.tag, unit, attrs,
                               debugStr, debugStrOffsets, typeRefs);
-                TypeRef thisType = dwarfTypeRefForOffset(typeRefs, dieOffset);
+                TypeRef thisType = dwarfTypeRefForOffset(typeRefs, dwarfDieKey(unit, dieOffset));
                 if (abbr.tag == DW_TAG_structure_type || abbr.tag == DW_TAG_class_type ||
                     abbr.tag == DW_TAG_union_type)
                     childCompositeType = thisType;
@@ -2417,6 +2442,84 @@ private:
         }
     }
 
+    void parseDwarfTypeUnits(const ELFSectionRecord *debugTypes,
+                             const ELFSectionRecord *debugAbbrev,
+                             const ELFSectionRecord *debugStr,
+                             const ELFSectionRecord *debugLineStr,
+                             const ELFSectionRecord *debugStrOffsets,
+                             const ELFSectionRecord *debugAddr,
+                             std::map<uint32_t, TypeRef> &typeRefs) {
+        if (!debugTypes || debugTypes->size == 0) return;
+        size_t typesEnd = debugTypes->offset + debugTypes->size;
+
+        size_t scan = debugTypes->offset;
+        while (scan + 23 <= typesEnd && scan + 23 <= m_size) {
+            uint32_t unitStart = (uint32_t)(scan - debugTypes->offset);
+            uint32_t unitLength = readLE<uint32_t>(scan); scan += 4;
+            if (unitLength == 0xFFFFFFFF || unitLength == 0) break;
+            size_t unitEnd = std::min<size_t>(scan + unitLength, typesEnd);
+            if (unitEnd > m_size || scan + 19 > unitEnd) break;
+
+            uint16_t version = readLE<uint16_t>(scan); scan += 2;
+            if (version != 4) {
+                scan = unitEnd;
+                continue;
+            }
+            scan += 4; // debug_abbrev_offset
+            scan += 1; // address_size
+            uint64_t signature = readUIntLE(scan, 8); scan += 8;
+            uint32_t typeOffset = readLE<uint32_t>(scan); scan += 4;
+            uint32_t typeKey = kDwarfDebugTypesKeyBase + unitStart + typeOffset;
+            m_dwarfSignatureTypes[signature] = dwarfTypeRefForOffset(typeRefs, typeKey);
+            scan = unitEnd;
+        }
+
+        size_t pos = debugTypes->offset;
+        while (pos + 23 <= typesEnd && pos + 23 <= m_size) {
+            uint32_t unitStart = (uint32_t)(pos - debugTypes->offset);
+            uint32_t unitLength = readLE<uint32_t>(pos); pos += 4;
+            if (unitLength == 0xFFFFFFFF || unitLength == 0) break;
+            size_t unitEnd = std::min<size_t>(pos + unitLength, typesEnd);
+            if (unitEnd > m_size || pos + 19 > unitEnd) break;
+
+            DwarfUnit unit;
+            unit.offset = unitStart;
+            unit.end = (uint32_t)(unitEnd - debugTypes->offset);
+            unit.offsetKeyBase = kDwarfDebugTypesKeyBase;
+            unit.version = readLE<uint16_t>(pos); pos += 2;
+            if (unit.version != 4) {
+                pos = unitEnd;
+                continue;
+            }
+
+            uint32_t abbrevOffset = readLE<uint32_t>(pos); pos += 4;
+            unit.addressSize = readLE<uint8_t>(pos); pos += 1;
+            (void)readUIntLE(pos, 8); pos += 8; // type_signature
+            (void)readLE<uint32_t>(pos); pos += 4; // type_offset
+            if (unit.addressSize == 0 || unit.addressSize > 8)
+                unit.addressSize = 4;
+
+            auto abbrevs = parseDwarfAbbrevs(debugAbbrev, abbrevOffset);
+            if (abbrevs.empty()) {
+                pos = unitEnd;
+                continue;
+            }
+
+            size_t dieStart = pos;
+            std::map<uint32_t, DwarfDieRecord> dieRecords;
+            size_t indexPos = dieStart;
+            indexDwarfDIEs(indexPos, unitEnd, abbrevs, unit, debugTypes,
+                           debugStr, debugLineStr, dieRecords, 0);
+
+            pos = dieStart;
+            parseDwarfDIEs(pos, unitEnd, abbrevs, unit, debugTypes, debugStr,
+                           debugLineStr, debugStrOffsets, debugAddr, dieRecords, typeRefs,
+                           -1, NullType, NullType, NullType, NullType, 0);
+            finalizeDwarfTypes(typeRefs);
+            pos = unitEnd;
+        }
+    }
+
     void parseDWARF(const std::vector<ELFSectionRecord> &sections) {
         const ELFSectionRecord *debugInfo = findELFSection(sections, ".debug_info");
         const ELFSectionRecord *debugAbbrev = findELFSection(sections, ".debug_abbrev");
@@ -2424,11 +2527,15 @@ private:
         const ELFSectionRecord *debugLineStr = findELFSection(sections, ".debug_line_str");
         const ELFSectionRecord *debugStrOffsets = findELFSection(sections, ".debug_str_offsets");
         const ELFSectionRecord *debugAddr = findELFSection(sections, ".debug_addr");
+        const ELFSectionRecord *debugTypes = findELFSection(sections, ".debug_types");
         if (!debugInfo || !debugAbbrev || debugInfo->size == 0 || debugAbbrev->size == 0)
             return;
 
         std::map<uint32_t, DwarfLineTable> lineCache;
         std::map<uint32_t, TypeRef> typeRefs;
+        m_dwarfSignatureTypes.clear();
+        parseDwarfTypeUnits(debugTypes, debugAbbrev, debugStr, debugLineStr,
+                            debugStrOffsets, debugAddr, typeRefs);
         size_t pos = debugInfo->offset;
         size_t infoEnd = debugInfo->offset + debugInfo->size;
         while (pos + 11 <= infoEnd && pos + 11 <= m_size) {
@@ -3581,5 +3688,6 @@ private:
     std::vector<StabsFunction>   m_stabsFuncs;
     std::vector<StabsSourceFile> m_stabsSources;
     std::unordered_map<uint32_t, std::string> m_funcMap;
+    std::map<uint64_t, TypeRef>  m_dwarfSignatureTypes;
     StabsTypeTable               m_typeTable;
 };
