@@ -911,7 +911,9 @@ public:
     const std::map<TypeRef, StabsTypeInfo>& allTypes() const { return m_types; }
 
     // Generate struct definition as C code
-    std::string formatStructDef(TypeRef ref) const {
+    std::string formatStructDef(
+        TypeRef ref,
+        const std::function<std::string(const std::string &, const std::string &)> &fieldDeclOverride = {}) const {
         auto *t = getType(ref);
         if (!t || (t->kind != StabsTypeKind::Struct && t->kind != StabsTypeKind::Union))
             return "";
@@ -956,6 +958,13 @@ public:
             [&](const StabsTypeField &f, const std::string &indent) {
                 if (skipField(f))
                     return;
+                if (fieldDeclOverride) {
+                    std::string overrideDecl = fieldDeclOverride(t->name, f.name);
+                    if (!overrideDecl.empty()) {
+                        out += indent + overrideDecl + ";\n";
+                        return;
+                    }
+                }
                 if (auto *anon = inlineAnonymousType(f.typeRef)) {
                     std::string kw2 = (anon->kind == StabsTypeKind::Union) ? "union" : "struct";
                     out += indent + kw2 + " {\n";

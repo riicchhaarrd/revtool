@@ -3093,6 +3093,20 @@ private:
                         int byteOff = f.bitOffset / 8;
                         int byteSize = f.bitSize / 8;
                         if (byteSize <= 0) byteSize = 4;
+                        std::string fieldDeclOverride;
+                        if (s_portMode)
+                            fieldDeclOverride = PortEmissionFixes::structFieldDeclOverride(t->name, f.name);
+                        if (!fieldDeclOverride.empty()) {
+                            if (byteOff > prevEnd) {
+                                int pad = byteOff - prevEnd;
+                                char pname[32];
+                                snprintf(pname, sizeof(pname), "    char _pad_%X[%d];\n", prevEnd, pad);
+                                out += pname;
+                            }
+                            out += "    " + QString::fromStdString(fieldDeclOverride) + ";\n";
+                            prevEnd = byteOff + byteSize;
+                            continue;
+                        }
                         if (t->name == "fileHandleData_t" &&
                             f.name == "handleFiles") {
                             if (byteOff > prevEnd) {
@@ -3160,7 +3174,13 @@ private:
             // Emit fields' types first
             for (auto &f : t->fields)
                 emitTypeDefsRecursive(out, types, f.typeRef, emitted, emittedNames, depth + 1);
-            out += QString::fromStdString(types.formatStructDef(ref)) + ";\n\n";
+            auto fieldDeclOverride =
+                [](const std::string &structName, const std::string &fieldName) -> std::string {
+                    if (!s_portMode)
+                        return "";
+                    return PortEmissionFixes::structFieldDeclOverride(structName, fieldName);
+                };
+            out += QString::fromStdString(types.formatStructDef(ref, fieldDeclOverride)) + ";\n\n";
             return;
         }
         if (t->kind == StabsTypeKind::Enum) {
