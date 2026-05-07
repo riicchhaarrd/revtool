@@ -812,9 +812,14 @@ static std::string formatStructCandidateDecl(const StructCandidate &cand,
             cursor = off;
         }
 
-        char line[160];
-        snprintf(line, sizeof(line), "    %s field_0x%X; /* %d refs */\n",
-                 typeForAccessSize(field.size).c_str(), off, field.refs);
+        char line[192];
+        if (field.size == 1 || field.size == 2 || field.size == 4 || field.size == 8) {
+            snprintf(line, sizeof(line), "    %s field_0x%X; /* %d refs */\n",
+                     typeForAccessSize(field.size).c_str(), off, field.refs);
+        } else {
+            snprintf(line, sizeof(line), "    unsigned char field_0x%X[%d]; /* %d refs */\n",
+                     off, std::max(1, field.size), field.refs);
+        }
         out += line;
         cursor = std::max(cursor, off + std::max(1, field.size));
     }
@@ -864,7 +869,8 @@ std::string inferStructCandidatesJson() {
                     op.mem.base == X86_REG_ESP ||
                     op.mem.base == X86_REG_EBP ||
                     op.mem.base == X86_REG_RSP ||
-                    op.mem.base == X86_REG_RBP)
+                    op.mem.base == X86_REG_RBP ||
+                    op.mem.base == X86_REG_RIP)
                     continue;
                 if (op.mem.disp < 0 || op.mem.disp > 0xFFFF)
                     continue;

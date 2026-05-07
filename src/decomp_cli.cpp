@@ -7,6 +7,7 @@
 //   --strings          List discovered strings
 //   --xref-string <q>  Find code references to strings containing <q>
 //   --disasm <addr>    Disassemble function at hex address
+//   --infer-structs    Infer struct candidates from memory access patterns
 //   -f <addr>          Decompile function at hex address
 //   -n <name>          Decompile function by name (substring match)
 //   -s <idx>           Decompile source file by index
@@ -662,6 +663,188 @@ static QString disassembleFunctionText(const MachOFile &mf,
     return out.isEmpty() ? QString("error: no instructions decoded\n") : out;
 }
 
+struct StructFieldCandidate {
+    int offset = 0;
+    int size = 0;
+    int refs = 0;
+};
+
+struct StructCandidate {
+    uint32_t functionAddr = 0;
+    std::string functionName;
+    std::string baseReg;
+    std::map<int, StructFieldCandidate> fields;
+    int refs = 0;
+};
+
+static QString typeForAccessSize(int size) {
+    switch (size) {
+    case 1: return "unsigned char";
+    case 2: return "unsigned short";
+    case 8: return "unsigned long long";
+    default: return "unsigned int";
+    }
+}
+
+static std::string sanitizeStructIdentifier(std::string s, const std::string &fallback) {
+    for (char &ch : s) {
+        unsigned char c = (unsigned char)ch;
+        if (!(std::isalnum(c) || ch == '_'))
+            ch = '_';
+    }
+    while (!s.empty() && s.front() == '_')
+        s.erase(s.begin());
+    if (s.empty() || !(std::isalpha((unsigned char)s[0]) || s[0] == '_'))
+        s = fallback;
+    for (char ch : s) {
+        unsigned char c = (unsigned char)ch;
+        if (!(std::isalnum(c) || ch == '_'))
+            return fallback;
+    }
+    return s;
+}
+
+static QString structCandidateName(const StructCandidate &cand) {
+    char fallback[64];
+    snprintf(fallback, sizeof(fallback), "sub_%08X_%s",
+             cand.functionAddr, cand.baseReg.c_str());
+    std::string baseName = sanitizeStructIdentifier(cand.functionName, fallback);
+    return QString::fromStdString("inferred_" + baseName + "_" + cand.baseReg + "_t");
+}
+
+static QString formatStructCandidateDecl(const StructCandidate &cand) {
+    QString name = structCandidateName(cand);
+    QString out = "struct " + name + " {\n";
+    int cursor = 0;
+    for (const auto &[off, field] : cand.fields) {
+        if (off > cursor) {
+            QString cursorHex = QString::number(cursor, 16).toUpper();
+            out += QString("    unsigned char pad_0x%1[%2];\n")
+                .arg(cursorHex)
+                .arg(off - cursor);
+            cursor = off;
+        }
+        QString offHex = QString::number(off, 16).toUpper();
+        if (field.size == 1 || field.size == 2 || field.size == 4 || field.size == 8) {
+            out += QString("    %1 field_0x%2; /* %3 refs */\n")
+                .arg(typeForAccessSize(field.size))
+                .arg(offHex)
+                .arg(field.refs);
+        } else {
+            out += QString("    unsigned char field_0x%1[%2]; /* %3 refs */\n")
+                .arg(offHex)
+                .arg(std::max(1, field.size))
+                .arg(field.refs);
+        }
+        cursor = std::max(cursor, off + std::max(1, field.size));
+    }
+    out += "};";
+    return out;
+}
+
+static std::vector<StructCandidate> inferStructCandidates(const MachOFile &mf,
+                                                          const std::vector<FunctionInfo> &funcs) {
+    csh cs = 0;
+    if (cs_open(CS_ARCH_X86, mf.capstoneMode(), &cs) != CS_ERR_OK)
+        return {};
+    cs_option(cs, CS_OPT_DETAIL, CS_OPT_ON);
+
+    std::vector<StructCandidate> candidates;
+    for (const auto &fn : funcs) {
+        const Section *sec = mf.sectionForAddress(fn.address);
+        if (!sec || !mf.isCodeSection(*sec) || sec->size == 0)
+            continue;
+        uint32_t codeOff = fn.address - sec->addr;
+        if (codeOff >= sec->size)
+            continue;
+        uint32_t size = functionSizeForDisassembly(mf, funcs, sec, fn.address);
+        if (size == 0)
+            continue;
+        const uint8_t *code = mf.bytesAt(sec->offset + codeOff, size);
+        if (!code)
+            continue;
+
+        cs_insn *insn = nullptr;
+        size_t count = cs_disasm(cs, code, size, fn.address, 0, &insn);
+        if (count == 0)
+            continue;
+
+        std::map<std::string, StructCandidate> byBase;
+        for (size_t i = 0; i < count; ++i) {
+            auto *detail = insn[i].detail;
+            if (!detail)
+                continue;
+            for (uint8_t oi = 0; oi < detail->x86.op_count; ++oi) {
+                const auto &op = detail->x86.operands[oi];
+                if (op.type != X86_OP_MEM)
+                    continue;
+                if (op.mem.base == X86_REG_INVALID ||
+                    op.mem.base == X86_REG_ESP ||
+                    op.mem.base == X86_REG_EBP ||
+                    op.mem.base == X86_REG_RSP ||
+                    op.mem.base == X86_REG_RBP ||
+                    op.mem.base == X86_REG_RIP)
+                    continue;
+                if (op.mem.disp < 0 || op.mem.disp > 0xFFFF)
+                    continue;
+
+                const char *reg = cs_reg_name(cs, op.mem.base);
+                if (!reg || !*reg)
+                    continue;
+                auto &cand = byBase[reg];
+                cand.functionAddr = fn.address;
+                cand.functionName = fn.name;
+                cand.baseReg = reg;
+                auto &field = cand.fields[(int)op.mem.disp];
+                field.offset = (int)op.mem.disp;
+                field.size = std::max<int>(field.size, op.size > 0 ? op.size : 4);
+                field.refs++;
+                cand.refs++;
+            }
+        }
+        cs_free(insn, count);
+
+        for (auto &[base, cand] : byBase) {
+            if (cand.fields.size() < 2 || cand.refs < 2)
+                continue;
+            candidates.push_back(std::move(cand));
+        }
+    }
+    cs_close(&cs);
+
+    std::sort(candidates.begin(), candidates.end(), [](const auto &a, const auto &b) {
+        if (a.fields.size() != b.fields.size()) return a.fields.size() > b.fields.size();
+        if (a.refs != b.refs) return a.refs > b.refs;
+        return a.functionAddr < b.functionAddr;
+    });
+    if (candidates.size() > 128)
+        candidates.resize(128);
+    return candidates;
+}
+
+static QJsonObject structCandidateToJson(const StructCandidate &cand) {
+    QJsonObject obj;
+    obj["name"] = structCandidateName(cand);
+    obj["function_address"] = (int)cand.functionAddr;
+    obj["function_address_hex"] = hex32q(cand.functionAddr);
+    obj["function_name"] = QString::fromStdString(cand.functionName);
+    obj["base_register"] = QString::fromStdString(cand.baseReg);
+    obj["field_count"] = (int)cand.fields.size();
+    obj["ref_count"] = cand.refs;
+    obj["c_decl"] = formatStructCandidateDecl(cand);
+    QJsonArray fields;
+    for (const auto &[off, field] : cand.fields) {
+        QJsonObject f;
+        f["offset"] = off;
+        f["offset_hex"] = QString("0x%1").arg(off, 0, 16).toUpper();
+        f["size"] = field.size;
+        f["refs"] = field.refs;
+        fields.append(f);
+    }
+    obj["fields"] = fields;
+    return obj;
+}
+
 static QJsonObject xrefToJson(const StringXrefInfo &hit) {
     QJsonObject obj;
     obj["function_address"] = (int)hit.functionAddr;
@@ -788,6 +971,7 @@ int main(int argc, char *argv[]) {
             "  --strings          List discovered strings\n"
             "  --xref-string <q>  Find functions/xrefs by string usage\n"
             "  --disasm <addr>    Disassemble function at hex address\n"
+            "  --infer-structs    Infer struct candidates from memory access patterns\n"
             "  -f <addr>          Decompile function at hex address\n"
             "  -n <name>          Decompile function by name (substring match)\n"
             "  -s <idx>           Decompile source file by index\n"
@@ -808,6 +992,7 @@ int main(int argc, char *argv[]) {
 
     const char *binPath = argv[1];
     bool doList = false, doFuncs = false, doAll = false, doStrings = false;
+    bool doInferStructs = false;
     bool doGcc = false, quiet = false, doTypes = false, jsonMode = false;
     uint32_t srcOfAddr = 0;
     uint32_t disasmAddr = 0;
@@ -824,6 +1009,7 @@ int main(int argc, char *argv[]) {
         else if (strcmp(argv[i], "-F") == 0) doFuncs = true;
         else if (strcmp(argv[i], "-a") == 0) doAll = true;
         else if (strcmp(argv[i], "--strings") == 0) doStrings = true;
+        else if (strcmp(argv[i], "--infer-structs") == 0) doInferStructs = true;
         else if (strcmp(argv[i], "--xref-string") == 0 && i + 1 < argc)
             xrefString = argv[++i];
         else if (strcmp(argv[i], "--json") == 0) jsonMode = true;
@@ -996,6 +1182,25 @@ int main(int argc, char *argv[]) {
             printJson(obj);
         } else {
             printf("%s", asmText.toUtf8().constData());
+        }
+        return 0;
+    }
+
+    if (doInferStructs) {
+        std::vector<StructCandidate> candidates = inferStructCandidates(mf, funcs);
+        if (jsonMode) {
+            QJsonObject obj = makeMeta("infer_structs");
+            QJsonArray arr;
+            for (const auto &cand : candidates)
+                arr.append(structCandidateToJson(cand));
+            obj["candidates"] = arr;
+            printJson(obj);
+        } else {
+            for (const auto &cand : candidates) {
+                printf("/* inferred: %s / %s */\n",
+                       cand.functionName.c_str(), cand.baseReg.c_str());
+                printf("%s\n\n", formatStructCandidateDecl(cand).toUtf8().constData());
+            }
         }
         return 0;
     }
@@ -1177,7 +1382,7 @@ int main(int argc, char *argv[]) {
         }
         return 0;
     } else {
-        return fail(1, "No action specified. Use -l, -F, --strings, --xref-string, --disasm, -f, -n, -s, or -a");
+        return fail(1, "No action specified. Use -l, -F, --strings, --xref-string, --disasm, --infer-structs, -f, -n, -s, or -a");
     }
 
     if (!quiet)
