@@ -6,6 +6,7 @@
 //   -F                 List functions
 //   --strings          List discovered strings
 //   --xref-string <q>  Find code references to strings containing <q>
+//   --disasm <addr>    Disassemble function at hex address
 //   -f <addr>          Decompile function at hex address
 //   -n <name>          Decompile function by name (substring match)
 //   -s <idx>           Decompile source file by index
@@ -583,6 +584,84 @@ static std::vector<StringXrefInfo> findStringXrefs(const MachOFile &mf,
     return out;
 }
 
+static uint32_t functionSizeForDisassembly(const MachOFile &mf,
+                                           const std::vector<FunctionInfo> &funcs,
+                                           const Section *sec,
+                                           uint32_t addr) {
+    if (!sec || addr < sec->addr || addr >= sec->addr + sec->size)
+        return 0;
+
+    uint32_t maxSize = sec->size - (addr - sec->addr);
+    uint32_t size = 0;
+    for (const auto &fn : funcs) {
+        if (fn.address == addr && fn.size > 0) {
+            size = fn.size;
+            break;
+        }
+    }
+    if (size == 0) {
+        uint32_t next = 0;
+        for (const auto &fn : funcs) {
+            if (fn.address > addr && mf.sectionForAddress(fn.address) == sec &&
+                (!next || fn.address < next))
+                next = fn.address;
+        }
+        if (next > addr)
+            size = next - addr;
+    }
+    if (size == 0 || size > maxSize)
+        size = maxSize;
+    if (size > 0x4000)
+        size = 0x4000;
+    return size;
+}
+
+static QString disassembleFunctionText(const MachOFile &mf,
+                                       const std::vector<FunctionInfo> &funcs,
+                                       uint32_t addr) {
+    const Section *sec = mf.sectionForAddress(addr);
+    if (!sec || !mf.isCodeSection(*sec))
+        return "error: address is not in executable code\n";
+
+    uint32_t codeOff = addr - sec->addr;
+    if (codeOff >= sec->size)
+        return "error: function bytes unavailable\n";
+    uint32_t size = functionSizeForDisassembly(mf, funcs, sec, addr);
+    if (size == 0)
+        return "error: empty function\n";
+    const uint8_t *code = mf.bytesAt(sec->offset + codeOff, size);
+    if (!code)
+        return "error: function bytes unavailable\n";
+
+    csh cs = 0;
+    if (cs_open(CS_ARCH_X86, mf.capstoneMode(), &cs) != CS_ERR_OK)
+        return "error: capstone unavailable\n";
+    cs_option(cs, CS_OPT_SYNTAX, CS_OPT_SYNTAX_INTEL);
+
+    cs_insn *insn = nullptr;
+    size_t count = cs_disasm(cs, code, size, addr, 0, &insn);
+    QString out;
+    for (size_t i = 0; i < count; ++i) {
+        char bytes[64] = {0};
+        size_t bytePos = 0;
+        for (size_t b = 0; b < insn[i].size && b < 10; ++b) {
+            int n = snprintf(bytes + bytePos, sizeof(bytes) - bytePos,
+                             b ? " %02X" : "%02X", insn[i].bytes[b]);
+            if (n <= 0 || (size_t)n >= sizeof(bytes) - bytePos)
+                break;
+            bytePos += (size_t)n;
+        }
+        char line[192];
+        snprintf(line, sizeof(line), "%08llX  %-30s  %-8s %s\n",
+                 (unsigned long long)insn[i].address, bytes,
+                 insn[i].mnemonic, insn[i].op_str);
+        out += QString::fromUtf8(line);
+    }
+    cs_free(insn, count);
+    cs_close(&cs);
+    return out.isEmpty() ? QString("error: no instructions decoded\n") : out;
+}
+
 static QJsonObject xrefToJson(const StringXrefInfo &hit) {
     QJsonObject obj;
     obj["function_address"] = (int)hit.functionAddr;
@@ -708,6 +787,7 @@ int main(int argc, char *argv[]) {
             "  -F                 List functions\n"
             "  --strings          List discovered strings\n"
             "  --xref-string <q>  Find functions/xrefs by string usage\n"
+            "  --disasm <addr>    Disassemble function at hex address\n"
             "  -f <addr>          Decompile function at hex address\n"
             "  -n <name>          Decompile function by name (substring match)\n"
             "  -s <idx>           Decompile source file by index\n"
@@ -730,6 +810,7 @@ int main(int argc, char *argv[]) {
     bool doList = false, doFuncs = false, doAll = false, doStrings = false;
     bool doGcc = false, quiet = false, doTypes = false, jsonMode = false;
     uint32_t srcOfAddr = 0;
+    uint32_t disasmAddr = 0;
     uint32_t funcAddr = 0;
     int srcIdx = -1;
     const char *funcName = nullptr;
@@ -754,6 +835,8 @@ int main(int argc, char *argv[]) {
         else if (strcmp(argv[i], "--types") == 0) doTypes = true;
         else if (strcmp(argv[i], "--srcof") == 0 && i + 1 < argc)
             srcOfAddr = strtoul(argv[++i], nullptr, 16);
+        else if (strcmp(argv[i], "--disasm") == 0 && i + 1 < argc)
+            disasmAddr = strtoul(argv[++i], nullptr, 16);
         else if (strcmp(argv[i], "-q") == 0) quiet = true;
         else if (strcmp(argv[i], "-f") == 0 && i + 1 < argc)
             funcAddr = strtoul(argv[++i], nullptr, 16);
@@ -897,6 +980,22 @@ int main(int argc, char *argv[]) {
                        hit.xrefAddr, hit.stringAddr, hit.stringValue.c_str(),
                        hit.mnemonic.c_str(), hit.operands.c_str());
             }
+        }
+        return 0;
+    }
+
+    if (disasmAddr) {
+        QString asmText = disassembleFunctionText(mf, funcs, disasmAddr);
+        if (asmText.startsWith("error:"))
+            return fail(1, asmText.trimmed());
+        if (jsonMode) {
+            QJsonObject obj = makeMeta("disassemble_function");
+            obj["function_address"] = (int)disasmAddr;
+            obj["function_address_hex"] = hex32q(disasmAddr);
+            obj["assembly"] = asmText;
+            printJson(obj);
+        } else {
+            printf("%s", asmText.toUtf8().constData());
         }
         return 0;
     }
@@ -1078,7 +1177,7 @@ int main(int argc, char *argv[]) {
         }
         return 0;
     } else {
-        return fail(1, "No action specified. Use -l, -F, --strings, --xref-string, -f, -n, -s, or -a");
+        return fail(1, "No action specified. Use -l, -F, --strings, --xref-string, --disasm, -f, -n, -s, or -a");
     }
 
     if (!quiet)

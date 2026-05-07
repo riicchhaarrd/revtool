@@ -71,6 +71,7 @@ Useful options:
 -F                 List functions
 --strings          List discovered strings
 --xref-string <q>  Find code references to strings containing <q>
+--disasm <addr>    Disassemble function at a hex address
 -f <addr>          Decompile function at a hex address
 -n <name>          Decompile function by name substring
 -s <idx>           Decompile source file by index
@@ -85,6 +86,7 @@ Examples:
 ```bash
 ./build/decomp sample.bin -F
 ./build/decomp sample.bin --strings --json
+./build/decomp sample.bin --disasm 0x000027B6
 ./build/decomp sample.bin -f 0x000027B6
 ./build/decomp sample.bin -n main --gcc
 ./build/decomp sample.bin -F --project sample.bin.revtool.json
