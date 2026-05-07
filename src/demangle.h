@@ -1,6 +1,7 @@
 #pragma once
 #include <string>
 #include <cstdlib>
+#include <cctype>
 #include <cxxabi.h>
 
 inline std::string demangle(const std::string &name) {
@@ -59,4 +60,50 @@ inline std::string demangleNameOnly(const std::string &name) {
         }
     }
     return full;
+}
+
+inline bool isCIdentifierName(const std::string &name) {
+    if (name.empty()) return false;
+    if (!std::isalpha((unsigned char)name[0]) && name[0] != '_')
+        return false;
+    for (char c : name)
+        if (!std::isalnum((unsigned char)c) && c != '_')
+            return false;
+    return true;
+}
+
+inline std::string cIdentifierFromName(const std::string &name) {
+    std::string out = name;
+
+    auto paren = out.find('(');
+    auto scope = out.rfind("::");
+    if (paren != std::string::npos && scope != std::string::npos &&
+        paren < scope && scope + 2 < out.size())
+        out = out.substr(scope + 2);
+
+    size_t pos = 0;
+    while ((pos = out.find("::", pos)) != std::string::npos) {
+        out.replace(pos, 2, "__");
+        pos += 2;
+    }
+    pos = 0;
+    while ((pos = out.find(" ", pos)) != std::string::npos)
+        out.replace(pos, 1, "_");
+    pos = 0;
+    while ((pos = out.find("~", pos)) != std::string::npos) {
+        out.replace(pos, 1, "dtor_");
+        pos += 5;
+    }
+    pos = 0;
+    while ((pos = out.find("&", pos)) != std::string::npos)
+        out.erase(pos, 1);
+
+    for (auto &c : out)
+        if (!std::isalnum((unsigned char)c) && c != '_')
+            c = '_';
+    if (out.empty())
+        return "_";
+    if (std::isdigit((unsigned char)out[0]))
+        out = "_" + out;
+    return out;
 }

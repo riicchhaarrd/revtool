@@ -1172,6 +1172,33 @@ private:
         return dwarfStringFromValue(unit, it->second, debugStr, debugStrOffsets);
     }
 
+    std::string dwarfLinkageNameAttr(const DwarfUnit &unit,
+                                     const std::map<uint64_t, DwarfValue> &attrs,
+                                     const ELFSectionRecord *debugStr,
+                                     const ELFSectionRecord *debugStrOffsets) const {
+        std::string linkage = dwarfStringAttr(unit, attrs, DW_AT_linkage_name,
+                                              debugStr, debugStrOffsets);
+        if (linkage.empty())
+            linkage = dwarfStringAttr(unit, attrs, DW_AT_MIPS_linkage_name,
+                                      debugStr, debugStrOffsets);
+        return linkage;
+    }
+
+    std::string dwarfVariableName(const DwarfUnit &unit,
+                                  const std::map<uint64_t, DwarfValue> &attrs,
+                                  const ELFSectionRecord *debugStr,
+                                  const ELFSectionRecord *debugStrOffsets) const {
+        std::string linkage = dwarfLinkageNameAttr(unit, attrs,
+                                                   debugStr, debugStrOffsets);
+        if (!linkage.empty()) {
+            std::string display = symbolDisplayName(linkage);
+            if (display.empty())
+                display = linkage;
+            return isCIdentifierName(display) ? display : cIdentifierFromName(display);
+        }
+        return dwarfStringAttr(unit, attrs, DW_AT_name, debugStr, debugStrOffsets);
+    }
+
     uint64_t dwarfAddressFromIndex(const DwarfUnit &unit, uint64_t index,
                                    const ELFSectionRecord *debugAddr) const {
         if (!debugAddr || unit.addressSize == 0 || unit.addressSize > 8)
@@ -2136,11 +2163,8 @@ private:
             ? dwarfHighPC(lowPc, highIt->second, unit, debugAddr) : 0;
         if (highPc && highPc <= lowPc) highPc = 0;
 
-        std::string rawName = dwarfStringAttr(unit, attrs, DW_AT_linkage_name,
-                                              debugStr, debugStrOffsets);
-        if (rawName.empty())
-            rawName = dwarfStringAttr(unit, attrs, DW_AT_MIPS_linkage_name,
-                                      debugStr, debugStrOffsets);
+        std::string rawName = dwarfLinkageNameAttr(unit, attrs,
+                                                   debugStr, debugStrOffsets);
         if (rawName.empty())
             rawName = dwarfStringAttr(unit, attrs, DW_AT_name,
                                       debugStr, debugStrOffsets);
@@ -2358,8 +2382,8 @@ private:
                     }
                 }
             } else if (abbr.tag == DW_TAG_variable) {
-                std::string vname = dwarfStringAttr(unit, attrs, DW_AT_name,
-                                                    debugStr, debugStrOffsets);
+                std::string vname = dwarfVariableName(unit, attrs,
+                                                      debugStr, debugStrOffsets);
                 if (!vname.empty()) {
                     TypeRef vtype = dwarfTypeAttr(unit, attrs, DW_AT_type, typeRefs);
                     auto lit = attrs.find(DW_AT_location);
