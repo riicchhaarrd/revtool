@@ -1622,7 +1622,7 @@ private:
             field.bitSize = unit.addressSize * 8;
         }
 
-        if (!field.name.empty())
+        if (!field.name.empty() || field.typeRef != NullType)
             ti->fields.push_back(std::move(field));
     }
 

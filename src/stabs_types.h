@@ -691,6 +691,22 @@ public:
             return nullptr;
         int bitTarget = byteOffset * 8;
         for (auto &f : t->fields) {
+            if (!f.name.empty())
+                continue;
+            auto *ft = resolveType(f.typeRef);
+            if (!ft || (ft->kind != StabsTypeKind::Struct &&
+                        ft->kind != StabsTypeKind::Union) ||
+                ft->fields.empty())
+                continue;
+            int sz = fieldBitSize(f);
+            if (sz > 0 && bitTarget >= f.bitOffset && bitTarget < f.bitOffset + sz) {
+                const StabsTypeField *sub =
+                    findFieldAtOffset(f.typeRef, byteOffset - f.bitOffset / 8);
+                if (sub)
+                    return sub;
+            }
+        }
+        for (auto &f : t->fields) {
             if (f.bitOffset == bitTarget) return &f;
             if (f.bitOffset / 8 == byteOffset) return &f;
         }
@@ -711,6 +727,24 @@ public:
             return "";
         int bitTarget = byteOffset * 8;
         (void)debug;
+
+        for (auto &f : t->fields) {
+            if (!f.name.empty())
+                continue;
+            auto *ft = resolveType(f.typeRef);
+            if (!ft || (ft->kind != StabsTypeKind::Struct &&
+                        ft->kind != StabsTypeKind::Union) ||
+                ft->fields.empty())
+                continue;
+            int fBitSize = fieldBitSize(f);
+            if (fBitSize > 0 && bitTarget >= f.bitOffset &&
+                bitTarget < f.bitOffset + fBitSize) {
+                std::string sub = formatFieldAccess(
+                    f.typeRef, byteOffset - f.bitOffset / 8, debug, scalarAccess);
+                if (!sub.empty())
+                    return sub;
+            }
+        }
 
         // Check "inside larger field" FIRST — prefer array element access over
         // overlapping field exact matches
@@ -1192,7 +1226,7 @@ public:
             auto *ft = resolveType(typeRef);
             bool isAnon = false;
             if (ft && (ft->kind == StabsTypeKind::Struct || ft->kind == StabsTypeKind::Union))
-                isAnon = ft->name.find("$_") == 0;
+                isAnon = ft->name.empty() || ft->name.find("$_") == 0;
             if (!isAnon) {
                 auto *rawT = getType(typeRef);
                 if (rawT && rawT->kind == StabsTypeKind::ForwardRef &&
@@ -1209,8 +1243,6 @@ public:
         };
         std::function<void(const StabsTypeField &, const std::string &)> emitField =
             [&](const StabsTypeField &f, const std::string &indent) {
-                if (skipField(f))
-                    return;
                 if (fieldDeclOverride) {
                     std::string overrideDecl = fieldDeclOverride(t->name, f.name);
                     if (!overrideDecl.empty()) {
@@ -1223,9 +1255,14 @@ public:
                     out += indent + kw2 + " {\n";
                     for (auto &sf : anon->fields)
                         emitField(sf, indent + "    ");
-                    out += indent + "} " + f.name + ";\n";
+                    out += indent + "}";
+                    if (!f.name.empty())
+                        out += " " + f.name;
+                    out += ";\n";
                     return;
                 }
+                if (skipField(f))
+                    return;
                 auto *rawT = getType(f.typeRef);
                 if (rawT && rawT->kind == StabsTypeKind::ForwardRef &&
                     rawT->forwardTag.find("$_") == 0) {
