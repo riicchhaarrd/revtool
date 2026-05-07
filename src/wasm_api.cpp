@@ -811,6 +811,14 @@ static std::string formatStructCandidateDecl(const StructCandidate &cand,
             out += pad;
             cursor = off;
         }
+        if (off < cursor) {
+            char overlap[128];
+            snprintf(overlap, sizeof(overlap),
+                     "    /* overlapping access at 0x%X: size %d, %d refs */\n",
+                     off, std::max(1, field.size), field.refs);
+            out += overlap;
+            continue;
+        }
 
         char line[192];
         if (field.size == 1 || field.size == 2 || field.size == 4 || field.size == 8) {

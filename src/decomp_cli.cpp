@@ -725,6 +725,13 @@ static QString formatStructCandidateDecl(const StructCandidate &cand) {
             cursor = off;
         }
         QString offHex = QString::number(off, 16).toUpper();
+        if (off < cursor) {
+            out += QString("    /* overlapping access at 0x%1: size %2, %3 refs */\n")
+                .arg(offHex)
+                .arg(std::max(1, field.size))
+                .arg(field.refs);
+            continue;
+        }
         if (field.size == 1 || field.size == 2 || field.size == 4 || field.size == 8) {
             out += QString("    %1 field_0x%2; /* %3 refs */\n")
                 .arg(typeForAccessSize(field.size))
