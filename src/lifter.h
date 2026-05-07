@@ -497,6 +497,7 @@ public:
         m_blockExitState.clear();
         m_espArgs.clear();
         m_pushArgs.clear();
+        m_tailStackArgs.clear();
         m_fpuStack.clear();
         m_lastFpuTop = -1;
         m_regParamInjected.clear();
@@ -1766,6 +1767,13 @@ private:
     std::vector<std::unique_ptr<IRExpr>>   m_pushArgs;
     std::unique_ptr<IRExpr>                m_fpTableIndex; // index for fptable_ calls
 
+    struct TailStackArg {
+        std::unique_ptr<IRExpr> expr;
+        int blockId = -1;
+        size_t stmtIndex = 0;
+    };
+    std::map<int, TailStackArg> m_tailStackArgs;
+
     // FPU stack: tracks temp IDs for ST0..STn (index 0 = top of stack)
     std::vector<int> m_fpuStack;
     int m_lastFpuTop = -1;  // Last temp that was at ST0 before a pop (for float return heuristic)
@@ -2250,6 +2258,8 @@ private:
             if (d > 0) {
                 auto it = m_paramByOffset.find(d);
                 if (it != m_paramByOffset.end()) {
+                    size_t stmtIndex = bb.stmts.size();
+                    rememberTailStackArg(d, val.get(), bb.id, stmtIndex);
                     bb.stmts.push_back(IRStmt::mkVarSet(it->second->name, std::move(val), it->second->typeRef));
                     return;
                 }
@@ -2271,6 +2281,9 @@ private:
             }
             auto [name, byteOffset] = syntheticStackSlot(d);
             if (byteOffset == 0 && storeSize == 4) {
+                size_t stmtIndex = bb.stmts.size();
+                if (d > 0)
+                    rememberTailStackArg(d, val.get(), bb.id, stmtIndex);
                 bb.stmts.push_back(IRStmt::mkVarSet(name, std::move(val)));
             } else {
                 bb.stmts.push_back(IRStmt::mkStore(
@@ -2573,6 +2586,107 @@ private:
         for (size_t i = 0; i < a->kids.size(); ++i)
             if (!irExprEqual(a->kids[i].get(), b->kids[i].get())) return false;
         return true;
+    }
+
+    int abiArgWords(TypeRef ref) const {
+        int size = 4;
+        if (ref != NullType) {
+            auto *t = m_types.resolveType(ref);
+            if (t) {
+                if (t->kind == StabsTypeKind::Void)
+                    return 0;
+                if (t->sizeBytes > 0)
+                    size = t->sizeBytes;
+            }
+        }
+        return std::max(1, (size + 3) / 4);
+    }
+
+    int stackWordsAfterRegparm(const StabsFunction &callee, int regArgs) const {
+        int words = 0;
+        for (int i = regArgs; i < (int)callee.params.size(); ++i)
+            words += abiArgWords(callee.params[(size_t)i].typeRef);
+        return words;
+    }
+
+    int inferRegparmArgCount(const StabsFunction &callee, int capturedStackWords) const {
+        int maxRegs = std::min(3, (int)callee.params.size());
+        for (int r = maxRegs; r >= 0; --r) {
+            if (stackWordsAfterRegparm(callee, r) == capturedStackWords)
+                return r;
+        }
+
+        // Fallback for incomplete prototypes or missed stack writes: preserve the
+        // old scalar count heuristic when ABI-width matching cannot decide.
+        return std::min(3, std::max(0, (int)callee.params.size() - capturedStackWords));
+    }
+
+    std::vector<std::unique_ptr<IRExpr>>
+    collectRegparmArgs(const StabsFunction &callee, int capturedStackWords) {
+        static const x86_reg regparmOrder[] = {X86_REG_EAX, X86_REG_EDX, X86_REG_ECX};
+        int nRegArgs = inferRegparmArgCount(callee, capturedStackWords);
+        std::vector<std::unique_ptr<IRExpr>> regArgs;
+        for (int ri = 0; ri < nRegArgs; ++ri) {
+            auto it = m_regTemps.find(regparmOrder[ri]);
+            if (it == m_regTemps.end())
+                break;
+            regArgs.push_back(IRExpr::mkTemp(it->second, m_func->tempType(it->second)));
+        }
+        if ((int)regArgs.size() != nRegArgs)
+            regArgs.clear();
+        return regArgs;
+    }
+
+    void prependRegparmArgs(const StabsFunction &callee,
+                            std::vector<std::unique_ptr<IRExpr>> &args) {
+        auto regArgs = collectRegparmArgs(callee, (int)args.size());
+        for (int ri = (int)regArgs.size() - 1; ri >= 0; --ri)
+            args.insert(args.begin(), std::move(regArgs[(size_t)ri]));
+    }
+
+    void rememberTailStackArg(int offset, const IRExpr *expr,
+                              int blockId, size_t stmtIndex) {
+        if (!expr)
+            return;
+        TailStackArg arg;
+        arg.expr = expr->clone();
+        arg.blockId = blockId;
+        arg.stmtIndex = stmtIndex;
+        m_tailStackArgs[offset] = std::move(arg);
+    }
+
+    void removeTailStackSetupStores(const std::set<int> &offsets) {
+        std::map<int, std::vector<size_t>> byBlock;
+        for (int off : offsets) {
+            auto it = m_tailStackArgs.find(off);
+            if (it == m_tailStackArgs.end() || it->second.blockId < 0)
+                continue;
+            byBlock[it->second.blockId].push_back(it->second.stmtIndex);
+        }
+        for (auto &[blockId, indices] : byBlock) {
+            if (!m_func || blockId < 0 || blockId >= (int)m_func->blocks.size())
+                continue;
+            auto &stmts = m_func->blocks[(size_t)blockId].stmts;
+            std::sort(indices.begin(), indices.end());
+            indices.erase(std::unique(indices.begin(), indices.end()), indices.end());
+            for (auto rit = indices.rbegin(); rit != indices.rend(); ++rit) {
+                if (*rit < stmts.size())
+                    stmts.erase(stmts.begin() + (ptrdiff_t)*rit);
+            }
+        }
+    }
+
+    std::vector<std::unique_ptr<IRExpr>>
+    collectTailStackArgs(std::set<int> *usedOffsets = nullptr) const {
+        std::vector<std::unique_ptr<IRExpr>> args;
+        for (auto &kv : m_tailStackArgs) {
+            if (!kv.second.expr)
+                continue;
+            if (usedOffsets)
+                usedOffsets->insert(kv.first);
+            args.push_back(kv.second.expr->clone());
+        }
+        return args;
     }
 
     std::vector<std::unique_ptr<IRExpr>>
@@ -3221,11 +3335,35 @@ private:
                 if (!callee) callee = m_mf.stabsFunctionByName(target);
                 if (callee) retType = callee->returnType;
                 // Build tail call: return target(args)
-                // Use callee's param count if known; otherwise reuse caller's params
                 std::vector<std::unique_ptr<IRExpr>> args;
-                int nCalleeParams = callee ? (int)callee->params.size() : (int)func.params.size();
-                for (int pi = 0; pi < std::min(nCalleeParams, (int)func.params.size()); ++pi)
-                    args.push_back(IRExpr::mkVar(func.params[pi].name, func.params[pi].typeRef));
+                bool recoveredTailArgs = false;
+                std::set<int> usedTailOffsets;
+                auto stackArgs = collectTailStackArgs(&usedTailOffsets);
+                if (callee && callee->address && isCalleeRegparm(callee->address)) {
+                    auto regArgs = collectRegparmArgs(*callee, (int)stackArgs.size());
+                    if (!regArgs.empty() || !stackArgs.empty() || callee->params.empty()) {
+                        for (auto &arg : regArgs)
+                            args.push_back(std::move(arg));
+                        for (auto &arg : stackArgs)
+                            args.push_back(std::move(arg));
+                        recoveredTailArgs = true;
+                    }
+                } else if (!stackArgs.empty()) {
+                    for (auto &arg : stackArgs)
+                        args.push_back(std::move(arg));
+                    recoveredTailArgs = true;
+                }
+
+                if (recoveredTailArgs) {
+                    removeTailStackSetupStores(usedTailOffsets);
+                } else {
+                    // Fallback for unresolved tail calls: reuse caller params by
+                    // position, which is the best information available here.
+                    int nCalleeParams = callee ? (int)callee->params.size() : (int)func.params.size();
+                    for (int pi = 0; pi < std::min(nCalleeParams, (int)func.params.size()); ++pi)
+                        args.push_back(IRExpr::mkVar(func.params[pi].name, func.params[pi].typeRef));
+                }
+                args = consolidateStructByValueArgs(target, std::move(args));
                 auto callExpr = IRExpr::mkCall(target, std::move(args), retType);
                 bb.stmts.push_back(IRStmt::mkReturn(std::move(callExpr)));
             }
@@ -3479,24 +3617,7 @@ private:
                 const StabsFunction *callee = m_mf.stabsFunctionByName(target);
                 if (callee && callee->address && isCalleeRegparm(callee->address) &&
                     !callee->params.empty()) {
-                    static const x86_reg regparmOrder[] = {X86_REG_EAX, X86_REG_EDX, X86_REG_ECX};
-                    int nStackArgs = (int)args.size();
-                    int nRegArgs = std::min(3, (int)callee->params.size() - nStackArgs);
-                    if (nRegArgs > 0) {
-                        std::vector<std::unique_ptr<IRExpr>> regArgs;
-                        for (int ri = 0; ri < nRegArgs; ++ri) {
-                            auto it = m_regTemps.find(regparmOrder[ri]);
-                            if (it != m_regTemps.end())
-                                regArgs.push_back(IRExpr::mkTemp(it->second,
-                                    m_func->tempType(it->second)));
-                            else
-                                break;
-                        }
-                        if ((int)regArgs.size() == nRegArgs) {
-                            for (int ri = nRegArgs - 1; ri >= 0; --ri)
-                                args.insert(args.begin(), std::move(regArgs[ri]));
-                        }
-                    }
+                    prependRegparmArgs(*callee, args);
                 }
             }
             m_espArgs.clear();

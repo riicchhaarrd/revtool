@@ -2310,6 +2310,24 @@ public:
             cleaned = cl.join('\n');
         }
         QStringList lines = cleaned.split('\n');
+        if (s_portMode) {
+            for (QString &line : lines) {
+                QString trimmed = line.trimmed();
+                QString marker = " = *(int *)(&";
+                int eq = trimmed.indexOf(marker);
+                if (eq <= 0 || !trimmed.endsWith(';') ||
+                    trimmed.startsWith("*(int *)(&"))
+                    continue;
+                QString lhs = trimmed.left(eq).trimmed();
+                if (!lhs.contains("->") && !lhs.contains('.') && !lhs.contains('['))
+                    continue;
+                int indentLen = 0;
+                while (indentLen < line.size() && line[indentLen].isSpace())
+                    indentLen++;
+                QString indent = line.left(indentLen);
+                line = indent + "*(int *)(&" + lhs + ")" + trimmed.mid(eq);
+            }
+        }
         // Pass 1: Remove empty if blocks
         QStringList pass1;
         for (int i = 0; i < lines.size(); ++i) {
@@ -3498,6 +3516,35 @@ private:
                     }
                     return false;
                 };
+            auto fixedLocalArraySize =
+                [&](const std::string &name) -> int {
+                    int maxIndex = -1;
+                    std::string prefix = name + "[";
+                    for (auto &bb2 : m_func.blocks) {
+                        for (auto &s2 : bb2.stmts) {
+                            if (s2.kind != IRStmtKind::VarSet)
+                                continue;
+                            const std::string &dest = s2.destVar;
+                            if (dest.rfind(prefix, 0) != 0)
+                                continue;
+                            size_t close = dest.find(']', prefix.size());
+                            if (close == std::string::npos || close == prefix.size())
+                                continue;
+                            bool numeric = true;
+                            int idx = 0;
+                            for (size_t i = prefix.size(); i < close; ++i) {
+                                if (!std::isdigit((unsigned char)dest[i])) {
+                                    numeric = false;
+                                    break;
+                                }
+                                idx = idx * 10 + (dest[i] - '0');
+                            }
+                            if (numeric)
+                                maxIndex = std::max(maxIndex, idx);
+                        }
+                    }
+                    return maxIndex >= 0 ? maxIndex + 1 : 0;
+                };
             for (auto &l : m_func.locals) {
                 if (l.name.empty() || declared.count(l.name) || paramNames.count(l.name)) continue;
                 // Skip unused locals in port mode — dead declaration.
@@ -3700,8 +3747,16 @@ private:
                 if (s_portMode && decl.find('*') != std::string::npos &&
                     scalarOnlyLocal)
                     decl = "int " + l.name;
-                if (s_portMode && m_indexVars.count(l.name))
-                    decl = "int " + l.name;
+                if (s_portMode && m_indexVars.count(l.name)) {
+                    auto *idxLocalType = m_types.resolveType(l.typeRef);
+                    if (!idxLocalType || idxLocalType->kind != StabsTypeKind::Array)
+                        decl = "int " + l.name;
+                }
+                if (s_portMode && decl == "int " + l.name) {
+                    int fixedSize = fixedLocalArraySize(l.name);
+                    if (fixedSize > 1)
+                        decl = "int " + l.name + "[" + std::to_string(fixedSize) + "]";
+                }
                 // Override int → char* for locals used as pointers (non-port mode only)
                 if (!s_portMode && m_pointerVars.count(l.name) && decl == "int " + l.name) {
                     bool usedAsSubscript = false;
@@ -5109,6 +5164,8 @@ private:
                 bool objectLikeExpr =
                     expr->op == IROp::Var || expr->op == IROp::Temp ||
                     expr->op == IROp::Field || expr->op == IROp::Load;
+                if (ref == NullType && expr->op == IROp::Field)
+                    ref = exprType(const_cast<IRExpr *>(expr));
                 if (ref == NullType && expr->typeRef != NullType && objectLikeExpr)
                     ref = expr->typeRef;
                 if (ref == NullType && expr->op == IROp::Var)
@@ -8225,6 +8282,14 @@ private:
                         "*(int *)(&" + lhs + ") = " + rhsStore) + ";\n";
                     break;
                 }
+                if (s_portMode && rhs.rfind("*(int *)(&", 0) == 0 &&
+                    (lhs.find("->") != std::string::npos ||
+                     lhs.find('.') != std::string::npos ||
+                     lhs.find('[') != std::string::npos)) {
+                    out += pad(indent) + QString::fromStdString(
+                        "*(int *)(&" + lhs + ") = " + rhs) + ";\n";
+                    break;
+                }
                 out += pad(indent) + QString::fromStdString(lhs + " = " + rhs) + ";\n";
                 break;
             }
@@ -8355,6 +8420,15 @@ private:
                         // Check if the field type is a large struct/union — if so,
                         // a 4-byte store to it is wrong. Fall back to pointer arithmetic.
                         bool fieldIsLargeStruct = false;
+                        TypeRef directFieldType = a->typeRef != NullType ? a->typeRef : exprType(a);
+                        if (directFieldType != NullType) {
+                            auto *ft = m_types.resolveType(directFieldType);
+                            if (ft && (ft->kind == StabsTypeKind::Struct ||
+                                       ft->kind == StabsTypeKind::Union ||
+                                       ft->kind == StabsTypeKind::Array) &&
+                                ft->sizeBytes > 0 && stmt.storeSize < (int)ft->sizeBytes)
+                                fieldIsLargeStruct = true;
+                        }
                         if (!a->name.empty() && !a->kids.empty()) {
                             TypeRef bt = exprType(a->kids[0].get());
                             if (bt == NullType && a->kids[0]->op == IROp::Var) {
@@ -8389,10 +8463,26 @@ private:
                             out += pad(indent) + QString::fromStdString(buf) + ";\n";
                         } else {
                             std::string lhs = emitExpr(a);
-                            if (s_portMode && aggregateObjectType(lhs, a) != NullType &&
-                                lhs.find_first_of("()+-*/&[] .") == std::string::npos)
+                            TypeRef lhsAgg = s_portMode ? aggregateObjectType(lhs, a) : NullType;
+                            auto *lhsAggInfo = lhsAgg != NullType ? m_types.resolveType(lhsAgg) : nullptr;
+                            if (s_portMode && lhsAggInfo &&
+                                (lhsAggInfo->kind == StabsTypeKind::Struct ||
+                                 lhsAggInfo->kind == StabsTypeKind::Union ||
+                                 lhsAggInfo->kind == StabsTypeKind::Array) &&
+                                lhsAggInfo->sizeBytes > 0 &&
+                                stmt.storeSize < (int)lhsAggInfo->sizeBytes)
                                 out += pad(indent) + QString::fromStdString(
                                     "*(" + storeCast + " *)(&" + lhs + ") = " + val) + ";\n";
+                            else if (s_portMode && lhsAgg != NullType &&
+                                     lhs.find_first_of("()+-*/&[] .") == std::string::npos)
+                                out += pad(indent) + QString::fromStdString(
+                                    "*(" + storeCast + " *)(&" + lhs + ") = " + val) + ";\n";
+                            else if (s_portMode && stmt.storeSize == 4 &&
+                                     val.rfind("*(int *)(&", 0) == 0 &&
+                                     (lhs.find("->") != std::string::npos ||
+                                      lhs.find('.') != std::string::npos))
+                                out += pad(indent) + QString::fromStdString(
+                                    "*(int *)(&" + lhs + ") = " + val) + ";\n";
                             else
                                 out += pad(indent) + QString::fromStdString(lhs + " = " + val) + ";\n";
                         }
@@ -8846,8 +8936,14 @@ private:
                 bool destIsCompound = dest.find('[') != std::string::npos ||
                                       dest.find('.') != std::string::npos ||
                                       dest.find("->") != std::string::npos;
+                auto destLooksCompound = [&]() -> bool {
+                    return destIsCompound ||
+                           dest.find("->") != std::string::npos ||
+                           dest.find('.') != std::string::npos ||
+                           dest.find('[') != std::string::npos;
+                };
                 auto cNameOrKeep = [&](const std::string &s) -> std::string {
-                    return destIsCompound ? s : cName(s);
+                    return destLooksCompound() ? s : cName(s);
                 };
                 // Fix dot-to-arrow: if compound dest has "base.field" but base is a
                 // pointer type, replace . with ->
@@ -9129,9 +9225,15 @@ private:
                                 srcIsStruct = true;
                         }
                     }
-                    if (srcIsStruct)
-                        out += pad(indent) + QString::fromStdString(
-                            cNameOrKeep(dest) + " = " + aggregateFirstWord(val)) + ";\n";
+                    if (srcIsStruct) {
+                        if (s_portMode && destLooksCompound())
+                            out += pad(indent) + QString::fromStdString(
+                                "*(int *)(&" + cNameOrKeep(dest) + ") = " +
+                                aggregateFirstWord(val)) + ";\n";
+                        else
+                            out += pad(indent) + QString::fromStdString(
+                                cNameOrKeep(dest) + " = " + aggregateFirstWord(val)) + ";\n";
+                    }
                     else {
                         // Also check: is the DEST a struct/union global?
                         // If so, use *(int*)(&dest) = val instead of dest = val
@@ -9144,7 +9246,11 @@ private:
                                 dn.find("struct ") == 0 || dn.find("union ") == 0)
                                 destIsStruct = true;
                         }
-                        if (destIsStruct)
+                        if (s_portMode && destLooksCompound() &&
+                            val.rfind("*(int *)(&", 0) == 0)
+                            out += pad(indent) + QString::fromStdString(
+                                "*(int *)(&" + cNameOrKeep(dest) + ") = " + val) + ";\n";
+                        else if (destIsStruct)
                             out += pad(indent) + QString::fromStdString(
                                 "*(int *)(&" + cNameOrKeep(dest) + ") = (int)" + val) + ";\n";
                         else
@@ -11543,6 +11649,12 @@ private:
                 std::string cond = (e->kids.size() > 0) ? emitExpr(e->kids[0].get()) : "";
                 std::string tval = (e->kids.size() > 1) ? emitExpr(e->kids[1].get()) : "0";
                 std::string fval = (e->kids.size() > 2) ? emitExpr(e->kids[2].get()) : "0";
+                if (s_portMode && e->kids.size() > 1 &&
+                    aggregateObjectType(tval, e->kids[1].get()) != NullType)
+                    tval = aggregateFirstWord(tval);
+                if (s_portMode && e->kids.size() > 2 &&
+                    aggregateObjectType(fval, e->kids[2].get()) != NullType)
+                    fval = aggregateFirstWord(fval);
                 if (cond.empty()) cond = "0";
                 result = "(" + cond + " ? " + tval + " : " + fval + ")";
                 break;
