@@ -185,7 +185,7 @@ void InfoWidget::buildHeaderTab() {
                     .arg(m_macho->size()).arg(m_macho->size() / 1024);
     } else if (m_macho->isELF()) {
         auto &h = m_macho->elfHeader();
-        info += "Format:       ELF32\n";
+        info += QString("Format:       %1\n").arg(m_macho->formatName());
         info += QString("Type:         %1 (%2)\n")
                     .arg(MachOFile::elfTypeName(h.type)).arg(h.type);
         info += QString("Machine:      %1 (%2)\n")

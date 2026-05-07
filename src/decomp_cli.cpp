@@ -400,6 +400,9 @@ static bool instructionReferencesAddress(const cs_insn &insn, uint32_t addr) {
         const auto &op = insn.detail->x86.operands[oi];
         if (op.type == X86_OP_IMM && (uint32_t)op.imm == addr)
             return true;
+        if (op.type == X86_OP_MEM && op.mem.base == X86_REG_RIP &&
+            (uint32_t)(insn.address + insn.size + op.mem.disp) == addr)
+            return true;
         if (op.type == X86_OP_MEM &&
             op.mem.base == X86_REG_INVALID &&
             op.mem.index == X86_REG_INVALID &&
@@ -450,7 +453,7 @@ static std::vector<StringXrefInfo> findStringXrefs(const MachOFile &mf,
                                                    const QString &query) {
     std::vector<StringXrefInfo> out;
     csh cs = 0;
-    if (cs_open(CS_ARCH_X86, CS_MODE_32, &cs) != CS_ERR_OK) return out;
+    if (cs_open(CS_ARCH_X86, mf.capstoneMode(), &cs) != CS_ERR_OK) return out;
     cs_option(cs, CS_OPT_DETAIL, CS_OPT_ON);
     const std::string queryStd = query.toStdString();
 
@@ -480,7 +483,7 @@ static std::vector<StringXrefInfo> findStringXrefs(const MachOFile &mf,
         out.push_back(std::move(hit));
     };
 
-    if (mf.isPE() || mf.isELF()) {
+    if ((mf.isPE() || mf.isELF()) && !mf.is64Bit()) {
         std::unordered_map<uint32_t, StringInfo> targets;
         for (const auto &s : collectStrings(mf)) {
             if (matchesQuery(s.value, queryStd))
@@ -536,7 +539,7 @@ static std::vector<StringXrefInfo> findStringXrefs(const MachOFile &mf,
         if (count == 0) continue;
 
         uint32_t picBase = 0;
-        bool hasPIC = detectPicBase(mf, insn, count, picBase);
+        bool hasPIC = !mf.is64Bit() && detectPicBase(mf, insn, count, picBase);
 
         for (size_t i = 0; i < count; ++i) {
             if (!insn[i].detail) continue;
@@ -716,7 +719,7 @@ int main(int argc, char *argv[]) {
 
     MachOFile mf;
     if (!mf.load(binPath)) {
-        return fail(1, QString("Failed to load %1 (supported: Mach-O i386, PE32 i386, ELF32 i386)")
+        return fail(1, QString("Failed to load %1 (supported: Mach-O i386, PE32 i386, ELF32 i386, ELF64 x86-64)")
                           .arg(QString::fromUtf8(binPath)));
     }
 

@@ -110,6 +110,8 @@ public:
     // Decompile a single function
     static QString decompile(const MachOFile &mf, uint32_t funcAddr, bool format = true) {
         configurePortTypeNames(mf);
+        if (mf.is64Bit())
+            return "/* x64 decompilation is not implemented yet; use the disassembly pane. */\n";
         Lifter lifter(mf);
         IRFunc func = lifter.liftFunction(funcAddr);
         if (func.blocks.empty()) return "/* could not decompile */\n";
@@ -148,6 +150,8 @@ public:
     // Decompile a whole source file
     static QString decompileFile(MachOFile &mf, int srcIdx) {
         configurePortTypeNames(mf);
+        if (mf.is64Bit())
+            return "/* x64 source-file decompilation is not implemented yet; use function disassembly. */\n";
         auto &sources = mf.stabsSourceFiles();
         if (srcIdx < 0 || srcIdx >= (int)sources.size()) return "";
         auto &sf = sources[srcIdx];

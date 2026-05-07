@@ -9,6 +9,7 @@ enum class BinaryFormat {
     MachO32,
     PE32,
     ELF32,
+    ELF64,
 };
 
 struct Section {

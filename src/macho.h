@@ -39,7 +39,11 @@ public:
     BinaryFormat             format()     const { return m_format; }
     bool                     isMachO()    const { return m_format == BinaryFormat::MachO32; }
     bool                     isPE()       const { return m_format == BinaryFormat::PE32; }
-    bool                     isELF()      const { return m_format == BinaryFormat::ELF32; }
+    bool                     isELF()      const { return m_format == BinaryFormat::ELF32 ||
+                                                         m_format == BinaryFormat::ELF64; }
+    bool                     isELF64()    const { return m_format == BinaryFormat::ELF64; }
+    bool                     is64Bit()    const { return m_format == BinaryFormat::ELF64; }
+    cs_mode                  capstoneMode() const { return is64Bit() ? CS_MODE_64 : CS_MODE_32; }
     const PEHeader&          peHeader()   const { return m_peHeader; }
     const ELFHeader&         elfHeader()  const { return m_elfHeader; }
     const std::vector<ELFProgramHeader>& elfProgramHeaders() const { return m_elfProgramHeaders; }
@@ -62,6 +66,7 @@ public:
         case BinaryFormat::MachO32: return "Mach-O i386";
         case BinaryFormat::PE32:    return "PE32 i386";
         case BinaryFormat::ELF32:   return "ELF32 i386";
+        case BinaryFormat::ELF64:   return "ELF64 x86-64";
         default:                    return "Unknown";
         }
         return "Unknown";
@@ -407,6 +412,7 @@ public:
     static const char* elfMachineName(uint16_t machine) {
         switch (machine) {
         case EM_386: return "i386";
+        case EM_X86_64: return "x86-64";
         default:     return "unknown";
         }
     }
@@ -845,7 +851,8 @@ private:
         const auto &symtab = sections[symtabIdx];
         if (symtab.entsize < 16 || symtab.link >= sections.size()) return "";
         uint64_t symOff = (uint64_t)symtab.offset + (uint64_t)symIdx * symtab.entsize;
-        if (symOff + 16 > m_size || symOff + 16 > (uint64_t)symtab.offset + symtab.size)
+        uint32_t minSize = isELF64() ? 24 : 16;
+        if (symOff + minSize > m_size || symOff + minSize > (uint64_t)symtab.offset + symtab.size)
             return "";
         const auto &strtab = sections[symtab.link];
         uint32_t nameIdx = readLE<uint32_t>((size_t)symOff);
@@ -2695,8 +2702,9 @@ private:
                              uint32_t symtabIdx) {
         if (symtabIdx >= sections.size()) return;
         const auto &symtab = sections[symtabIdx];
+        uint32_t minSymSize = isELF64() ? 24 : 16;
         if ((symtab.type != SHT_SYMTAB && symtab.type != SHT_DYNSYM) ||
-            symtab.entsize < 16 || symtab.link >= sections.size() ||
+            symtab.entsize < minSymSize || symtab.link >= sections.size() ||
             symtab.offset >= m_size)
             return;
 
@@ -2705,14 +2713,27 @@ private:
         m_symbols.reserve(m_symbols.size() + std::min<uint32_t>(count, 500000));
         for (uint32_t i = 0; i < count; ++i) {
             uint64_t off = (uint64_t)symtab.offset + (uint64_t)i * symtab.entsize;
-            if (off + 16 > m_size) break;
+            if (off + minSymSize > m_size) break;
             uint32_t nameIdx = readLE<uint32_t>((size_t)off);
-            uint32_t value = readLE<uint32_t>((size_t)off + 4);
-            uint32_t size = readLE<uint32_t>((size_t)off + 8);
-            uint8_t info = readLE<uint8_t>((size_t)off + 12);
-            uint16_t shndx = readLE<uint16_t>((size_t)off + 14);
+            uint64_t value64 = 0;
+            uint64_t size64 = 0;
+            uint8_t info = 0;
+            uint16_t shndx = 0;
+            if (isELF64()) {
+                info = readLE<uint8_t>((size_t)off + 4);
+                shndx = readLE<uint16_t>((size_t)off + 6);
+                value64 = readLE<uint64_t>((size_t)off + 8);
+                size64 = readLE<uint64_t>((size_t)off + 16);
+            } else {
+                value64 = readLE<uint32_t>((size_t)off + 4);
+                size64 = readLE<uint32_t>((size_t)off + 8);
+                info = readLE<uint8_t>((size_t)off + 12);
+                shndx = readLE<uint16_t>((size_t)off + 14);
+            }
+            if (value64 > UINT32_MAX || size64 > UINT32_MAX)
+                continue;
             std::string name = stringAtBounded(strtab.offset, strtab.size, nameIdx);
-            addELFSymbol(name, nameIdx, info, shndx, value, size);
+            addELFSymbol(name, nameIdx, info, shndx, (uint32_t)value64, (uint32_t)size64);
         }
     }
 
@@ -2812,48 +2833,95 @@ private:
 
     bool parseELF() {
         if (m_size < 52 || readLE<uint32_t>(0) != ELF_MAGIC_LE) return false;
-        if (readLE<uint8_t>(4) != ELFCLASS32 || readLE<uint8_t>(5) != ELFDATA2LSB)
+        uint8_t elfClass = readLE<uint8_t>(4);
+        bool is64 = elfClass == ELFCLASS64;
+        if ((elfClass != ELFCLASS32 && elfClass != ELFCLASS64) ||
+            readLE<uint8_t>(5) != ELFDATA2LSB)
+            return false;
+        if (is64 && m_size < 64)
             return false;
 
         memcpy(m_elfHeader.ident, m_data.data(), 16);
         m_elfHeader.type = readLE<uint16_t>(16);
         m_elfHeader.machine = readLE<uint16_t>(18);
         m_elfHeader.version = readLE<uint32_t>(20);
-        m_elfHeader.entry = readLE<uint32_t>(24);
-        m_elfHeader.phoff = readLE<uint32_t>(28);
-        m_elfHeader.shoff = readLE<uint32_t>(32);
-        m_elfHeader.flags = readLE<uint32_t>(36);
-        m_elfHeader.ehsize = readLE<uint16_t>(40);
-        m_elfHeader.phentsize = readLE<uint16_t>(42);
-        m_elfHeader.phnum = readLE<uint16_t>(44);
-        m_elfHeader.shentsize = readLE<uint16_t>(46);
-        m_elfHeader.shnum = readLE<uint16_t>(48);
-        m_elfHeader.shstrndx = readLE<uint16_t>(50);
+        auto fits32 = [](uint64_t v) { return v <= UINT32_MAX; };
+        if (is64) {
+            uint64_t entry = readLE<uint64_t>(24);
+            uint64_t phoff = readLE<uint64_t>(32);
+            uint64_t shoff = readLE<uint64_t>(40);
+            if (!fits32(entry) || !fits32(phoff) || !fits32(shoff))
+                return false;
+            m_elfHeader.entry = (uint32_t)entry;
+            m_elfHeader.phoff = (uint32_t)phoff;
+            m_elfHeader.shoff = (uint32_t)shoff;
+            m_elfHeader.flags = readLE<uint32_t>(48);
+            m_elfHeader.ehsize = readLE<uint16_t>(52);
+            m_elfHeader.phentsize = readLE<uint16_t>(54);
+            m_elfHeader.phnum = readLE<uint16_t>(56);
+            m_elfHeader.shentsize = readLE<uint16_t>(58);
+            m_elfHeader.shnum = readLE<uint16_t>(60);
+            m_elfHeader.shstrndx = readLE<uint16_t>(62);
+        } else {
+            m_elfHeader.entry = readLE<uint32_t>(24);
+            m_elfHeader.phoff = readLE<uint32_t>(28);
+            m_elfHeader.shoff = readLE<uint32_t>(32);
+            m_elfHeader.flags = readLE<uint32_t>(36);
+            m_elfHeader.ehsize = readLE<uint16_t>(40);
+            m_elfHeader.phentsize = readLE<uint16_t>(42);
+            m_elfHeader.phnum = readLE<uint16_t>(44);
+            m_elfHeader.shentsize = readLE<uint16_t>(46);
+            m_elfHeader.shnum = readLE<uint16_t>(48);
+            m_elfHeader.shstrndx = readLE<uint16_t>(50);
+        }
 
-        if (m_elfHeader.machine != EM_386 || m_elfHeader.version != 1 ||
+        uint16_t expectedMachine = is64 ? EM_X86_64 : EM_386;
+        if (m_elfHeader.machine != expectedMachine || m_elfHeader.version != 1 ||
             (m_elfHeader.type != ET_EXEC && m_elfHeader.type != ET_DYN))
             return false;
-        if (m_elfHeader.phnum && (m_elfHeader.phentsize < 32 ||
+        uint16_t minPhEnt = is64 ? 56 : 32;
+        uint16_t minShEnt = is64 ? 64 : 40;
+        if (m_elfHeader.phnum && (m_elfHeader.phentsize < minPhEnt ||
             (uint64_t)m_elfHeader.phoff + (uint64_t)m_elfHeader.phnum * m_elfHeader.phentsize > m_size))
             return false;
-        if (m_elfHeader.shnum == 0 || m_elfHeader.shentsize < 40 ||
+        if (m_elfHeader.shnum == 0 || m_elfHeader.shentsize < minShEnt ||
             (uint64_t)m_elfHeader.shoff + (uint64_t)m_elfHeader.shnum * m_elfHeader.shentsize > m_size)
             return false;
 
-        m_format = BinaryFormat::ELF32;
+        m_format = is64 ? BinaryFormat::ELF64 : BinaryFormat::ELF32;
         m_entryPoint = m_elfHeader.entry;
 
         for (uint32_t i = 0; i < m_elfHeader.phnum; ++i) {
             uint64_t off = (uint64_t)m_elfHeader.phoff + (uint64_t)i * m_elfHeader.phentsize;
             ELFProgramHeader ph{};
-            ph.type = readLE<uint32_t>((size_t)off);
-            ph.offset = readLE<uint32_t>((size_t)off + 4);
-            ph.vaddr = readLE<uint32_t>((size_t)off + 8);
-            ph.paddr = readLE<uint32_t>((size_t)off + 12);
-            ph.filesz = readLE<uint32_t>((size_t)off + 16);
-            ph.memsz = readLE<uint32_t>((size_t)off + 20);
-            ph.flags = readLE<uint32_t>((size_t)off + 24);
-            ph.align = readLE<uint32_t>((size_t)off + 28);
+            if (is64) {
+                uint64_t poff = readLE<uint64_t>((size_t)off + 8);
+                uint64_t vaddr = readLE<uint64_t>((size_t)off + 16);
+                uint64_t paddr = readLE<uint64_t>((size_t)off + 24);
+                uint64_t filesz = readLE<uint64_t>((size_t)off + 32);
+                uint64_t memsz = readLE<uint64_t>((size_t)off + 40);
+                uint64_t align = readLE<uint64_t>((size_t)off + 48);
+                if (!fits32(poff) || !fits32(vaddr) || !fits32(paddr) ||
+                    !fits32(filesz) || !fits32(memsz) || !fits32(align))
+                    return false;
+                ph.type = readLE<uint32_t>((size_t)off);
+                ph.flags = readLE<uint32_t>((size_t)off + 4);
+                ph.offset = (uint32_t)poff;
+                ph.vaddr = (uint32_t)vaddr;
+                ph.paddr = (uint32_t)paddr;
+                ph.filesz = (uint32_t)filesz;
+                ph.memsz = (uint32_t)memsz;
+                ph.align = (uint32_t)align;
+            } else {
+                ph.type = readLE<uint32_t>((size_t)off);
+                ph.offset = readLE<uint32_t>((size_t)off + 4);
+                ph.vaddr = readLE<uint32_t>((size_t)off + 8);
+                ph.paddr = readLE<uint32_t>((size_t)off + 12);
+                ph.filesz = readLE<uint32_t>((size_t)off + 16);
+                ph.memsz = readLE<uint32_t>((size_t)off + 20);
+                ph.flags = readLE<uint32_t>((size_t)off + 24);
+                ph.align = readLE<uint32_t>((size_t)off + 28);
+            }
             m_elfProgramHeaders.push_back(ph);
         }
 
@@ -2862,15 +2930,36 @@ private:
             uint64_t off = (uint64_t)m_elfHeader.shoff + (uint64_t)i * m_elfHeader.shentsize;
             auto &sec = sections[i];
             sec.name = "";
-            sec.type = readLE<uint32_t>((size_t)off + 4);
-            sec.flags = readLE<uint32_t>((size_t)off + 8);
-            sec.addr = readLE<uint32_t>((size_t)off + 12);
-            sec.offset = readLE<uint32_t>((size_t)off + 16);
-            sec.size = readLE<uint32_t>((size_t)off + 20);
-            sec.link = readLE<uint32_t>((size_t)off + 24);
-            sec.info = readLE<uint32_t>((size_t)off + 28);
-            sec.addralign = readLE<uint32_t>((size_t)off + 32);
-            sec.entsize = readLE<uint32_t>((size_t)off + 36);
+            if (is64) {
+                uint64_t flags = readLE<uint64_t>((size_t)off + 8);
+                uint64_t addr = readLE<uint64_t>((size_t)off + 16);
+                uint64_t soff = readLE<uint64_t>((size_t)off + 24);
+                uint64_t size = readLE<uint64_t>((size_t)off + 32);
+                uint64_t addralign = readLE<uint64_t>((size_t)off + 48);
+                uint64_t entsize = readLE<uint64_t>((size_t)off + 56);
+                if (!fits32(flags) || !fits32(addr) || !fits32(soff) ||
+                    !fits32(size) || !fits32(addralign) || !fits32(entsize))
+                    return false;
+                sec.type = readLE<uint32_t>((size_t)off + 4);
+                sec.flags = (uint32_t)flags;
+                sec.addr = (uint32_t)addr;
+                sec.offset = (uint32_t)soff;
+                sec.size = (uint32_t)size;
+                sec.link = readLE<uint32_t>((size_t)off + 40);
+                sec.info = readLE<uint32_t>((size_t)off + 44);
+                sec.addralign = (uint32_t)addralign;
+                sec.entsize = (uint32_t)entsize;
+            } else {
+                sec.type = readLE<uint32_t>((size_t)off + 4);
+                sec.flags = readLE<uint32_t>((size_t)off + 8);
+                sec.addr = readLE<uint32_t>((size_t)off + 12);
+                sec.offset = readLE<uint32_t>((size_t)off + 16);
+                sec.size = readLE<uint32_t>((size_t)off + 20);
+                sec.link = readLE<uint32_t>((size_t)off + 24);
+                sec.info = readLE<uint32_t>((size_t)off + 28);
+                sec.addralign = readLE<uint32_t>((size_t)off + 32);
+                sec.entsize = readLE<uint32_t>((size_t)off + 36);
+            }
         }
 
         if (m_elfHeader.shstrndx >= sections.size()) return false;
@@ -2936,8 +3025,10 @@ private:
                 parseELFStabsSection(sections[i], sections[strIdx]);
         }
 
-        parseELFDynamicNeeded(sections);
-        parseELFPltRelocations(sections);
+        if (!is64) {
+            parseELFDynamicNeeded(sections);
+            parseELFPltRelocations(sections);
+        }
         parseSTABS();
         parseDWARF(sections);
         buildFunctionMap();
@@ -3451,7 +3542,7 @@ private:
 
     void discoverFunctionStartsFromCalls() {
         csh cs = 0;
-        if (cs_open(CS_ARCH_X86, CS_MODE_32, &cs) != CS_ERR_OK) return;
+        if (cs_open(CS_ARCH_X86, capstoneMode(), &cs) != CS_ERR_OK) return;
         cs_option(cs, CS_OPT_DETAIL, CS_OPT_ON);
 
         for (const Section *sec : allSections()) {

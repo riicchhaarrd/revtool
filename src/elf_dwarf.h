@@ -6,11 +6,13 @@
 // ── ELF constants ──────────────────────────────────────────────────
 constexpr uint32_t ELF_MAGIC_LE = 0x464C457F; // "\x7FELF" read little-endian
 constexpr uint8_t  ELFCLASS32   = 1;
+constexpr uint8_t  ELFCLASS64   = 2;
 constexpr uint8_t  ELFDATA2LSB  = 1;
 constexpr uint16_t ET_REL       = 1;
 constexpr uint16_t ET_EXEC      = 2;
 constexpr uint16_t ET_DYN       = 3;
 constexpr uint16_t EM_386       = 3;
+constexpr uint16_t EM_X86_64    = 62;
 
 constexpr uint32_t PT_LOAD      = 1;
 constexpr uint32_t PT_DYNAMIC   = 2;

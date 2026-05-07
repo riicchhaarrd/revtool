@@ -34,7 +34,16 @@ DisasmWidget::DisasmWidget(QWidget *parent) : QAbstractScrollArea(parent) {
 DisasmWidget::~DisasmWidget() { if (m_csOk) cs_close(&m_cs); }
 
 void DisasmWidget::setTheme(const Theme &theme) { m_theme = theme; viewport()->update(); }
-void DisasmWidget::setMachO(MachOFile *macho) { m_macho = macho; }
+void DisasmWidget::setMachO(MachOFile *macho) {
+    m_macho = macho;
+    if (m_csOk) {
+        cs_close(&m_cs);
+        m_csOk = false;
+    }
+    cs_mode mode = m_macho ? m_macho->capstoneMode() : CS_MODE_32;
+    m_csOk = (cs_open(CS_ARCH_X86, mode, &m_cs) == CS_ERR_OK);
+    if (m_csOk) cs_option(m_cs, CS_OPT_DETAIL, CS_OPT_ON);
+}
 
 void DisasmWidget::disassembleSection(const Section &sec) {
     if (!m_csOk || !m_macho) return;

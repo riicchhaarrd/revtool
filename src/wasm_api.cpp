@@ -349,6 +349,9 @@ static bool instructionReferencesAddress(const cs_insn &insn, uint32_t addr) {
         const auto &op = insn.detail->x86.operands[oi];
         if (op.type == X86_OP_IMM && (uint32_t)op.imm == addr)
             return true;
+        if (op.type == X86_OP_MEM && op.mem.base == X86_REG_RIP &&
+            (uint32_t)(insn.address + insn.size + op.mem.disp) == addr)
+            return true;
         if (op.type == X86_OP_MEM &&
             op.mem.base == X86_REG_INVALID &&
             op.mem.index == X86_REG_INVALID &&
@@ -402,7 +405,7 @@ static std::vector<StringXrefInfo> findStringXrefsByAddress(const MachOFile &mf,
     if (stringValue.empty()) return out;
 
     csh cs = 0;
-    if (cs_open(CS_ARCH_X86, CS_MODE_32, &cs) != CS_ERR_OK) return out;
+    if (cs_open(CS_ARCH_X86, mf.capstoneMode(), &cs) != CS_ERR_OK) return out;
     cs_option(cs, CS_OPT_DETAIL, CS_OPT_ON);
 
     std::set<std::tuple<uint32_t, uint32_t, uint32_t>> seen;
@@ -426,7 +429,7 @@ static std::vector<StringXrefInfo> findStringXrefsByAddress(const MachOFile &mf,
         out.push_back(std::move(hit));
     };
 
-    if (mf.isPE() || mf.isELF()) {
+    if ((mf.isPE() || mf.isELF()) && !mf.is64Bit()) {
         for (const Section *sec : mf.allSections()) {
             if (!sec || !mf.isCodeSection(*sec) || sec->size < 4) continue;
             const uint8_t *code = mf.bytesAt(sec->offset, sec->size);
@@ -467,7 +470,7 @@ static std::vector<StringXrefInfo> findStringXrefsByAddress(const MachOFile &mf,
             if (count == 0) continue;
 
             uint32_t picBase = 0;
-            bool hasPIC = detectPicBase(mf, insn, count, picBase);
+            bool hasPIC = !mf.is64Bit() && detectPicBase(mf, insn, count, picBase);
 
             for (size_t i = 0; i < count; ++i) {
                 if (!insn[i].detail) continue;
@@ -518,7 +521,7 @@ std::string loadBinaryPtr(uintptr_t ptr, size_t len) {
 
     g_mf = MachOFile();
     g_loaded = g_mf.load("/tmp/input.bin");
-    if (!g_loaded) return "error: not a supported Mach-O, PE32, or ELF32 binary";
+    if (!g_loaded) return "error: not a supported Mach-O, PE32, ELF32, or ELF64 binary";
 
     return "ok: " + std::to_string(len) + " bytes, " +
            std::to_string(collectFunctions(g_mf).size()) + " functions, " +
@@ -731,7 +734,7 @@ std::string disassembleFunction(unsigned int addr) {
         return "error: function bytes unavailable";
 
     csh cs;
-    if (cs_open(CS_ARCH_X86, CS_MODE_32, &cs) != CS_ERR_OK)
+    if (cs_open(CS_ARCH_X86, g_mf.capstoneMode(), &cs) != CS_ERR_OK)
         return "error: capstone unavailable";
     cs_option(cs, CS_OPT_SYNTAX, CS_OPT_SYNTAX_INTEL);
 
@@ -824,7 +827,7 @@ std::string inferStructCandidatesJson() {
 
     const auto funcs = collectFunctions(g_mf);
     csh cs = 0;
-    if (cs_open(CS_ARCH_X86, CS_MODE_32, &cs) != CS_ERR_OK)
+    if (cs_open(CS_ARCH_X86, g_mf.capstoneMode(), &cs) != CS_ERR_OK)
         return "{\"error\":\"capstone unavailable\"}";
     cs_option(cs, CS_OPT_DETAIL, CS_OPT_ON);
 
@@ -859,7 +862,9 @@ std::string inferStructCandidatesJson() {
                     continue;
                 if (op.mem.base == X86_REG_INVALID ||
                     op.mem.base == X86_REG_ESP ||
-                    op.mem.base == X86_REG_EBP)
+                    op.mem.base == X86_REG_EBP ||
+                    op.mem.base == X86_REG_RSP ||
+                    op.mem.base == X86_REG_RBP)
                     continue;
                 if (op.mem.disp < 0 || op.mem.disp > 0xFFFF)
                     continue;

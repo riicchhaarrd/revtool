@@ -53,6 +53,8 @@ public:
         } else {
             m_curSourceFileIdx = -1;
         }
+        if (m_mf.is64Bit())
+            return func;
 
         // Disassemble
         const Section *sec = m_mf.sectionForAddress(funcAddr);
