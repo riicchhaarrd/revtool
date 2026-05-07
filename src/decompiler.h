@@ -3187,7 +3187,15 @@ private:
             std::string alias = types.typedefCName(ref);
             if (!isCIdentifier(alias) || emittedNames.count(alias))
                 return;
-            std::string decl = types.formatDecl(t->targetType, alias);
+            TypeRef declTarget = t->targetType;
+            for (int i = 0; i < 12; ++i) {
+                auto *target = types.getType(declTarget);
+                if (!target || target->kind != StabsTypeKind::Typedef ||
+                    target->targetType == NullType || target->targetType == declTarget)
+                    break;
+                declTarget = target->targetType;
+            }
+            std::string decl = types.formatDecl(declTarget, alias);
             if (decl.find("$_") != std::string::npos ||
                 decl.find('<') != std::string::npos ||
                 decl.find("this") != std::string::npos)
