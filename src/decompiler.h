@@ -3018,7 +3018,41 @@ private:
     static void emitTypeDefs(QString &out, const StabsTypeTable &types,
                              const std::set<TypeRef> &used) {
         std::set<TypeRef> emitted;
-        std::set<std::string> emittedNames;
+        std::set<std::string> emittedNames = {
+            "BOOL","Bool","qboolean","DWORD","UINT","UINT32","UINT16","UINT8",
+            "INT32","INT16","HRESULT","ULONG","LONG","BYTE","byte",
+            "GLubyte","GLenum","GLint","GLuint","GLfloat","GLsizei",
+            "HANDLE","HCURSOR","HWND","WindowRef","ControlRef",
+            "EventLoopTimerRef","EventTargetRef","TXNObject",
+            "Handle","Movie","Track","Media","CGDirectDisplayID",
+            "CGGammaValue","CFStringRef","CFURLRef","CGDisplayFadeReservationToken",
+            "CGFloat","Boolean","SInt16","SInt32","SInt64",
+            "UInt8","UInt16","UInt32","UInt64","OSErr","OSStatus","OSType",
+            "Str255","vec_t","vec2_t","vec3_t","vec4_t",
+            "fileHandle_t","r_index_t","MaterialHandle","XAnim","XAnimNotify",
+            "ContextRef","FSRef","CGPoint","CGSize","CGRect","MacRect","Point",
+            "FourCharCode","ItemCount","ByteCount","MenuItemIndex","UniChar",
+            "MenuRef","EventRef","EventQueueRef","EventHandlerRef",
+            "EventHandlerCallRef","EventLoopRef","EventHandlerUPP",
+            "EventLoopTimerUPP","AGLContext","AGLPixelFormat",
+            "RgnHandle","PicHandle","PixMapHandle","GrafPtr","CGrafPtr",
+            "BitMap","Ptr","StringPtr","TextEncoding","ScriptCode",
+            "Fixed","Fract","Float32","Float64","URefCon","RefCon",
+            "CFBundleRef","CFArrayRef","CFDictionaryRef","CFTypeRef",
+            "IOSurfaceRef","ProcessSerialNumber","GDHandle",
+            "ATSUFontFeatureType","ATSUFontFeatureSelector","ATSUStyle",
+            "ATSUTextLayout","ATSUAttributeTag","ATSUFontID",
+            "D3DTEXTUREFILTERTYPE","D3DFORMAT","D3DDEVTYPE","D3DPRIMITIVETYPE",
+            "D3DTRANSFORMSTATETYPE","D3DRENDERSTATETYPE","D3DSTATEBLOCKTYPE",
+            "D3DTEXTURESTAGESTATETYPE","D3DSAMPLERSTATETYPE",
+            "D3DMULTISAMPLE_TYPE","D3DSWAPEFFECT","D3DRESOURCETYPE",
+            "jpeg_c_main_controller","jpeg_d_post_controller","jpeg_upsampler",
+            "Byte","ColorSearchUPP","ColorComplementUPP","CTabHandle","ITabHandle",
+            "CSpecArray","PixPatHandle","CCrsrHandle","CIconHandle","Rect",
+            "MacRGBColor","QElemPtr","FSVolumeRefNum","StrFileName","EventKind",
+            "EventModifiers","UniCharCount","AGLDrawable","Bits16","DInfo","DXInfo",
+            "CursPtr","SFNTLookupFormatSpecificHeader",
+        };
         for (auto ref : used) {
             emitTypeDefsRecursive(out, types, ref, emitted, emittedNames);
         }
