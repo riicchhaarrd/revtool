@@ -1494,6 +1494,18 @@ private:
             ti->kind = StabsTypeKind::Atomic;
             ti->targetType = dwarfTypeAttr(unit, attrs, DW_AT_type, typeRefs);
             break;
+        case DW_TAG_unspecified_type:
+            if (name.find("nullptr") != std::string::npos) {
+                ti->kind = StabsTypeKind::Pointer;
+                ti->name.clear();
+                ti->sizeBytes = unit.addressSize;
+                ti->targetType = dwarfBuiltinVoidType(typeRefs);
+            } else {
+                ti->kind = StabsTypeKind::Unknown;
+                ti->name = name;
+                ti->sizeBytes = (int)sizeBytes;
+            }
+            break;
         case DW_TAG_typedef:
             ti->kind = StabsTypeKind::Typedef;
             ti->name = name;
@@ -2226,6 +2238,7 @@ private:
                        abbr.tag == DW_TAG_volatile_type ||
                        abbr.tag == DW_TAG_restrict_type ||
                        abbr.tag == DW_TAG_atomic_type ||
+                       abbr.tag == DW_TAG_unspecified_type ||
                        abbr.tag == DW_TAG_typedef ||
                        abbr.tag == DW_TAG_structure_type ||
                        abbr.tag == DW_TAG_class_type ||
