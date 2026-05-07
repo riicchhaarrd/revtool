@@ -2901,7 +2901,7 @@ public:
     // Run clang-format on the output for clean formatting
     static QString clangFormat(const QString &code) {
 #ifdef __EMSCRIPTEN__
-        return code; // no subprocess support in WASM
+        return wasmFormat(code); // no subprocess support in WASM
 #else
         // Skip clang-format for very large outputs (>500KB) to avoid timeout
         if (code.size() > 500000) return code;
@@ -2919,6 +2919,78 @@ public:
     }
 
 private:
+#ifdef __EMSCRIPTEN__
+    static bool isIdentStart(char c) {
+        return std::isalpha((unsigned char)c) || c == '_';
+    }
+
+    static bool isIdentChar(char c) {
+        return std::isalnum((unsigned char)c) || c == '_';
+    }
+
+    static bool startsWithKeyword(const QString &s, const char *kw) {
+        size_t n = std::strlen(kw);
+        if (s.compare(0, n, kw) != 0) return false;
+        return s.size() == n || !isIdentChar(s[n]);
+    }
+
+    static bool isDeclarationLike(const QString &trimmed) {
+        if (trimmed.empty()) return false;
+        if (startsWithKeyword(trimmed, "if") || startsWithKeyword(trimmed, "for") ||
+            startsWithKeyword(trimmed, "while") || startsWithKeyword(trimmed, "switch") ||
+            startsWithKeyword(trimmed, "return") || startsWithKeyword(trimmed, "goto") ||
+            startsWithKeyword(trimmed, "do") || startsWithKeyword(trimmed, "else"))
+            return false;
+        if (trimmed.endsWith('{'))
+            return trimmed.contains('(') && trimmed.contains(')');
+        if (!trimmed.endsWith(';') || trimmed.contains('='))
+            return false;
+        if (trimmed.contains('(') && !trimmed.contains("(*"))
+            return false;
+        return trimmed.contains('*') || trimmed.contains(" struct ") ||
+               trimmed.startsWith("struct ") || trimmed.startsWith("const ");
+    }
+
+    static QString formatPointerSpacing(QString line) {
+        QString trimmed = line.trimmed();
+        if (!isDeclarationLike(trimmed))
+            return line;
+
+        while (line.contains("* *"))
+            line.replace("* *", "**");
+
+        for (int i = 0; i < line.size(); ++i) {
+            if (line[i] != '*') continue;
+            int starEnd = i + 1;
+            while (starEnd < line.size() && line[starEnd] == '*')
+                ++starEnd;
+            int nameStart = starEnd;
+            while (nameStart < line.size() && line[nameStart] == ' ')
+                ++nameStart;
+            if (nameStart > starEnd && nameStart < line.size() &&
+                isIdentStart((char)line[nameStart])) {
+                line.remove(starEnd, nameStart - starEnd);
+                i = starEnd;
+            }
+        }
+        return line;
+    }
+
+    static QString wasmFormat(const QString &code) {
+        QStringList lines = code.split('\n');
+        QStringList out;
+        for (int i = 0; i < lines.size(); ++i) {
+            QString line = lines[i];
+            if (line.trimmed() == "{" && !out.isEmpty()) {
+                out.last() = formatPointerSpacing(out.last() + " {");
+                continue;
+            }
+            out.append(formatPointerSpacing(line));
+        }
+        return out.join('\n');
+    }
+#endif
+
     // ── Emit type definitions ───────────────────────────────────────
     static void emitTypeDefs(QString &out, const StabsTypeTable &types,
                              const std::set<TypeRef> &used) {

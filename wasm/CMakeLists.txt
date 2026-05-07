@@ -26,6 +26,7 @@ target_link_options(dis_wasm PRIVATE
     # 256 MB heap (large binaries + decompilation can be memory-hungry)
     "-sINITIAL_MEMORY=268435456"
     "-sALLOW_MEMORY_GROWTH=1"
+    "-sSTACK_SIZE=4194304"
     # Virtual filesystem (for /tmp writes)
     "-sFORCE_FILESYSTEM=1"
     # Export a factory function so the module is easy to load

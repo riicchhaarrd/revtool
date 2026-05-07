@@ -5,7 +5,18 @@ core.*
 
 build/
 build_decomp/
+build_wasm*/
 
+# Local/private inputs and release artifacts
+
+
+
+web/dis.js
+web/dis.wasm
+wasm_deps/
+emsdk/
+
+port/
 port/src/
 port/build*/
 port/CMakeCache.txt

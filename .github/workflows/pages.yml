@@ -1,0 +1,86 @@
+name: Build and Deploy Web UI
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  EMSDK_VERSION: "4.0.20"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install host build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake
+
+      - name: Cache Emscripten SDK
+        uses: actions/cache@v4
+        with:
+          path: emsdk
+          key: emsdk-${{ runner.os }}-${{ env.EMSDK_VERSION }}
+
+      - name: Install Emscripten SDK
+        run: |
+          if [ ! -x emsdk/emsdk ]; then
+            git clone https://github.com/emscripten-core/emsdk.git emsdk
+          fi
+          ./emsdk/emsdk install "$EMSDK_VERSION"
+          ./emsdk/emsdk activate "$EMSDK_VERSION"
+
+      - name: Cache wasm dependencies
+        uses: actions/cache@v4
+        with:
+          path: wasm_deps
+          key: wasm-deps-${{ runner.os }}-${{ env.EMSDK_VERSION }}-${{ hashFiles('build_wasm.sh', 'wasm/CMakeLists.txt') }}
+
+      - name: Build wasm bundle
+        env:
+          EMSDK_DIR: ${{ github.workspace }}/emsdk
+        run: ./build_wasm.sh
+
+      - name: Prepare Pages artifact
+        run: |
+          test -s web/index.html
+          test -s web/dis.js
+          test -s web/dis.wasm
+          touch web/.nojekyll
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: web
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+
+    permissions:
+      pages: write
+      id-token: write
+
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

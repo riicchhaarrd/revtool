@@ -6,8 +6,9 @@
 #include <cstring>
 #include <cctype>
 #include <algorithm>
+#include <cerrno>
+#include <cstdlib>
 #include <cstdio>
-#include <regex>
 
 class QStringList;
 class QRegularExpression;
@@ -23,6 +24,7 @@ public:
     bool isLetterOrNumber() const { return isalnum((unsigned char)c_); }
     bool isDigit() const { return isdigit((unsigned char)c_); }
     bool isLower() const { return islower((unsigned char)c_); }
+    bool isSpace() const { return isspace((unsigned char)c_); }
     bool operator==(char o)  const { return c_ == o; }
     bool operator==(QChar o) const { return c_ == o.c_; }
     bool operator!=(char o)  const { return c_ != o; }
@@ -127,27 +129,29 @@ public:
 
     int toInt(bool *ok = nullptr, int base = 10) const {
         if (empty()) { if (ok) *ok = false; return 0; }
-        try {
-            size_t pos = 0;
-            int result = std::stoi(*this, &pos, base);
-            if (ok) *ok = (pos == size());
-            return result;
-        } catch (...) {
-            if (ok) *ok = false;
+        errno = 0;
+        char *end = nullptr;
+        long result = std::strtol(c_str(), &end, base);
+        bool parsed = end && end != c_str() && *end == '\0' && errno != ERANGE;
+        if (ok) *ok = parsed;
+        if (!parsed)
             return 0;
-        }
+        return (int)result;
     }
     unsigned int toUInt(bool *ok = nullptr, int base = 10) const {
         if (empty()) { if (ok) *ok = false; return 0; }
-        try {
-            size_t pos = 0;
-            unsigned long result = std::stoul(*this, &pos, base);
-            if (ok) *ok = (pos == size());
-            return (unsigned int)result;
-        } catch (...) {
+        if ((*this)[0] == '-') {
             if (ok) *ok = false;
             return 0;
         }
+        errno = 0;
+        char *end = nullptr;
+        unsigned long result = std::strtoul(c_str(), &end, base);
+        bool parsed = end && end != c_str() && *end == '\0' && errno != ERANGE;
+        if (ok) *ok = parsed;
+        if (!parsed)
+            return 0;
+        return (unsigned int)result;
     }
 
     void truncate(int n) {
@@ -282,19 +286,18 @@ class QRegularExpressionMatch {
     friend class QString;
 
     bool matched_ = false;
+    int start_ = -1;
     std::vector<QString> captures_;
     std::vector<int> lengths_;
 
-    void setMatch(const std::smatch &m) {
+    void setMatch(int start, const std::vector<QString> &captures) {
         matched_ = true;
-        captures_.clear();
+        start_ = start;
+        captures_ = captures;
         lengths_.clear();
-        captures_.reserve(m.size());
-        lengths_.reserve(m.size());
-        for (size_t i = 0; i < m.size(); ++i) {
-            captures_.push_back(m[i].matched ? QString(m[i].str()) : QString());
-            lengths_.push_back(m[i].matched ? (int)m[i].length() : -1);
-        }
+        lengths_.reserve(captures_.size());
+        for (const auto &capture : captures_)
+            lengths_.push_back((int)capture.size());
     }
 
 public:
@@ -310,56 +313,354 @@ public:
 };
 
 class QRegularExpression {
-    std::regex regex_;
+    enum class Kind {
+        Unknown,
+        CharCastParen,
+        CharCastBare,
+        FramesAddr,
+        NetchanAddr,
+        SunParseAssign,
+        SunLightColorAssign,
+        PtrDecl,
+        LocalDecl
+    };
+
+    QString pattern_;
+    Kind kind_ = Kind::Unknown;
+
+    static bool isIdentStart(char c) {
+        return std::isalpha((unsigned char)c) || c == '_';
+    }
+
+    static bool isIdentChar(char c) {
+        return std::isalnum((unsigned char)c) || c == '_';
+    }
+
+    static void skipSpaces(const QString &s, size_t &p) {
+        while (p < s.size() && std::isspace((unsigned char)s[p]))
+            ++p;
+    }
+
+    static bool onlySpacesToEnd(const QString &s, size_t p) {
+        while (p < s.size()) {
+            if (!std::isspace((unsigned char)s[p]))
+                return false;
+            ++p;
+        }
+        return true;
+    }
+
+    static bool readIdentifier(const QString &s, size_t &p, QString *out = nullptr) {
+        if (p >= s.size() || !isIdentStart(s[p]))
+            return false;
+        size_t start = p++;
+        while (p < s.size() && isIdentChar(s[p]))
+            ++p;
+        if (out)
+            *out = s.substr(start, p - start);
+        return true;
+    }
+
+    static Kind classify(const QString &pattern) {
+        if (pattern == R"(\(\(char \*\)\((\w+)\)\))")
+            return Kind::CharCastParen;
+        if (pattern == R"(\(\(char \*\)(\w+)\))")
+            return Kind::CharCastBare;
+        if (pattern == R"(&([A-Za-z_][A-Za-z0-9_]*)->frames\[(\d+)\]\.ps)")
+            return Kind::FramesAddr;
+        if (pattern == R"(&([A-Za-z_][A-Za-z0-9_]*)->netchan\.remoteAddress\.type)")
+            return Kind::NetchanAddr;
+        if (pattern == R"(^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*&.*->sunParse\s*;)")
+            return Kind::SunParseAssign;
+        if (pattern == R"(^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*&.*->sunLight\.color\[0\]\s*;)")
+            return Kind::SunLightColorAssign;
+        if (pattern == R"(^(\s*)(?:char|int)\s*\*\s*(v\d+|var_[A-Za-z0-9_]+)\s*;)")
+            return Kind::PtrDecl;
+        return Kind::LocalDecl;
+    }
+
+    bool matchCharCastParen(const QString &s, size_t pos, QRegularExpressionMatch *match) const {
+        const QString prefix = "((char *)(";
+        if (s.compare(pos, prefix.size(), prefix) != 0)
+            return false;
+        size_t p = pos + prefix.size();
+        QString name;
+        if (!readIdentifier(s, p, &name))
+            return false;
+        if (p + 2 > s.size() || s.compare(p, 2, "))") != 0)
+            return false;
+        size_t end = p + 2;
+        if (match)
+            match->setMatch((int)pos, {s.substr(pos, end - pos), name});
+        return true;
+    }
+
+    bool matchCharCastBare(const QString &s, size_t pos, QRegularExpressionMatch *match) const {
+        const QString prefix = "((char *)";
+        if (s.compare(pos, prefix.size(), prefix) != 0)
+            return false;
+        size_t p = pos + prefix.size();
+        QString name;
+        if (!readIdentifier(s, p, &name))
+            return false;
+        if (p >= s.size() || s[p] != ')')
+            return false;
+        size_t end = p + 1;
+        if (match)
+            match->setMatch((int)pos, {s.substr(pos, end - pos), name});
+        return true;
+    }
+
+    bool matchFramesAddr(const QString &s, size_t pos, QRegularExpressionMatch *match) const {
+        if (pos >= s.size() || s[pos] != '&')
+            return false;
+        size_t p = pos + 1;
+        QString base;
+        if (!readIdentifier(s, p, &base))
+            return false;
+        const QString mid = "->frames[";
+        if (p + mid.size() > s.size() || s.compare(p, mid.size(), mid) != 0)
+            return false;
+        p += mid.size();
+        size_t idxStart = p;
+        while (p < s.size() && std::isdigit((unsigned char)s[p]))
+            ++p;
+        if (p == idxStart || p + 4 > s.size() || s.compare(p, 4, "].ps") != 0)
+            return false;
+        QString idx = s.substr(idxStart, p - idxStart);
+        size_t end = p + 4;
+        if (match)
+            match->setMatch((int)pos, {s.substr(pos, end - pos), base, idx});
+        return true;
+    }
+
+    bool matchNetchanAddr(const QString &s, size_t pos, QRegularExpressionMatch *match) const {
+        if (pos >= s.size() || s[pos] != '&')
+            return false;
+        size_t p = pos + 1;
+        QString base;
+        if (!readIdentifier(s, p, &base))
+            return false;
+        const QString suffix = "->netchan.remoteAddress.type";
+        if (p + suffix.size() > s.size() || s.compare(p, suffix.size(), suffix) != 0)
+            return false;
+        size_t end = p + suffix.size();
+        if (match)
+            match->setMatch((int)pos, {s.substr(pos, end - pos), base});
+        return true;
+    }
+
+    bool matchSunAssign(const QString &s, const QString &member,
+                        QRegularExpressionMatch *match) const {
+        size_t p = 0;
+        skipSpaces(s, p);
+        size_t nameStart = p;
+        QString name;
+        if (!readIdentifier(s, p, &name))
+            return false;
+        skipSpaces(s, p);
+        if (p >= s.size() || s[p] != '=')
+            return false;
+        ++p;
+        skipSpaces(s, p);
+        if (p >= s.size() || s[p] != '&')
+            return false;
+
+        size_t memberPos = s.find(member, p + 1);
+        if (memberPos == QString::npos)
+            return false;
+        size_t semi = memberPos + member.size();
+        skipSpaces(s, semi);
+        if (semi >= s.size() || s[semi] != ';' || !onlySpacesToEnd(s, semi + 1))
+            return false;
+        if (match)
+            match->setMatch(0, {s, name});
+        (void)nameStart;
+        return true;
+    }
+
+    bool matchPtrDecl(const QString &s, QRegularExpressionMatch *match) const {
+        size_t p = 0;
+        while (p < s.size() && (s[p] == ' ' || s[p] == '\t'))
+            ++p;
+        QString indent = s.substr(0, p);
+        if (s.compare(p, 4, "char") == 0)
+            p += 4;
+        else if (s.compare(p, 3, "int") == 0)
+            p += 3;
+        else
+            return false;
+        if (p < s.size() && isIdentChar(s[p]))
+            return false;
+        skipSpaces(s, p);
+        if (p >= s.size() || s[p] != '*')
+            return false;
+        ++p;
+        skipSpaces(s, p);
+        size_t nameStart = p;
+        QString name;
+        if (!readIdentifier(s, p, &name))
+            return false;
+        bool generatedName = (name.size() >= 2 && name[0] == 'v' &&
+                              std::isdigit((unsigned char)name[1])) ||
+                             name.rfind("var_", 0) == 0;
+        if (!generatedName)
+            return false;
+        skipSpaces(s, p);
+        if (p >= s.size() || s[p] != ';' || !onlySpacesToEnd(s, p + 1))
+            return false;
+        if (match)
+            match->setMatch(0, {s.substr(0, p + 1), indent, s.substr(nameStart, name.size())});
+        return true;
+    }
+
+    bool matchLocalDecl(const QString &s, QRegularExpressionMatch *match) const {
+        QString t = s.trimmed();
+        if (t.empty() || !t.endsWith(';'))
+            return false;
+        if (t.startsWith("return ") || t.startsWith("if ") || t.startsWith("while ") ||
+            t.startsWith("for ") || t.startsWith("switch ") || t.startsWith("goto "))
+            return false;
+
+        size_t end = t.find('=');
+        if (end == QString::npos)
+            end = t.size() - 1;
+        if (end == 0)
+            return false;
+
+        size_t p = end;
+        while (p > 0 && std::isspace((unsigned char)t[p - 1]))
+            --p;
+        if (p > 0 && t[p - 1] == ']') {
+            size_t bracket = t.rfind('[', p - 1);
+            if (bracket == QString::npos)
+                return false;
+            p = bracket;
+            while (p > 0 && std::isspace((unsigned char)t[p - 1]))
+                --p;
+        }
+
+        size_t nameEnd = p;
+        while (p > 0 && isIdentChar(t[p - 1]))
+            --p;
+        if (p == nameEnd || !isIdentStart(t[p]))
+            return false;
+        QString name = t.substr(p, nameEnd - p);
+        QString before = QString(t.substr(0, p)).trimmed();
+        if (before.empty())
+            return false;
+        bool hasTypeChar = false;
+        for (char c : before) {
+            if (std::isalpha((unsigned char)c) || c == '*') {
+                hasTypeChar = true;
+                break;
+            }
+        }
+        if (!hasTypeChar)
+            return false;
+        if (match)
+            match->setMatch(0, {t, name});
+        return true;
+    }
 
 public:
-    QRegularExpression(const char *pattern) : regex_(pattern) {}
-    QRegularExpression(const QString &pattern) : regex_(pattern) {}
-
-    const std::regex &regex() const { return regex_; }
+    QRegularExpression(const char *pattern)
+        : pattern_(pattern), kind_(classify(pattern_)) {}
+    QRegularExpression(const QString &pattern)
+        : pattern_(pattern), kind_(classify(pattern_)) {}
 
     QRegularExpressionMatch match(const QString &s) const {
         QRegularExpressionMatch out;
-        std::string input = s;
-        std::smatch m;
-        if (std::regex_search(input, m, regex_))
-            out.setMatch(m);
+        findIn(s, 0, &out);
+        return out;
+    }
+
+    int findIn(const QString &s, int from, QRegularExpressionMatch *match = nullptr) const {
+        if (from < 0) from = 0;
+        if ((size_t)from > s.size()) return -1;
+
+        switch (kind_) {
+        case Kind::SunParseAssign:
+            return from == 0 && matchSunAssign(s, "->sunParse", match) ? 0 : -1;
+        case Kind::SunLightColorAssign:
+            return from == 0 && matchSunAssign(s, "->sunLight.color[0]", match) ? 0 : -1;
+        case Kind::PtrDecl:
+            return from == 0 && matchPtrDecl(s, match) ? 0 : -1;
+        case Kind::LocalDecl:
+            return from == 0 && matchLocalDecl(s, match) ? 0 : -1;
+        case Kind::CharCastParen:
+            for (size_t p = (size_t)from; p < s.size(); ++p)
+                if (matchCharCastParen(s, p, match))
+                    return (int)p;
+            return -1;
+        case Kind::CharCastBare:
+            for (size_t p = (size_t)from; p < s.size(); ++p)
+                if (matchCharCastBare(s, p, match))
+                    return (int)p;
+            return -1;
+        case Kind::FramesAddr:
+            for (size_t p = (size_t)from; p < s.size(); ++p)
+                if (matchFramesAddr(s, p, match))
+                    return (int)p;
+            return -1;
+        case Kind::NetchanAddr:
+            for (size_t p = (size_t)from; p < s.size(); ++p)
+                if (matchNetchanAddr(s, p, match))
+                    return (int)p;
+            return -1;
+        case Kind::Unknown:
+            break;
+        }
+        size_t pos = s.find(pattern_, (size_t)from);
+        if (pos == QString::npos)
+            return -1;
+        if (match)
+            match->setMatch((int)pos, {s.substr(pos, pattern_.size())});
+        return (int)pos;
+    }
+
+    QString expandReplacement(const QString &replacement,
+                              const QRegularExpressionMatch &match) const {
+        QString out;
+        for (size_t i = 0; i < replacement.size(); ++i) {
+            if (replacement[i] == '\\' && i + 1 < replacement.size() &&
+                replacement[i + 1].isDigit()) {
+                int idx = replacement[i + 1] - '0';
+                out += match.captured(idx);
+                ++i;
+            } else {
+                out += replacement[i];
+            }
+        }
         return out;
     }
 };
 
-inline QString regexReplacementForStd(QString replacement) {
-    QString out;
-    for (size_t i = 0; i < replacement.size(); ++i) {
-        if (replacement[i] == '\\' && i + 1 < replacement.size() &&
-            replacement[i + 1].isDigit()) {
-            out += '$';
-            out += replacement[i + 1];
-            ++i;
-        } else {
-            out += replacement[i];
-        }
-    }
-    return out;
-}
-
 inline int QString::indexOf(const QRegularExpression &re, int from,
                             QRegularExpressionMatch *match) const {
-    if (from < 0) from = 0;
-    if ((size_t)from > size()) return -1;
-
-    std::string input = substr((size_t)from);
-    std::smatch m;
-    if (!std::regex_search(input, m, re.regex()))
-        return -1;
-    if (match)
-        match->setMatch(m);
-    return from + (int)m.position(0);
+    return re.findIn(*this, from, match);
 }
 
 inline QString &QString::replace(const QRegularExpression &re, const QString &to) {
-    std::string replaced = std::regex_replace(
-        std::string(*this), re.regex(), std::string(regexReplacementForStd(to)));
-    assign(replaced);
+    QString result;
+    int pos = 0;
+    QRegularExpressionMatch match;
+    while (pos < (int)size()) {
+        int found = re.findIn(*this, pos, &match);
+        if (found < 0) {
+            result += substr((size_t)pos);
+            break;
+        }
+        result += substr((size_t)pos, (size_t)(found - pos));
+        result += re.expandReplacement(to, match);
+        int len = match.capturedLength(0);
+        if (len <= 0) {
+            result += std::string::operator[]((size_t)found);
+            pos = found + 1;
+        } else {
+            pos = found + len;
+        }
+    }
+    assign(result);
     return *this;
 }
