@@ -414,6 +414,11 @@ public:
     }
 
 private:
+    struct DwarfDieRecord {
+        uint64_t tag = 0;
+        std::map<uint64_t, DwarfValue> attrs;
+    };
+
     uint32_t sectionAddressSpan(const Section &sec) const {
         if (isPE() && sec.segname == "IMAGE")
             return sec.align ? sec.align : sec.size;
@@ -1254,6 +1259,65 @@ private:
         return dwarfTypeRefForOffset(typeRefs, dwarfRefOffset(unit, it->second));
     }
 
+    void indexDwarfDIEs(size_t &pos, size_t end,
+                        const std::map<uint64_t, DwarfAbbrev> &abbrevs,
+                        const DwarfUnit &unit,
+                        const ELFSectionRecord *debugInfo,
+                        const ELFSectionRecord *debugStr,
+                        const ELFSectionRecord *debugLineStr,
+                        std::map<uint32_t, DwarfDieRecord> &dieRecords,
+                        int depth) {
+        if (depth > 64) return;
+        while (pos < end) {
+            uint32_t dieOffset = debugInfo ? (uint32_t)(pos - debugInfo->offset) : 0;
+            uint64_t code = readULEB(pos, end);
+            if (code == 0)
+                return;
+            auto ait = abbrevs.find(code);
+            if (ait == abbrevs.end())
+                return;
+            const DwarfAbbrev &abbr = ait->second;
+            DwarfDieRecord record;
+            record.tag = abbr.tag;
+            for (const auto &adef : abbr.attrs) {
+                DwarfValue val = readDwarfFormValue(pos, end, adef.form,
+                                                    adef.implicitConst,
+                                                    unit.addressSize,
+                                                    debugStr, debugLineStr);
+                if (val.present)
+                    record.attrs[adef.name] = std::move(val);
+            }
+            dieRecords[dieOffset] = std::move(record);
+            if (abbr.hasChildren)
+                indexDwarfDIEs(pos, end, abbrevs, unit, debugInfo,
+                               debugStr, debugLineStr, dieRecords, depth + 1);
+        }
+    }
+
+    void mergeDwarfReferencedAttrs(const DwarfUnit &unit,
+                                   const std::map<uint64_t, DwarfValue> &source,
+                                   std::map<uint64_t, DwarfValue> &out,
+                                   const std::map<uint32_t, DwarfDieRecord> &dieRecords,
+                                   int depth = 0) const {
+        if (depth > 12)
+            return;
+        for (uint64_t refAttr : {DW_AT_abstract_origin, DW_AT_specification}) {
+            auto rit = source.find(refAttr);
+            if (rit == source.end() || !rit->second.present)
+                continue;
+            uint32_t refOffset = dwarfRefOffset(unit, rit->second);
+            auto dit = dieRecords.find(refOffset);
+            if (dit == dieRecords.end())
+                continue;
+            std::map<uint64_t, DwarfValue> inherited = dit->second.attrs;
+            mergeDwarfReferencedAttrs(unit, dit->second.attrs, inherited,
+                                      dieRecords, depth + 1);
+            for (const auto &kv : inherited)
+                if (out.find(kv.first) == out.end())
+                    out.emplace(kv.first, kv.second);
+        }
+    }
+
     StabsTypeKind dwarfBaseKind(uint64_t encoding, uint64_t sizeBytes,
                                 const std::string &name) const {
         if (name == "void") return StabsTypeKind::Void;
@@ -2011,6 +2075,7 @@ private:
                         const ELFSectionRecord *debugLineStr,
                         const ELFSectionRecord *debugStrOffsets,
                         const ELFSectionRecord *debugAddr,
+                        const std::map<uint32_t, DwarfDieRecord> &dieRecords,
                         std::map<uint32_t, TypeRef> &typeRefs,
                         int currentFuncIdx,
                         TypeRef currentCompositeType,
@@ -2034,6 +2099,7 @@ private:
                 if (val.present)
                     attrs[adef.name] = std::move(val);
             }
+            mergeDwarfReferencedAttrs(unit, attrs, attrs, dieRecords);
 
             int childFuncIdx = currentFuncIdx;
             TypeRef childCompositeType = currentCompositeType;
@@ -2142,7 +2208,7 @@ private:
 
             if (abbr.hasChildren)
                 parseDwarfDIEs(pos, end, abbrevs, unit, debugInfo, debugStr, debugLineStr,
-                               debugStrOffsets, debugAddr, typeRefs,
+                               debugStrOffsets, debugAddr, dieRecords, typeRefs,
                                childFuncIdx, childCompositeType,
                                childArrayType, childEnumType, depth + 1);
         }
@@ -2203,6 +2269,11 @@ private:
             // First pass over the root CU DIE to learn comp_dir/stmt_list before
             // subprogram DIEs need line-table paths.
             size_t dieStart = pos;
+            std::map<uint32_t, DwarfDieRecord> dieRecords;
+            size_t indexPos = dieStart;
+            indexDwarfDIEs(indexPos, unitEnd, abbrevs, unit, debugInfo,
+                           debugStr, debugLineStr, dieRecords, 0);
+
             size_t probe = pos;
             uint64_t rootCode = readULEB(probe, unitEnd);
             auto rootIt = abbrevs.find(rootCode);
@@ -2237,7 +2308,7 @@ private:
 
             pos = dieStart;
             parseDwarfDIEs(pos, unitEnd, abbrevs, unit, debugInfo, debugStr,
-                           debugLineStr, debugStrOffsets, debugAddr, typeRefs,
+                           debugLineStr, debugStrOffsets, debugAddr, dieRecords, typeRefs,
                            -1, NullType, NullType, NullType, 0);
             finalizeDwarfTypes(typeRefs);
             pos = unitEnd;
