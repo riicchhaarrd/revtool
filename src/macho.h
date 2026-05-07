@@ -1578,6 +1578,18 @@ private:
             ti->enumValues.push_back(std::move(ev));
     }
 
+    void addDwarfSubroutineParameter(TypeRef functionType,
+                                     const DwarfUnit &unit,
+                                     const std::map<uint64_t, DwarfValue> &attrs,
+                                     std::map<uint32_t, TypeRef> &typeRefs) {
+        if (functionType == NullType) return;
+        StabsTypeInfo *ti = m_typeTable.getMutableType(functionType);
+        if (!ti || ti->kind != StabsTypeKind::Function) return;
+        TypeRef paramType = dwarfTypeAttr(unit, attrs, DW_AT_type, typeRefs);
+        if (paramType != NullType)
+            ti->functionParams.push_back(paramType);
+    }
+
     void applyDwarfSubrange(TypeRef arrayType,
                             const std::map<uint64_t, DwarfValue> &attrs) {
         if (arrayType == NullType) return;
@@ -2100,6 +2112,7 @@ private:
                         TypeRef currentCompositeType,
                         TypeRef currentArrayType,
                         TypeRef currentEnumType,
+                        TypeRef currentSubroutineType,
                         int depth) {
         if (depth > 64) return;
         while (pos < end) {
@@ -2124,6 +2137,7 @@ private:
             TypeRef childCompositeType = currentCompositeType;
             TypeRef childArrayType = currentArrayType;
             TypeRef childEnumType = currentEnumType;
+            TypeRef childSubroutineType = currentSubroutineType;
             if (abbr.tag == DW_TAG_compile_unit) {
                 if (dwarfHasAttr(attrs, DW_AT_str_offsets_base))
                     unit.strOffsetsBase = (uint32_t)dwarfUnsignedAttr(attrs, DW_AT_str_offsets_base);
@@ -2157,6 +2171,8 @@ private:
                     childArrayType = thisType;
                 if (abbr.tag == DW_TAG_enumeration_type)
                     childEnumType = thisType;
+                if (abbr.tag == DW_TAG_subroutine_type)
+                    childSubroutineType = thisType;
             } else if (abbr.tag == DW_TAG_member) {
                 addDwarfMember(currentCompositeType, unit, attrs,
                                debugStr, debugStrOffsets, typeRefs);
@@ -2170,6 +2186,9 @@ private:
                                              debugStrOffsets, debugAddr, typeRefs);
                 if (fnIdx >= 0)
                     childFuncIdx = fnIdx;
+            } else if (abbr.tag == DW_TAG_formal_parameter &&
+                       currentSubroutineType != NullType) {
+                addDwarfSubroutineParameter(currentSubroutineType, unit, attrs, typeRefs);
             } else if (abbr.tag == DW_TAG_formal_parameter && currentFuncIdx >= 0) {
                 std::string pname = dwarfStringAttr(unit, attrs, DW_AT_name,
                                                     debugStr, debugStrOffsets);
@@ -2229,7 +2248,8 @@ private:
                 parseDwarfDIEs(pos, end, abbrevs, unit, debugInfo, debugStr, debugLineStr,
                                debugStrOffsets, debugAddr, dieRecords, typeRefs,
                                childFuncIdx, childCompositeType,
-                               childArrayType, childEnumType, depth + 1);
+                               childArrayType, childEnumType,
+                               childSubroutineType, depth + 1);
         }
     }
 
@@ -2328,7 +2348,7 @@ private:
             pos = dieStart;
             parseDwarfDIEs(pos, unitEnd, abbrevs, unit, debugInfo, debugStr,
                            debugLineStr, debugStrOffsets, debugAddr, dieRecords, typeRefs,
-                           -1, NullType, NullType, NullType, 0);
+                           -1, NullType, NullType, NullType, NullType, 0);
             finalizeDwarfTypes(typeRefs);
             pos = unitEnd;
         }

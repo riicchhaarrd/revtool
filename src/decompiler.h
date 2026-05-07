@@ -3178,7 +3178,23 @@ private:
         emitted.insert(ref); // mark visited BEFORE recursing to break cycles
 
         // Resolve through pointers/typedefs/arrays to find underlying struct/enum
-        if (t->kind == StabsTypeKind::Pointer || t->kind == StabsTypeKind::Typedef ||
+        if (t->kind == StabsTypeKind::Typedef) {
+            if (t->targetType != NullType)
+                emitTypeDefsRecursive(out, types, t->targetType, emitted, emittedNames,
+                                      depth + 1, preferredAggregates);
+            std::string alias = types.typedefCName(ref);
+            if (!isCIdentifier(alias) || emittedNames.count(alias))
+                return;
+            std::string decl = types.formatDecl(t->targetType, alias);
+            if (decl.find("$_") != std::string::npos ||
+                decl.find('<') != std::string::npos ||
+                decl.find("this") != std::string::npos)
+                return;
+            emittedNames.insert(alias);
+            out += QString::fromStdString("typedef " + decl + ";\n\n");
+            return;
+        }
+        if (t->kind == StabsTypeKind::Pointer ||
             t->kind == StabsTypeKind::Const || t->kind == StabsTypeKind::Volatile ||
             t->kind == StabsTypeKind::Array) {
             if (t->targetType != NullType)
@@ -3251,7 +3267,9 @@ private:
                         if (!ft)
                             return false;
                         auto *rawFt = types.getType(fieldRef);
-                        if (rawFt && rawFt->kind == StabsTypeKind::Pointer)
+                        if (ft->kind == StabsTypeKind::Pointer ||
+                            ft->kind == StabsTypeKind::Reference ||
+                            (rawFt && rawFt->kind == StabsTypeKind::Pointer))
                             return true;
                         if (ft->kind <= StabsTypeKind::LongDouble)
                             return true;
@@ -3391,7 +3409,10 @@ private:
                         bool typeOk = false;
                         if (ft) {
                             if (ft->kind <= StabsTypeKind::LongDouble) typeOk = true;
-                            if (rawFt && rawFt->kind == StabsTypeKind::Pointer) typeOk = true;
+                            if (ft->kind == StabsTypeKind::Pointer ||
+                                ft->kind == StabsTypeKind::Reference ||
+                                (rawFt && rawFt->kind == StabsTypeKind::Pointer))
+                                typeOk = true;
                             if (ft->kind == StabsTypeKind::Struct ||
                                 ft->kind == StabsTypeKind::Union) {
                                 std::string fieldEmitName = types.aggregateCNameForType(f.typeRef);

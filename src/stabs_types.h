@@ -47,6 +47,7 @@ struct StabsTypeInfo {
 
     // pointer, reference, const, volatile, typedef, array element, function return
     TypeRef targetType = NullType;
+    std::vector<TypeRef> functionParams;
 
     // struct / union
     std::vector<StabsTypeField> fields;
@@ -436,7 +437,7 @@ public:
         }
         case StabsTypeKind::Function: {
             std::string ret = formatType(t->targetType, depth + 1);
-            return ret + " (*)()";
+            return ret + " (*)(" + formatFunctionParamTypes(*t, depth + 1) + ")";
         }
         case StabsTypeKind::ForwardRef:
             if (!t->forwardTag.empty())
@@ -503,11 +504,18 @@ public:
         }
         // Handle function pointers
         if (t->kind == StabsTypeKind::Pointer) {
-            auto *tgt = resolveType(t->targetType);
+            auto *rawTgt = getType(t->targetType);
+            auto *tgt = rawTgt ? rawTgt : resolveType(t->targetType);
             if (tgt && tgt->kind == StabsTypeKind::Function) {
                 std::string ret = formatType(tgt->targetType);
-                return ret + " (*" + varName + ")()";
+                return ret + " (*" + varName + ")(" +
+                       formatFunctionParamTypes(*tgt) + ")";
             }
+        }
+        if (t->kind == StabsTypeKind::Function) {
+            std::string ret = formatType(t->targetType);
+            return ret + " " + varName + "(" +
+                   formatFunctionParamTypes(*t) + ")";
         }
         std::string typeStr = formatType(ref);
         // void* can't be subscripted or used in arithmetic — use char*
@@ -1205,6 +1213,17 @@ public:
     }
 
 private:
+    std::string formatFunctionParamTypes(const StabsTypeInfo &t, int depth = 0) const {
+        if (t.functionParams.empty())
+            return "void";
+        std::string out;
+        for (size_t i = 0; i < t.functionParams.size(); ++i) {
+            if (i) out += ", ";
+            out += formatType(t.functionParams[i], depth + 1);
+        }
+        return out;
+    }
+
     static int realFieldCount(const StabsTypeInfo &t) {
         int realFields = 0;
         for (auto &f : t.fields) {
@@ -1253,6 +1272,8 @@ private:
         if (!t) return;
         if (t->targetType != NullType)
             visitCNameRoot(t->targetType, score, seen, depth + 1);
+        for (auto paramRef : t->functionParams)
+            visitCNameRoot(paramRef, score, seen, depth + 1);
         for (auto &f : t->fields)
             visitCNameRoot(f.typeRef, score, seen, depth + 1);
     }
@@ -1274,6 +1295,13 @@ private:
             return "array:" + std::to_string(t->arrayLow) + ":" +
                    std::to_string(t->arrayHigh) + ":" +
                    typedefTargetSignature(t->targetType, depth + 1);
+        case StabsTypeKind::Function: {
+            std::string sig = "fn:" + typedefTargetSignature(t->targetType, depth + 1) + "(";
+            for (auto paramRef : t->functionParams)
+                sig += typedefTargetSignature(paramRef, depth + 1) + ",";
+            sig += ")";
+            return sig;
+        }
         case StabsTypeKind::Struct:
         case StabsTypeKind::Union:
             return aggregateKey(*t) + ":" + aggregateCName(ref);
