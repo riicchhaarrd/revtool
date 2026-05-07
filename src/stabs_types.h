@@ -1165,6 +1165,18 @@ public:
                     out += indent + "FILE * handleFiles;\n";
                     return;
                 }
+                auto *fieldType = resolveType(f.typeRef);
+                int storageBits = fieldType && fieldType->sizeBytes > 0
+                    ? fieldType->sizeBytes * 8 : 0;
+                bool isBitField = f.bitSize > 0 &&
+                    (storageBits == 0 || f.bitSize < storageBits ||
+                     (f.bitOffset % 8) != 0);
+                if (isBitField) {
+                    std::string fdecl = formatDecl(f.typeRef, f.name + " : " +
+                                                   std::to_string(f.bitSize));
+                    out += indent + fdecl + ";\n";
+                    return;
+                }
                 std::string fdecl = formatDecl(f.typeRef, f.name);
                 if (fdecl.find("(*)()") != std::string::npos)
                     return;
