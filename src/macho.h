@@ -1381,14 +1381,17 @@ private:
                                 const std::string &name) const {
         if (name == "void") return StabsTypeKind::Void;
         if (name == "bool" || name == "_Bool") return StabsTypeKind::Bool;
+        if (encoding == DW_ATE_float) {
+            if (name == "long double" || sizeBytes > 8)
+                return StabsTypeKind::LongDouble;
+            return sizeBytes > 4 ? StabsTypeKind::Double : StabsTypeKind::Float;
+        }
         if (name.find("long long") != std::string::npos)
             return encoding == DW_ATE_unsigned ? StabsTypeKind::ULongLong
                                                 : StabsTypeKind::LongLong;
         if (name.find("long") != std::string::npos)
             return encoding == DW_ATE_unsigned ? StabsTypeKind::ULong
                                                 : StabsTypeKind::Long;
-        if (encoding == DW_ATE_float)
-            return sizeBytes > 4 ? StabsTypeKind::Double : StabsTypeKind::Float;
         if (encoding == DW_ATE_boolean) return StabsTypeKind::Bool;
         if (encoding == DW_ATE_signed_char) return StabsTypeKind::Char;
         if (encoding == DW_ATE_unsigned_char) return StabsTypeKind::UChar;
