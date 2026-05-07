@@ -238,7 +238,7 @@ void MainWindow::loadFile(const QString &path) {
     m_macho = std::make_unique<MachOFile>();
     if (!m_macho->load(path.toStdString())) {
         QMessageBox::critical(this, "Error",
-            "Failed to load binary.\nSupported formats: Mach-O i386 and PE32 i386.");
+            "Failed to load binary.\nSupported formats: Mach-O i386, PE32 i386, and ELF32 i386.");
         m_macho.reset(); return;
     }
     setWindowTitle(QString("dis  |  %1").arg(QFileInfo(path).fileName()));

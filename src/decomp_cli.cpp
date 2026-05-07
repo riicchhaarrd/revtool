@@ -270,7 +270,7 @@ static bool isTerminatorByte(uint8_t b) {
 }
 
 static uint32_t sectionSpan(const MachOFile &mf, const Section &sec) {
-    if (mf.isPE() && sec.segname == "IMAGE" && sec.align)
+    if (((mf.isPE() && sec.segname == "IMAGE") || mf.isELF()) && sec.align)
         return sec.align;
     return sec.size;
 }
@@ -301,7 +301,7 @@ static uint32_t functionEndAddress(const MachOFile &mf,
 }
 
 static uint32_t guessFunctionStartFromPadding(const MachOFile &mf, uint32_t addr) {
-    if (!mf.isPE()) return 0;
+    if (!mf.isPE() && !mf.isELF()) return 0;
     const Section *sec = mf.sectionForAddress(addr);
     if (!sec || !mf.isCodeSection(*sec) || sec->size == 0) return 0;
     if (addr < sec->addr || addr >= sec->addr + sec->size) return 0;
@@ -476,7 +476,7 @@ static std::vector<StringXrefInfo> findStringXrefs(const MachOFile &mf,
         out.push_back(std::move(hit));
     };
 
-    if (mf.isPE()) {
+    if (mf.isPE() || mf.isELF()) {
         std::unordered_map<uint32_t, StringInfo> targets;
         for (const auto &s : collectStrings(mf)) {
             if (matchesQuery(s.value, queryStd))
@@ -712,7 +712,7 @@ int main(int argc, char *argv[]) {
 
     MachOFile mf;
     if (!mf.load(binPath)) {
-        return fail(1, QString("Failed to load %1 (supported: Mach-O i386, PE32 i386)")
+        return fail(1, QString("Failed to load %1 (supported: Mach-O i386, PE32 i386, ELF32 i386)")
                           .arg(QString::fromUtf8(binPath)));
     }
 

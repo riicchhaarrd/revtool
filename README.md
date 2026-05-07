@@ -17,7 +17,7 @@ The browser version runs the same decompiler core through WebAssembly. Files are
 - Native Qt interface for desktop binary exploration.
 - Browser UI built from the same C++ decompiler core through Emscripten.
 - CLI entry point for scripts, tests, and automation.
-- 32-bit x86 Mach-O and PE32 parsing.
+- 32-bit x86 Mach-O, PE32, and ELF parsing.
 - Capstone-backed x86 disassembly.
 - Function, source file, string, and string cross-reference views.
 - STABS-aware symbol, type, source file, local, parameter, and line metadata recovery.
@@ -109,5 +109,6 @@ Revtool currently targets 32-bit x86 binaries:
 
 - Mach-O i386
 - PE32 i386
+- ELF32 i386
 
 Decompiler output is intended as an analysis aid. It is not a guarantee of buildable source reconstruction, especially for stripped, optimized, obfuscated, or metadata-poor binaries.

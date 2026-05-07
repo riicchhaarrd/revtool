@@ -223,7 +223,7 @@ static bool isTerminatorByte(uint8_t b) {
 }
 
 static uint32_t sectionSpan(const MachOFile &mf, const Section &sec) {
-    if (mf.isPE() && sec.segname == "IMAGE" && sec.align)
+    if (((mf.isPE() && sec.segname == "IMAGE") || mf.isELF()) && sec.align)
         return sec.align;
     return sec.size;
 }
@@ -254,7 +254,7 @@ static uint32_t functionEndAddress(const MachOFile &mf,
 }
 
 static uint32_t guessFunctionStartFromPadding(const MachOFile &mf, uint32_t addr) {
-    if (!mf.isPE()) return 0;
+    if (!mf.isPE() && !mf.isELF()) return 0;
     const Section *sec = mf.sectionForAddress(addr);
     if (!sec || !mf.isCodeSection(*sec) || sec->size == 0) return 0;
     if (addr < sec->addr || addr >= sec->addr + sec->size) return 0;
@@ -426,7 +426,7 @@ static std::vector<StringXrefInfo> findStringXrefsByAddress(const MachOFile &mf,
         out.push_back(std::move(hit));
     };
 
-    if (mf.isPE()) {
+    if (mf.isPE() || mf.isELF()) {
         for (const Section *sec : mf.allSections()) {
             if (!sec || !mf.isCodeSection(*sec) || sec->size < 4) continue;
             const uint8_t *code = mf.bytesAt(sec->offset, sec->size);
@@ -518,7 +518,7 @@ std::string loadBinaryPtr(uintptr_t ptr, size_t len) {
 
     g_mf = MachOFile();
     g_loaded = g_mf.load("/tmp/input.bin");
-    if (!g_loaded) return "error: not a supported Mach-O or PE32 binary";
+    if (!g_loaded) return "error: not a supported Mach-O, PE32, or ELF32 binary";
 
     return "ok: " + std::to_string(len) + " bytes, " +
            std::to_string(collectFunctions(g_mf).size()) + " functions, " +

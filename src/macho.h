@@ -8,6 +8,7 @@
 #include <vector>
 #include <fstream>
 #include <algorithm>
+#include <map>
 #include <unordered_map>
 
 // ── Mach-O constants ────────────────────────────────────────────────
@@ -134,6 +135,7 @@ struct NList {
     uint8_t  n_sect;   // 1-based section index
     int16_t  n_desc;
     uint32_t n_value;
+    uint32_t n_size = 0;
     std::string name;
 };
 
@@ -148,7 +150,51 @@ enum class BinaryFormat {
     Unknown,
     MachO32,
     PE32,
+    ELF32,
 };
+
+// ── ELF constants ──────────────────────────────────────────────────
+constexpr uint32_t ELF_MAGIC_LE = 0x464C457F; // "\x7FELF" read little-endian
+constexpr uint8_t  ELFCLASS32   = 1;
+constexpr uint8_t  ELFDATA2LSB  = 1;
+constexpr uint16_t ET_REL       = 1;
+constexpr uint16_t ET_EXEC      = 2;
+constexpr uint16_t ET_DYN       = 3;
+constexpr uint16_t EM_386       = 3;
+
+constexpr uint32_t PT_LOAD      = 1;
+constexpr uint32_t PT_DYNAMIC   = 2;
+constexpr uint32_t PT_INTERP    = 3;
+constexpr uint32_t PT_NOTE      = 4;
+constexpr uint32_t PT_PHDR      = 6;
+
+constexpr uint32_t PF_X         = 0x1;
+constexpr uint32_t PF_W         = 0x2;
+constexpr uint32_t PF_R         = 0x4;
+
+constexpr uint32_t SHT_NULL     = 0;
+constexpr uint32_t SHT_PROGBITS = 1;
+constexpr uint32_t SHT_SYMTAB   = 2;
+constexpr uint32_t SHT_STRTAB   = 3;
+constexpr uint32_t SHT_RELA     = 4;
+constexpr uint32_t SHT_DYNAMIC  = 6;
+constexpr uint32_t SHT_NOBITS   = 8;
+constexpr uint32_t SHT_REL      = 9;
+constexpr uint32_t SHT_DYNSYM   = 11;
+
+constexpr uint32_t SHF_WRITE     = 0x1;
+constexpr uint32_t SHF_ALLOC     = 0x2;
+constexpr uint32_t SHF_EXECINSTR = 0x4;
+
+constexpr uint8_t STT_NOTYPE  = 0;
+constexpr uint8_t STT_OBJECT  = 1;
+constexpr uint8_t STT_FUNC    = 2;
+constexpr uint8_t STT_SECTION = 3;
+constexpr uint8_t STT_FILE    = 4;
+
+constexpr uint32_t SHN_UNDEF = 0;
+constexpr uint32_t SHN_ABS   = 0xFFF1;
+constexpr int32_t  DT_NEEDED = 1;
 
 struct DataDirectoryEntry {
     std::string name;
@@ -198,6 +244,34 @@ struct PEHeader {
     std::vector<DataDirectoryEntry> dataDirectories;
 };
 
+struct ELFHeader {
+    uint8_t  ident[16] = {};
+    uint16_t type = 0;
+    uint16_t machine = 0;
+    uint32_t version = 0;
+    uint32_t entry = 0;
+    uint32_t phoff = 0;
+    uint32_t shoff = 0;
+    uint32_t flags = 0;
+    uint16_t ehsize = 0;
+    uint16_t phentsize = 0;
+    uint16_t phnum = 0;
+    uint16_t shentsize = 0;
+    uint16_t shnum = 0;
+    uint16_t shstrndx = 0;
+};
+
+struct ELFProgramHeader {
+    uint32_t type = 0;
+    uint32_t offset = 0;
+    uint32_t vaddr = 0;
+    uint32_t paddr = 0;
+    uint32_t filesz = 0;
+    uint32_t memsz = 0;
+    uint32_t flags = 0;
+    uint32_t align = 0;
+};
+
 struct StabsFunction {
     std::string name;
     std::string rawName;     // with type info
@@ -243,7 +317,10 @@ public:
     BinaryFormat             format()     const { return m_format; }
     bool                     isMachO()    const { return m_format == BinaryFormat::MachO32; }
     bool                     isPE()       const { return m_format == BinaryFormat::PE32; }
+    bool                     isELF()      const { return m_format == BinaryFormat::ELF32; }
     const PEHeader&          peHeader()   const { return m_peHeader; }
+    const ELFHeader&         elfHeader()  const { return m_elfHeader; }
+    const std::vector<ELFProgramHeader>& elfProgramHeaders() const { return m_elfProgramHeaders; }
     const MachHeader&        header()     const { return m_header; }
     const std::vector<LoadCommand>& loadCommands() const { return m_loadCmds; }
     const std::vector<Segment>&     segments()     const { return m_segments; }
@@ -262,6 +339,7 @@ public:
         switch (m_format) {
         case BinaryFormat::MachO32: return "Mach-O i386";
         case BinaryFormat::PE32:    return "PE32 i386";
+        case BinaryFormat::ELF32:   return "ELF32 i386";
         default:                    return "Unknown";
         }
         return "Unknown";
@@ -321,12 +399,18 @@ public:
             return (sec.flags & 0x00000020) || (sec.flags & 0x20000000) ||
                    sec.sectname == ".text" || sec.sectname == ".code";
         }
+        if (isELF()) {
+            return (sec.flags & SHF_EXECINSTR) || sec.sectname == ".text" ||
+                   sec.sectname == ".init" || sec.sectname == ".fini" ||
+                   sec.sectname == ".plt" || sec.sectname == ".plt.sec";
+        }
         return (sec.flags & 0x80000000) || (sec.flags & 0x00000400) ||
                ((sec.flags & 0xFF) == 0 && sec.sectname.find("text") != std::string::npos);
     }
 
     bool isTextSection(const Section &sec) const {
         if (isPE()) return sec.sectname == ".text" || isCodeSection(sec);
+        if (isELF()) return sec.sectname == ".text" || isCodeSection(sec);
         return sec.sectname == "__text" || sec.sectname == "__textcoal_nt" || isCodeSection(sec);
     }
 
@@ -335,6 +419,12 @@ public:
             return sec.sectname == ".idata" || sec.sectname == ".didat" ||
                    sec.sectname == ".rdata";
         }
+        if (isELF()) {
+            return sec.sectname == ".plt" || sec.sectname == ".plt.sec" ||
+                   sec.sectname == ".got" || sec.sectname == ".got.plt" ||
+                   sec.sectname == ".dynamic" || sec.sectname == ".dynsym" ||
+                   sec.sectname == ".dynstr";
+        }
         return sec.segname == "__IMPORT";
     }
 
@@ -342,6 +432,12 @@ public:
         if (isPE())
             return sec.sectname == ".rdata" || sec.sectname == ".data" ||
                    sec.sectname == ".idata";
+        if (isELF())
+            return sec.sectname == ".rodata" ||
+                   sec.sectname.find(".rodata.") == 0 ||
+                   sec.sectname == ".data.rel.ro" ||
+                   sec.sectname.find(".data.rel.ro.") == 0 ||
+                   sec.sectname == ".data";
         return sec.sectname == "__cstring";
     }
 
@@ -352,6 +448,18 @@ public:
                    sec.sectname == ".idata" || sec.sectname == ".bss" ||
                    sec.sectname == ".tls" || sec.sectname == ".rsrc" ||
                    (sec.flags & 0x00000040) || (sec.flags & 0x00000080);
+        }
+        if (isELF()) {
+            return (sec.flags & SHF_ALLOC) &&
+                   (sec.sectname == ".data" || sec.sectname == ".rodata" ||
+                    sec.sectname.find(".rodata.") == 0 ||
+                    sec.sectname == ".data.rel.ro" ||
+                    sec.sectname.find(".data.rel.ro.") == 0 ||
+                    sec.sectname == ".bss" || sec.sectname == ".got" ||
+                    sec.sectname == ".got.plt" || sec.sectname == ".dynamic" ||
+                    sec.sectname == ".init_array" || sec.sectname == ".fini_array" ||
+                    sec.sectname == ".ctors" || sec.sectname == ".dtors" ||
+                    (sec.flags & SHF_WRITE));
         }
         return sec.segname == "__DATA" || sec.segname == "__IMPORT";
     }
@@ -405,6 +513,12 @@ public:
     // Build address -> function name map
     const std::unordered_map<uint32_t, std::string>& functionMap() const {
         return m_funcMap;
+    }
+
+    std::string symbolDisplayName(const std::string &name, bool nameOnly = true) const {
+        if (isELF() && name.rfind("_Z", 0) != 0 && name.rfind("__Z", 0) != 0)
+            return name;
+        return nameOnly ? demangleNameOnly(name) : demangle(name);
     }
 
     // LC name
@@ -542,9 +656,46 @@ public:
         return out.empty() ? "NONE" : out;
     }
 
+    static const char* elfTypeName(uint16_t type) {
+        switch (type) {
+        case ET_REL:  return "ET_REL";
+        case ET_EXEC: return "ET_EXEC";
+        case ET_DYN:  return "ET_DYN";
+        default:      return "UNKNOWN";
+        }
+    }
+
+    static const char* elfMachineName(uint16_t machine) {
+        switch (machine) {
+        case EM_386: return "i386";
+        default:     return "unknown";
+        }
+    }
+
+    static const char* elfProgramTypeName(uint32_t type) {
+        switch (type) {
+        case PT_LOAD:    return "PT_LOAD";
+        case PT_DYNAMIC: return "PT_DYNAMIC";
+        case PT_INTERP:  return "PT_INTERP";
+        case PT_NOTE:    return "PT_NOTE";
+        case PT_PHDR:    return "PT_PHDR";
+        default:         return "PT_UNKNOWN";
+        }
+    }
+
+    static std::string elfProgramFlagsString(uint32_t flags) {
+        std::string out;
+        if (flags & PF_R) out += "R";
+        if (flags & PF_W) out += "W";
+        if (flags & PF_X) out += "X";
+        return out.empty() ? "-" : out;
+    }
+
 private:
     uint32_t sectionAddressSpan(const Section &sec) const {
         if (isPE() && sec.segname == "IMAGE")
+            return sec.align ? sec.align : sec.size;
+        if (isELF())
             return sec.align ? sec.align : sec.size;
         return sec.size;
     }
@@ -556,12 +707,15 @@ private:
         m_format = BinaryFormat::Unknown;
         m_header = {};
         m_peHeader = {};
+        m_elfHeader = {};
+        m_elfProgramHeaders.clear();
         m_loadCmds.clear();
         m_segments.clear();
         m_symbols.clear();
         m_dataSymMap.clear();
         m_dylibs.clear();
         m_symoff = m_nsyms = m_stroff = m_strsize = 0;
+        m_elfSectionToFlat.clear();
         m_entryPoint = 0;
         m_stabsFuncs.clear();
         m_stabsSources.clear();
@@ -582,16 +736,41 @@ private:
         return std::string(s, strnlen(s, m_size - off));
     }
 
+    std::string stringAtBounded(uint32_t stroff, uint32_t strsize, uint32_t idx) const {
+        if (idx >= strsize || stroff > m_size) return "";
+        uint64_t pos64 = (uint64_t)stroff + idx;
+        if (pos64 >= m_size) return "";
+        size_t pos = (size_t)pos64;
+        size_t maxlen = std::min<size_t>(strsize - idx, m_size - pos);
+        const char *s = reinterpret_cast<const char*>(m_data.data() + pos);
+        return std::string(s, strnlen(s, maxlen));
+    }
+
     std::string readFixedString(size_t off, size_t maxlen) const {
         if (off + maxlen > m_size) return "";
         const char *s = reinterpret_cast<const char*>(m_data.data() + off);
         return std::string(s, strnlen(s, maxlen));
     }
 
+    struct ELFSectionRecord {
+        std::string name;
+        uint32_t type = 0;
+        uint32_t flags = 0;
+        uint32_t addr = 0;
+        uint32_t offset = 0;
+        uint32_t size = 0;
+        uint32_t link = 0;
+        uint32_t info = 0;
+        uint32_t addralign = 0;
+        uint32_t entsize = 0;
+    };
+
     bool parse() {
         if (m_size >= 0x40 && readLE<uint16_t>(0) == 0x5A4D)
             return parsePE();
         if (m_size < 28) return false;
+        if (m_size >= 52 && readLE<uint32_t>(0) == ELF_MAGIC_LE)
+            return parseELF();
         if (readLE<uint32_t>(0) == MH_MAGIC_32)
             return parseMachO();
         return false;
@@ -768,7 +947,7 @@ private:
             if (secIdx >= 0 && m_funcMap.find(addr) == m_funcMap.end()) {
                 auto secs = allSections();
                 if (secIdx < (int)secs.size() && isCodeSection(*secs[secIdx]))
-                    m_funcMap[addr] = demangleNameOnly(name);
+                    m_funcMap[addr] = symbolDisplayName(name);
             }
         }
     }
@@ -891,6 +1070,311 @@ private:
         return true;
     }
 
+    static uint8_t elfSymbolType(uint8_t info) {
+        return info & 0x0F;
+    }
+
+    void addELFSymbol(const std::string &name, uint32_t nameIdx, uint8_t info,
+                      uint16_t shndx, uint32_t value, uint32_t size) {
+        uint8_t stype = elfSymbolType(info);
+        if (stype == STT_FILE) return;
+        if (name.empty() && stype != STT_SECTION) return;
+
+        NList sym{};
+        sym.n_strx = nameIdx;
+        sym.n_desc = info;
+        sym.n_value = value;
+        sym.n_size = size;
+        sym.name = name;
+
+        if (shndx == SHN_UNDEF) {
+            sym.n_type = N_UNDF;
+            sym.n_sect = 0;
+        } else if (shndx == SHN_ABS) {
+            sym.n_type = N_ABS;
+            sym.n_sect = 0;
+        } else {
+            sym.n_type = N_SECT;
+            sym.n_sect = (shndx < m_elfSectionToFlat.size())
+                ? m_elfSectionToFlat[shndx] : 0;
+        }
+
+        for (const auto &existing : m_symbols) {
+            if (existing.n_type == sym.n_type && existing.n_sect == sym.n_sect &&
+                existing.n_value == sym.n_value && existing.n_size == sym.n_size &&
+                existing.name == sym.name)
+                return;
+        }
+        m_symbols.push_back(std::move(sym));
+    }
+
+    std::string elfSymbolName(const std::vector<ELFSectionRecord> &sections,
+                              uint32_t symtabIdx, uint32_t symIdx) const {
+        if (symtabIdx >= sections.size()) return "";
+        const auto &symtab = sections[symtabIdx];
+        if (symtab.entsize < 16 || symtab.link >= sections.size()) return "";
+        uint64_t symOff = (uint64_t)symtab.offset + (uint64_t)symIdx * symtab.entsize;
+        if (symOff + 16 > m_size || symOff + 16 > (uint64_t)symtab.offset + symtab.size)
+            return "";
+        const auto &strtab = sections[symtab.link];
+        uint32_t nameIdx = readLE<uint32_t>((size_t)symOff);
+        return stringAtBounded(strtab.offset, strtab.size, nameIdx);
+    }
+
+    void parseELFSymbolTable(const std::vector<ELFSectionRecord> &sections,
+                             uint32_t symtabIdx) {
+        if (symtabIdx >= sections.size()) return;
+        const auto &symtab = sections[symtabIdx];
+        if ((symtab.type != SHT_SYMTAB && symtab.type != SHT_DYNSYM) ||
+            symtab.entsize < 16 || symtab.link >= sections.size() ||
+            symtab.offset >= m_size)
+            return;
+
+        const auto &strtab = sections[symtab.link];
+        uint32_t count = symtab.entsize ? symtab.size / symtab.entsize : 0;
+        m_symbols.reserve(m_symbols.size() + std::min<uint32_t>(count, 500000));
+        for (uint32_t i = 0; i < count; ++i) {
+            uint64_t off = (uint64_t)symtab.offset + (uint64_t)i * symtab.entsize;
+            if (off + 16 > m_size) break;
+            uint32_t nameIdx = readLE<uint32_t>((size_t)off);
+            uint32_t value = readLE<uint32_t>((size_t)off + 4);
+            uint32_t size = readLE<uint32_t>((size_t)off + 8);
+            uint8_t info = readLE<uint8_t>((size_t)off + 12);
+            uint16_t shndx = readLE<uint16_t>((size_t)off + 14);
+            std::string name = stringAtBounded(strtab.offset, strtab.size, nameIdx);
+            addELFSymbol(name, nameIdx, info, shndx, value, size);
+        }
+    }
+
+    void parseELFStabsSection(const ELFSectionRecord &stab,
+                              const ELFSectionRecord &stabstr) {
+        if (stab.offset >= m_size || stab.entsize == 0) return;
+        uint32_t entsize = stab.entsize >= 12 ? stab.entsize : 12;
+        uint32_t count = stab.size / entsize;
+        m_symoff = stab.offset;
+        m_nsyms = count;
+        m_stroff = stabstr.offset;
+        m_strsize = stabstr.size;
+
+        m_symbols.reserve(m_symbols.size() + std::min<uint32_t>(count, 500000));
+        for (uint32_t i = 0; i < count; ++i) {
+            uint64_t off = (uint64_t)stab.offset + (uint64_t)i * entsize;
+            if (off + 12 > m_size) break;
+            NList nl{};
+            nl.n_strx = readLE<uint32_t>((size_t)off);
+            nl.n_type = readLE<uint8_t>((size_t)off + 4);
+            nl.n_sect = readLE<uint8_t>((size_t)off + 5);
+            nl.n_desc = readLE<int16_t>((size_t)off + 6);
+            nl.n_value = readLE<uint32_t>((size_t)off + 8);
+            nl.name = stringAtBounded(stabstr.offset, stabstr.size, nl.n_strx);
+            m_symbols.push_back(std::move(nl));
+        }
+    }
+
+    void parseELFDynamicNeeded(const std::vector<ELFSectionRecord> &sections) {
+        for (const auto &sec : sections) {
+            if (sec.type != SHT_DYNAMIC || sec.entsize < 8 ||
+                sec.offset >= m_size || sec.link >= sections.size())
+                continue;
+
+            const auto &strtab = sections[sec.link];
+            uint32_t count = sec.size / sec.entsize;
+            for (uint32_t i = 0; i < count; ++i) {
+                uint64_t off = (uint64_t)sec.offset + (uint64_t)i * sec.entsize;
+                if (off + 8 > m_size) break;
+                int32_t tag = readLE<int32_t>((size_t)off);
+                uint32_t val = readLE<uint32_t>((size_t)off + 4);
+                if (tag == 0) break;
+                if (tag != DT_NEEDED) continue;
+                std::string name = stringAtBounded(strtab.offset, strtab.size, val);
+                if (name.empty()) continue;
+                bool dup = false;
+                for (const auto &dl : m_dylibs)
+                    if (dl.name == name) { dup = true; break; }
+                if (!dup)
+                    m_dylibs.push_back({name, 0, 0, 0});
+            }
+        }
+    }
+
+    const Section* elfSectionByName(const std::string &name) const {
+        for (const Section *sec : allSections())
+            if (sec && sec->sectname == name)
+                return sec;
+        return nullptr;
+    }
+
+    void parseELFPltRelocations(const std::vector<ELFSectionRecord> &sections) {
+        const Section *plt = elfSectionByName(".plt.sec");
+        bool pltSec = plt != nullptr;
+        if (!plt) {
+            plt = elfSectionByName(".plt");
+            pltSec = false;
+        }
+        if (!plt || plt->addr == 0) return;
+
+        uint32_t pltEntrySize = 16;
+        for (const auto &rel : sections) {
+            if (rel.type != SHT_REL || rel.entsize < 8 || rel.offset >= m_size ||
+                rel.link >= sections.size())
+                continue;
+            if (rel.name.find(".rel.plt") != 0 && rel.name.find(".rel.dyn") != 0)
+                continue;
+
+            uint32_t count = rel.size / rel.entsize;
+            for (uint32_t i = 0; i < count; ++i) {
+                uint64_t off = (uint64_t)rel.offset + (uint64_t)i * rel.entsize;
+                if (off + 8 > m_size) break;
+                uint32_t info = readLE<uint32_t>((size_t)off + 4);
+                uint32_t symIdx = info >> 8;
+                std::string name = elfSymbolName(sections, rel.link, symIdx);
+                if (name.empty()) continue;
+
+                uint32_t stubAddr = 0;
+                if (rel.name.find(".rel.plt") == 0) {
+                    stubAddr = plt->addr + pltEntrySize * (pltSec ? i : i + 1);
+                }
+                if (stubAddr && m_funcMap.find(stubAddr) == m_funcMap.end())
+                    m_funcMap[stubAddr] = symbolDisplayName(name);
+            }
+        }
+    }
+
+    bool parseELF() {
+        if (m_size < 52 || readLE<uint32_t>(0) != ELF_MAGIC_LE) return false;
+        if (readLE<uint8_t>(4) != ELFCLASS32 || readLE<uint8_t>(5) != ELFDATA2LSB)
+            return false;
+
+        memcpy(m_elfHeader.ident, m_data.data(), 16);
+        m_elfHeader.type = readLE<uint16_t>(16);
+        m_elfHeader.machine = readLE<uint16_t>(18);
+        m_elfHeader.version = readLE<uint32_t>(20);
+        m_elfHeader.entry = readLE<uint32_t>(24);
+        m_elfHeader.phoff = readLE<uint32_t>(28);
+        m_elfHeader.shoff = readLE<uint32_t>(32);
+        m_elfHeader.flags = readLE<uint32_t>(36);
+        m_elfHeader.ehsize = readLE<uint16_t>(40);
+        m_elfHeader.phentsize = readLE<uint16_t>(42);
+        m_elfHeader.phnum = readLE<uint16_t>(44);
+        m_elfHeader.shentsize = readLE<uint16_t>(46);
+        m_elfHeader.shnum = readLE<uint16_t>(48);
+        m_elfHeader.shstrndx = readLE<uint16_t>(50);
+
+        if (m_elfHeader.machine != EM_386 || m_elfHeader.version != 1 ||
+            (m_elfHeader.type != ET_EXEC && m_elfHeader.type != ET_DYN))
+            return false;
+        if (m_elfHeader.phnum && (m_elfHeader.phentsize < 32 ||
+            (uint64_t)m_elfHeader.phoff + (uint64_t)m_elfHeader.phnum * m_elfHeader.phentsize > m_size))
+            return false;
+        if (m_elfHeader.shnum == 0 || m_elfHeader.shentsize < 40 ||
+            (uint64_t)m_elfHeader.shoff + (uint64_t)m_elfHeader.shnum * m_elfHeader.shentsize > m_size)
+            return false;
+
+        m_format = BinaryFormat::ELF32;
+        m_entryPoint = m_elfHeader.entry;
+
+        for (uint32_t i = 0; i < m_elfHeader.phnum; ++i) {
+            uint64_t off = (uint64_t)m_elfHeader.phoff + (uint64_t)i * m_elfHeader.phentsize;
+            ELFProgramHeader ph{};
+            ph.type = readLE<uint32_t>((size_t)off);
+            ph.offset = readLE<uint32_t>((size_t)off + 4);
+            ph.vaddr = readLE<uint32_t>((size_t)off + 8);
+            ph.paddr = readLE<uint32_t>((size_t)off + 12);
+            ph.filesz = readLE<uint32_t>((size_t)off + 16);
+            ph.memsz = readLE<uint32_t>((size_t)off + 20);
+            ph.flags = readLE<uint32_t>((size_t)off + 24);
+            ph.align = readLE<uint32_t>((size_t)off + 28);
+            m_elfProgramHeaders.push_back(ph);
+        }
+
+        std::vector<ELFSectionRecord> sections(m_elfHeader.shnum);
+        for (uint32_t i = 0; i < m_elfHeader.shnum; ++i) {
+            uint64_t off = (uint64_t)m_elfHeader.shoff + (uint64_t)i * m_elfHeader.shentsize;
+            auto &sec = sections[i];
+            sec.name = "";
+            sec.type = readLE<uint32_t>((size_t)off + 4);
+            sec.flags = readLE<uint32_t>((size_t)off + 8);
+            sec.addr = readLE<uint32_t>((size_t)off + 12);
+            sec.offset = readLE<uint32_t>((size_t)off + 16);
+            sec.size = readLE<uint32_t>((size_t)off + 20);
+            sec.link = readLE<uint32_t>((size_t)off + 24);
+            sec.info = readLE<uint32_t>((size_t)off + 28);
+            sec.addralign = readLE<uint32_t>((size_t)off + 32);
+            sec.entsize = readLE<uint32_t>((size_t)off + 36);
+        }
+
+        if (m_elfHeader.shstrndx >= sections.size()) return false;
+        const auto &shstr = sections[m_elfHeader.shstrndx];
+        for (uint32_t i = 0; i < m_elfHeader.shnum; ++i) {
+            uint64_t off = (uint64_t)m_elfHeader.shoff + (uint64_t)i * m_elfHeader.shentsize;
+            uint32_t nameIdx = readLE<uint32_t>((size_t)off);
+            sections[i].name = stringAtBounded(shstr.offset, shstr.size, nameIdx);
+        }
+
+        Segment imageSeg;
+        imageSeg.segname = "ELF";
+        imageSeg.vmaddr = UINT32_MAX;
+        imageSeg.vmsize = 0;
+        imageSeg.fileoff = 0;
+        imageSeg.filesize = (uint32_t)m_size;
+        imageSeg.flags = m_elfHeader.flags;
+
+        m_elfSectionToFlat.assign(m_elfHeader.shnum, 0);
+        uint32_t maxAddr = 0;
+        for (uint32_t i = 0; i < sections.size(); ++i) {
+            const auto &sh = sections[i];
+            if (sh.type == SHT_NULL || !(sh.flags & SHF_ALLOC) || sh.size == 0)
+                continue;
+
+            Section sec{};
+            sec.sectname = sh.name.empty() ? ("section_" + std::to_string(i)) : sh.name;
+            sec.segname = "ELF";
+            sec.addr = sh.addr;
+            sec.align = sh.size; // ELF virtual span; file-backed bytes are in size.
+            sec.offset = sh.offset;
+            sec.size = sh.type == SHT_NOBITS ? 0 : sh.size;
+            if (sec.offset > m_size) sec.size = 0;
+            else if ((uint64_t)sec.offset + sec.size > m_size)
+                sec.size = (uint32_t)(m_size - sec.offset);
+            sec.reloff = 0;
+            sec.nreloc = 0;
+            sec.flags = sh.flags;
+
+            m_elfSectionToFlat[i] = (uint8_t)(imageSeg.sections.size() + 1);
+            imageSeg.sections.push_back(std::move(sec));
+            imageSeg.vmaddr = std::min(imageSeg.vmaddr, sh.addr);
+            if (sh.addr + sh.size > maxAddr) maxAddr = sh.addr + sh.size;
+        }
+        if (imageSeg.vmaddr == UINT32_MAX) imageSeg.vmaddr = 0;
+        imageSeg.vmsize = maxAddr > imageSeg.vmaddr ? maxAddr - imageSeg.vmaddr : 0;
+        imageSeg.nsects = (uint32_t)imageSeg.sections.size();
+        m_segments.push_back(std::move(imageSeg));
+
+        for (uint32_t i = 0; i < sections.size(); ++i) {
+            if (sections[i].type == SHT_SYMTAB || sections[i].type == SHT_DYNSYM)
+                parseELFSymbolTable(sections, i);
+        }
+
+        for (uint32_t i = 0; i < sections.size(); ++i) {
+            if (sections[i].name != ".stab") continue;
+            uint32_t strIdx = sections[i].link;
+            if (strIdx >= sections.size()) {
+                for (uint32_t j = 0; j < sections.size(); ++j)
+                    if (sections[j].name == ".stabstr") { strIdx = j; break; }
+            }
+            if (strIdx < sections.size())
+                parseELFStabsSection(sections[i], sections[strIdx]);
+        }
+
+        parseELFDynamicNeeded(sections);
+        parseELFPltRelocations(sections);
+        parseSTABS();
+        buildFunctionMap();
+        if (m_entryPoint && m_funcMap.find(m_entryPoint) == m_funcMap.end())
+            m_funcMap[m_entryPoint] = "entry_point";
+        return true;
+    }
+
     void parseSegment(uint32_t off) {
         Segment seg;
         seg.segname  = readFixedString(off + 8, 16);
@@ -996,10 +1480,10 @@ private:
                 break;
             }
             case N_FUN: {
-                if (!sym.name.empty() && sym.n_sect != 0) {
+                if (!sym.name.empty()) {
                     StabsFunction fn;
                     fn.rawName = sym.name;
-                    fn.name = demangleNameOnly(cleanStabsName(sym.name));
+                    fn.name = symbolDisplayName(cleanStabsName(sym.name));
                     fn.address = sym.n_value;
                     fn.isGlobal = (sym.name.find(":F") != std::string::npos);
                     fn.sourceFileIdx = curSourceIdx;
@@ -1010,7 +1494,7 @@ private:
                     curFunc = &m_stabsFuncs.back();
                     if (curSourceIdx >= 0)
                         m_stabsSources[curSourceIdx].functionIndices.push_back(m_stabsFuncs.size()-1);
-                } else if (sym.name.empty() || sym.n_sect == 0) {
+                } else {
                     if (curFunc) {
                         curFunc->size = sym.n_value;
                         curFunc = nullptr;
@@ -1376,14 +1860,19 @@ private:
                 if (secIdx >= 0 && secIdx < (int)secs.size() &&
                     !isCodeSection(*secs[secIdx]))
                     continue;
+                if (isELF()) {
+                    uint8_t stype = elfSymbolType((uint8_t)sym.n_desc);
+                    if (stype != STT_FUNC && stype != STT_NOTYPE)
+                        continue;
+                }
                 if (m_funcMap.find(sym.n_value) == m_funcMap.end())
-                    m_funcMap[sym.n_value] = demangleNameOnly(sym.name);
+                    m_funcMap[sym.n_value] = symbolDisplayName(sym.name);
             }
         }
         // Resolve import stubs via indirect symbol table
         if (isMachO())
             resolveImportStubs();
-        if (isPE()) {
+        if (isPE() || isELF()) {
             discoverFunctionStartsFromCalls();
             discoverFunctionStartsFromPadding();
         }
@@ -1636,10 +2125,10 @@ private:
                 continue;
             }
             std::string name = sym.name;
-            if (!name.empty() && name[0] == '_') name = name.substr(1);
+            if (!isELF() && !name.empty() && name[0] == '_') name = name.substr(1);
             if (name.find(':') != std::string::npos) continue;
             // Demangle C++ names
-            std::string demangled = demangleNameOnly(sym.name);
+            std::string demangled = symbolDisplayName(sym.name);
             if (!demangled.empty() && demangled != sym.name) {
                 name = demangled;
                 // Strip function scope from static locals:
@@ -1680,12 +2169,15 @@ private:
     BinaryFormat        m_format = BinaryFormat::Unknown;
     MachHeader          m_header{};
     PEHeader            m_peHeader{};
+    ELFHeader           m_elfHeader{};
+    std::vector<ELFProgramHeader> m_elfProgramHeaders;
     std::vector<LoadCommand> m_loadCmds;
     std::vector<Segment>     m_segments;
     std::vector<NList>       m_symbols;
     mutable std::map<uint32_t, std::string> m_dataSymMap;
     std::vector<Dylib>       m_dylibs;
     uint32_t m_symoff = 0, m_nsyms = 0, m_stroff = 0, m_strsize = 0;
+    std::vector<uint8_t> m_elfSectionToFlat;
     uint32_t m_entryPoint = 0;
 
     std::vector<StabsFunction>   m_stabsFuncs;

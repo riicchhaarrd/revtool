@@ -35,11 +35,13 @@ static QString classifySymbol(const NList &sym, const MachOFile *mf) {
             if (mf->isImportSection(sec)) return "Import";
             if (mf->isDataSection(sec)) {
                 if (sn == "__const" || sn == "__literal4" || sn == "__literal8" ||
-                    sn == "__cstring" || sn == ".rdata" || sn == ".pdata")
+                    sn == "__cstring" || sn == ".rdata" || sn == ".pdata" ||
+                    sn == ".rodata" || sn.find(".rodata.") == 0)
                     return "Const";
                 return "Data";
             }
-            if (sn == "__const" || sn == "__literal4" || sn == "__literal8" || sn == "__cstring")
+            if (sn == "__const" || sn == "__literal4" || sn == "__literal8" ||
+                sn == "__cstring" || sn == ".rodata" || sn.find(".rodata.") == 0)
                 return "Const";
         }
         return "Symbol";
@@ -145,8 +147,10 @@ InfoWidget::InfoWidget(QWidget *parent) : QTabWidget(parent) {
 void InfoWidget::setMachO(MachOFile *macho) {
     m_macho = macho;
     if (!macho) return;
-    setTabText(1, m_macho->isPE() ? "Directories" : "Load Cmds");
-    setTabText(7, m_macho->isPE() ? "DLLs" : "Dylibs");
+    setTabText(1, m_macho->isPE() ? "Directories" :
+                  m_macho->isELF() ? "Program Hdrs" : "Load Cmds");
+    setTabText(7, m_macho->isPE() ? "DLLs" :
+                  m_macho->isELF() ? "Needed" : "Dylibs");
     buildHeaderTab();
     buildLoadCmdsTab();
     buildSegmentsTab();
@@ -176,6 +180,19 @@ void InfoWidget::buildHeaderTab() {
         info += QString("Headers:      %1 bytes\n").arg(h.sizeOfHeaders);
         info += QString("Chars:        %1\n").arg(QString::fromStdString(
                     MachOFile::peCharacteristicsString(h.characteristics)));
+        info += QString("File Size:    %1 bytes (%2 KB)\n")
+                    .arg(m_macho->size()).arg(m_macho->size() / 1024);
+    } else if (m_macho->isELF()) {
+        auto &h = m_macho->elfHeader();
+        info += "Format:       ELF32\n";
+        info += QString("Type:         %1 (%2)\n")
+                    .arg(MachOFile::elfTypeName(h.type)).arg(h.type);
+        info += QString("Machine:      %1 (%2)\n")
+                    .arg(MachOFile::elfMachineName(h.machine)).arg(h.machine);
+        info += QString("Entry Point:  %1\n").arg(hex32(m_macho->entryPoint()));
+        info += QString("Program Hdrs: %1\n").arg(h.phnum);
+        info += QString("Section Hdrs: %1\n").arg(h.shnum);
+        info += QString("Flags:        0x%1\n").arg(h.flags, 8, 16, QChar('0')).toUpper();
         info += QString("File Size:    %1 bytes (%2 KB)\n")
                     .arg(m_macho->size()).arg(m_macho->size() / 1024);
     } else {
@@ -210,6 +227,9 @@ void InfoWidget::buildHeaderTab() {
     if (m_macho->isPE()) {
         info += QString("  DLLs:      %1\n").arg(m_macho->dylibs().size());
         info += QString("  Named Addrs:%1\n").arg(m_macho->functionMap().size());
+    } else if (m_macho->isELF()) {
+        info += QString("  Needed:    %1\n").arg(m_macho->dylibs().size());
+        info += QString("  Named Addrs:%1\n").arg(m_macho->functionMap().size());
     }
     m_headerInfo->setPlainText(info);
 }
@@ -227,6 +247,23 @@ void InfoWidget::buildLoadCmdsTab() {
             m_lcTable->setItem(i, 1, new QTableWidgetItem(QString::fromStdString(dir.name)));
             m_lcTable->setItem(i, 2, new QTableWidgetItem(hex32(dir.rva)));
             m_lcTable->setItem(i, 3, new QTableWidgetItem(QString::number(dir.size)));
+        }
+    } else if (m_macho->isELF()) {
+        auto &phdrs = m_macho->elfProgramHeaders();
+        m_lcTable->setColumnCount(8);
+        m_lcTable->setHorizontalHeaderLabels({"#", "Type", "Offset", "VAddr", "File Size", "Mem Size", "Flags", "Align"});
+        m_lcTable->setRowCount(phdrs.size());
+        for (int i = 0; i < (int)phdrs.size(); ++i) {
+            auto &ph = phdrs[i];
+            m_lcTable->setItem(i, 0, new QTableWidgetItem(QString::number(i)));
+            m_lcTable->setItem(i, 1, new QTableWidgetItem(MachOFile::elfProgramTypeName(ph.type)));
+            m_lcTable->setItem(i, 2, new QTableWidgetItem(hex32(ph.offset)));
+            m_lcTable->setItem(i, 3, new QTableWidgetItem(hex32(ph.vaddr)));
+            m_lcTable->setItem(i, 4, new QTableWidgetItem(QString::number(ph.filesz)));
+            m_lcTable->setItem(i, 5, new QTableWidgetItem(QString::number(ph.memsz)));
+            m_lcTable->setItem(i, 6, new QTableWidgetItem(QString::fromStdString(
+                MachOFile::elfProgramFlagsString(ph.flags))));
+            m_lcTable->setItem(i, 7, new QTableWidgetItem(hex32(ph.align)));
         }
     } else {
         auto &cmds = m_macho->loadCommands();
@@ -256,7 +293,8 @@ void InfoWidget::buildSegmentsTab() {
         segItem->setText(5, QString("0x%1").arg(seg.flags, 8, 16, QChar('0')));
         for (auto &sec : seg.sections) {
             auto *secItem = new QTreeWidgetItem(segItem);
-            uint32_t vmSize = (m_macho->isPE() && sec.segname == "IMAGE") ? sec.align : sec.size;
+            uint32_t vmSize = ((m_macho->isPE() && sec.segname == "IMAGE") ||
+                               m_macho->isELF()) ? sec.align : sec.size;
             secItem->setText(0, QString::fromStdString(sec.sectname));
             secItem->setText(1, hex32(sec.addr));
             secItem->setText(2, hex32(vmSize));
@@ -405,10 +443,14 @@ void InfoWidget::buildSourceTreeTab() {
         int si = sym.n_sect - 1;
         if (si < 0 || si >= (int)secs.size()) continue;
         if (!m_macho->isCodeSection(*secs[si])) continue;
+        if (m_macho->isELF()) {
+            uint8_t stype = (uint8_t)sym.n_desc & 0x0F;
+            if (stype != STT_FUNC && stype != STT_NOTYPE) continue;
+        }
         if (covered.count(sym.n_value)) continue;
         covered.insert(sym.n_value);
         auto *it = new QTreeWidgetItem(noSrc);
-        it->setText(0, QString::fromStdString(demangle(sym.name)));
+        it->setText(0, QString::fromStdString(m_macho->symbolDisplayName(sym.name, false)));
         it->setText(1, hex32(sym.n_value));
         it->setData(0, Qt::UserRole, sym.n_value);
         it->setData(0, ROLE_NODE_TYPE, 2);
@@ -562,10 +604,14 @@ void InfoWidget::buildFunctionsTab() {
         if (sym.n_sect == 0) continue;
         int si = sym.n_sect - 1;
         if (si >= 0 && si < (int)secs.size() && m_macho->isCodeSection(*secs[si])) {
+            if (m_macho->isELF()) {
+                uint8_t stype = (uint8_t)sym.n_desc & 0x0F;
+                if (stype != STT_FUNC && stype != STT_NOTYPE) continue;
+            }
             if (covered.count(sym.n_value)) continue;
             covered.insert(sym.n_value);
             FuncEntry e;
-            e.name = QString::fromStdString(demangle(sym.name));
+            e.name = QString::fromStdString(m_macho->symbolDisplayName(sym.name, false));
             e.addr = sym.n_value;
             e.size = 0;
             funcs.push_back(std::move(e));
@@ -659,7 +705,7 @@ void InfoWidget::repopulateSymbols() {
         QString kind = classifySymbol(sym, m_macho);
         if (filterKind && kind != kindFilter) continue;
 
-        QString demangled = QString::fromStdString(demangle(sym.name));
+        QString demangled = QString::fromStdString(m_macho->symbolDisplayName(sym.name, false));
         if (hasFilter && !re.match(demangled).hasMatch()) continue;
 
         m_symTable->insertRow(row);
@@ -758,7 +804,7 @@ void InfoWidget::buildStabsTab() {
 void InfoWidget::buildDylibsTab() {
     setupTable(m_dylibTable);
     m_dylibTable->setRowCount(m_macho->dylibs().size());
-    if (m_macho->isPE()) {
+    if (m_macho->isPE() || m_macho->isELF()) {
         m_dylibTable->setColumnCount(1);
         m_dylibTable->setHorizontalHeaderLabels({"Name"});
         for (int i = 0; i < (int)m_macho->dylibs().size(); ++i) {
