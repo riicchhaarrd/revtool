@@ -337,6 +337,7 @@ body.light #icon-moon { display: none; }
 .item:hover .item-action, .item.active .item-action { opacity: .85; }
 .item-action:hover { background: var(--tab-x-hover); color: var(--text); opacity: 1; }
 .item.manual .lbl { color: var(--text-bi-val); }
+.item.noted .lbl::after { content: " *"; color: var(--c-cmt); }
 .item.active .cnt { background: rgba(0,59,142,.15); }
 body:not(.light) .item.active .cnt { background: rgba(255,255,255,.12); color: #aaa; }
 .item.type-item .cnt { text-transform: uppercase; }
@@ -1022,6 +1023,7 @@ function emptyProjectDb(hash, name) {
     binaryHash: hash || '',
     binaryName: name || '',
     functionNames: {},
+    functionNotes: {},
     customTypes: ''
   };
 }
@@ -1034,6 +1036,9 @@ function normalizeProjectDb(raw, hash, name) {
   db.binaryName = name || raw.binaryName || '';
   db.functionNames = raw.functionNames && typeof raw.functionNames === 'object'
     ? Object.assign({}, raw.functionNames)
+    : {};
+  db.functionNotes = raw.functionNotes && typeof raw.functionNotes === 'object'
+    ? Object.assign({}, raw.functionNotes)
     : {};
   db.customTypes = typeof raw.customTypes === 'string' ? raw.customTypes : '';
   return db;
@@ -1064,6 +1069,16 @@ function parseAddrKey(key) {
 
 function hasManualFunctionName(addr) {
   return !!(projectDb && projectDb.functionNames && projectDb.functionNames[addrKey(addr)]);
+}
+
+function functionNote(addr) {
+  return projectDb && projectDb.functionNotes
+    ? String(projectDb.functionNotes[addrKey(addr)] || '')
+    : '';
+}
+
+function hasFunctionNote(addr) {
+  return !!functionNote(addr).trim();
 }
 
 function isValidCIdentifier(name) {
@@ -1216,9 +1231,10 @@ function renderProjectDb() {
   const loaded = !!currentBinaryHash;
   const db = projectDb || emptyProjectDb('', '');
   const count = Object.keys(db.functionNames || {}).length;
+  const noteCount = Object.values(db.functionNotes || {}).filter(v => String(v || '').trim()).length;
   allTypes = parseCustomTypeEntries(db.customTypes || '');
   const badge = document.getElementById('db-badge');
-  badge.textContent = count + allTypes.length;
+  badge.textContent = count + noteCount + allTypes.length;
   badge.style.display = loaded ? '' : 'none';
   document.getElementById('db-save-btn').disabled = !loaded;
   document.getElementById('db-new-type-btn').disabled = !loaded;
@@ -1232,7 +1248,7 @@ function renderProjectDb() {
     ta.value = db.customTypes || '';
   const typeLines = (db.customTypes || '').trim() ? countLines(db.customTypes || '') : 0;
   document.getElementById('db-status').textContent = loaded
-    ? (count + ' names · ' + allTypes.length + ' types · ' + typeLines + ' type lines')
+    ? (count + ' names · ' + noteCount + ' notes · ' + allTypes.length + ' types · ' + typeLines + ' type lines')
     : 'No binary loaded';
   document.getElementById('type-badge').textContent = allTypes.length;
   document.getElementById('type-badge').style.display = loaded ? '' : 'none';
@@ -1296,6 +1312,22 @@ function codeWithCustomTypes(code) {
   const prelude = customTypePrelude();
   if (!prelude || String(code || '').startsWith('error:')) return code || '';
   return prelude + '\n\n' + (code || '');
+}
+
+function formatFunctionNote(note) {
+  const clean = String(note || '').trim();
+  if (!clean) return '';
+  return clean.split('\n').map(line => '// NOTE: ' + line).join('\n');
+}
+
+function codeForTab(tab) {
+  let code = tab.code || '';
+  if (tab.kind === 'fn') {
+    const note = formatFunctionNote(functionNote(tab.addr));
+    if (note && !String(code || '').startsWith('error:'))
+      code = note + '\n\n' + code;
+  }
+  return codeWithCustomTypes(code);
 }
 
 function refreshActiveView() {
@@ -1371,6 +1403,27 @@ function renameFn(addr, e) {
   renderProjectDb();
 }
 
+function noteFn(addr, e) {
+  e && e.stopPropagation();
+  if (!currentBinaryHash) { toast('Load a binary first', 'err'); return; }
+  if (!projectDb) projectDb = emptyProjectDb(currentBinaryHash, currentBinaryName);
+  const info = allFns.find(f => f.addr === addr);
+  const label = info ? fnShort(info.name) : shortHex(addr);
+  const next = prompt('Function note for ' + label, functionNote(addr));
+  if (next === null) return;
+  const note = next.trim();
+  if (!projectDb.functionNotes) projectDb.functionNotes = {};
+  if (note)
+    projectDb.functionNotes[addrKey(addr)] = note;
+  else
+    delete projectDb.functionNotes[addrKey(addr)];
+  saveProjectDb({ quiet: true });
+  filterFns();
+  refreshActiveView();
+  renderProjectDb();
+  toast(note ? 'Function note saved' : 'Function note cleared', 'ok');
+}
+
 // ── Sidebar ──────────────────────────────────────────────────────────
 function populateSidebar(filename, sizeBytes) {
   const fnData = parseJson(mod.listFunctionsJson(), { functions: [] });
@@ -1439,7 +1492,9 @@ function renderFnList(fns) {
   if (!fns.length) { el.innerHTML = '<div class="list-empty">No matches</div>'; return; }
   el.innerHTML = fns.map(f => {
     const manual = hasManualFunctionName(f.addr);
-    return `<div class="item${manual ? ' manual' : ''}" data-addr="${f.addr}" onclick="openFn(${f.addr},this)" title="${esc(f.name)} @ ${shortHex(f.addr)}">
+    const noted = hasFunctionNote(f.addr);
+    const title = f.name + ' @ ' + shortHex(f.addr) + (noted ? '\n\n' + functionNote(f.addr) : '');
+    return `<div class="item${manual ? ' manual' : ''}${noted ? ' noted' : ''}" data-addr="${f.addr}" onclick="openFn(${f.addr},this)" title="${esc(title)}">
       <svg class="icon" width="11" height="11" viewBox="0 0 11 11" fill="none">
         <path d="M1.5 8.5V2.5l4 3-4 3z" fill="var(--c-fn)"/>
         <line x1="7" y1="3"   x2="9.5" y2="3"   stroke="var(--c-fn)" stroke-width="1.1" stroke-linecap="round"/>
@@ -1452,6 +1507,12 @@ function renderFnList(fns) {
         <svg width="11" height="11" viewBox="0 0 11 11" fill="none">
           <path d="M2 8.5 2.5 6.4 7.2 1.7a1 1 0 0 1 1.4 0l.7.7a1 1 0 0 1 0 1.4L4.6 8.5 2 8.5z" stroke="currentColor" stroke-width="1" fill="none" stroke-linejoin="round"/>
           <path d="M6.5 2.4 8.6 4.5" stroke="currentColor" stroke-width="1" stroke-linecap="round"/>
+        </svg>
+      </button>
+      <button class="item-action" onclick="noteFn(${f.addr},event)" title="Edit function note">
+        <svg width="11" height="11" viewBox="0 0 11 11" fill="none">
+          <path d="M2 1.8h7v7.4H2z" stroke="currentColor" stroke-width="1" fill="none" stroke-linejoin="round"/>
+          <path d="M3.4 3.5h4.2M3.4 5.3h4.2M3.4 7.1h2.5" stroke="currentColor" stroke-width=".9" stroke-linecap="round"/>
         </svg>
       </button>
      </div>`;
@@ -1551,7 +1612,7 @@ function focusCustomType(index) {
 
 function filterFns() {
   const q = document.getElementById('fn-filter').value;
-  renderFnList(fuzzyFilter(allFns, q, f => [f.name, shortHex(f.addr), String(f.addr)]));
+  renderFnList(fuzzyFilter(allFns, q, f => [f.name, functionNote(f.addr), shortHex(f.addr), String(f.addr)]));
 }
 function filterSrcs() {
   const q = document.getElementById('src-filter').value;
@@ -1692,7 +1753,7 @@ function renderTabBar() {
 }
 
 function showTab(tab) {
-  showCode(codeWithCustomTypes(tab.code || ''), tab.asm || '');
+  showCode(codeForTab(tab), tab.asm || '');
 }
 
 function showCode(code, asm) {

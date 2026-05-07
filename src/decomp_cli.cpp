@@ -931,7 +931,9 @@ static uint32_t parseProjectAddr(const QString &key) {
 }
 
 static int applyProjectDb(MachOFile &mf, const char *path,
-                          QString &customTypes, QString &error) {
+                          QString &customTypes,
+                          std::map<uint32_t, QString> &functionNotes,
+                          QString &error) {
     QFile file(QString::fromUtf8(path));
     if (!file.open(QIODevice::ReadOnly)) {
         error = QString("Cannot open project DB: %1").arg(QString::fromUtf8(path));
@@ -946,6 +948,7 @@ static int applyProjectDb(MachOFile &mf, const char *path,
 
     QJsonObject root = doc.object();
     customTypes = root.value("customTypes").toString();
+    functionNotes.clear();
 
     int applied = 0;
     QJsonObject names = root.value("functionNames").toObject();
@@ -957,14 +960,44 @@ static int applyProjectDb(MachOFile &mf, const char *path,
         if (mf.setFunctionName(addr, name.toStdString()))
             applied++;
     }
+
+    QJsonObject notes = root.value("functionNotes").toObject();
+    for (auto it = notes.begin(); it != notes.end(); ++it) {
+        uint32_t addr = parseProjectAddr(it.key());
+        QString note = it.value().toString().trimmed();
+        if (addr && !note.isEmpty())
+            functionNotes[addr] = note;
+    }
     return applied;
 }
 
-static QString withProjectTypes(const QString &code, const QString &customTypes) {
-    QString prelude = customTypes.trimmed();
-    if (prelude.isEmpty() || code.startsWith("error:"))
+static QString formatProjectNote(const QString &note) {
+    QString clean = note.trimmed();
+    if (clean.isEmpty())
+        return "";
+    QString out;
+    for (const auto &line : clean.split('\n'))
+        out += "// NOTE: " + line + "\n";
+    return out.trimmed();
+}
+
+static QString withProjectEdits(const QString &code, const QString &customTypes,
+                                const QString &functionNote = "") {
+    if (code.startsWith("error:"))
         return code;
-    return prelude + "\n\n" + code;
+    QString out = code;
+    QString note = formatProjectNote(functionNote);
+    if (!note.isEmpty())
+        out = note + "\n\n" + out;
+
+    QString prelude = customTypes.trimmed();
+    if (!prelude.isEmpty())
+        out = prelude + "\n\n" + out;
+    return out;
+}
+
+static QString withProjectTypes(const QString &code, const QString &customTypes) {
+    return withProjectEdits(code, customTypes);
 }
 
 int main(int argc, char *argv[]) {
@@ -1065,10 +1098,12 @@ int main(int argc, char *argv[]) {
     }
 
     QString projectCustomTypes;
+    std::map<uint32_t, QString> projectFunctionNotes;
     int projectAppliedNames = 0;
     if (projectPath) {
         QString err;
-        projectAppliedNames = applyProjectDb(mf, projectPath, projectCustomTypes, err);
+        projectAppliedNames = applyProjectDb(mf, projectPath, projectCustomTypes,
+                                             projectFunctionNotes, err);
         if (projectAppliedNames < 0)
             return fail(1, err);
     }
@@ -1085,6 +1120,7 @@ int main(int argc, char *argv[]) {
         if (projectPath) {
             obj["project_db"] = QString::fromUtf8(projectPath);
             obj["project_function_names"] = projectAppliedNames;
+            obj["project_function_notes"] = (int)projectFunctionNotes.size();
             obj["project_custom_type_bytes"] = projectCustomTypes.toUtf8().size();
         }
         return obj;
@@ -1095,8 +1131,9 @@ int main(int argc, char *argv[]) {
                 binPath, mf.formatName(), mf.size(), mf.stabsFunctions().size(),
                 mf.stabsSourceFiles().size());
         if (projectPath)
-            fprintf(stderr, "Applied project DB: %d function names, %d custom type bytes\n",
-                    projectAppliedNames, projectCustomTypes.toUtf8().size());
+            fprintf(stderr, "Applied project DB: %d function names, %zu notes, %d custom type bytes\n",
+                    projectAppliedNames, projectFunctionNotes.size(),
+                    projectCustomTypes.toUtf8().size());
     }
 
     std::vector<FunctionInfo> funcs = collectFunctions(mf);
@@ -1250,7 +1287,11 @@ int main(int argc, char *argv[]) {
     QString output;
 
     if (funcAddr != 0) {
-        output = withProjectTypes(Decompiler::decompile(mf, funcAddr), projectCustomTypes);
+        QString note;
+        auto noteIt = projectFunctionNotes.find(funcAddr);
+        if (noteIt != projectFunctionNotes.end())
+            note = noteIt->second;
+        output = withProjectEdits(Decompiler::decompile(mf, funcAddr), projectCustomTypes, note);
         if (jsonMode) {
             QJsonObject obj = makeMeta("decompile_function");
             obj["function_address"] = (int)funcAddr;
@@ -1268,7 +1309,11 @@ int main(int argc, char *argv[]) {
             if (!jsonMode)
                 fprintf(stderr, "Decompiling: %s @ 0x%08X\n", fn.name.c_str(), fn.address);
             QString code = Decompiler::decompile(mf, fn.address);
-            code = withProjectTypes(code, projectCustomTypes);
+            QString note;
+            auto noteIt = projectFunctionNotes.find(fn.address);
+            if (noteIt != projectFunctionNotes.end())
+                note = noteIt->second;
+            code = withProjectEdits(code, projectCustomTypes, note);
             if (jsonMode) {
                 QJsonObject match = functionToJson(fn);
                 match["code"] = code;

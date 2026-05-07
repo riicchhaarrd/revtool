@@ -23,7 +23,7 @@ The browser version runs the same decompiler core through WebAssembly. Files are
 - STABS-aware symbol, type, local, parameter, and line metadata recovery.
 - DWARF source file, function, parameter name, and line metadata recovery for ELF.
 - Function-level and source-file-level C-like decompilation.
-- Web Project DB for persisted function renames and custom type/struct notes.
+- Web Project DB for persisted function renames, function notes, and custom type/struct notes.
 - Optional SSA-based simplification and cosmetic output mode.
 - JSON output modes for machine-readable automation.
 
