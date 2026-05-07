@@ -707,6 +707,8 @@ static uint32_t functionSizeForDisassembly(const MachOFile &mf,
     }
     if (size == 0 || size > maxSize)
         size = maxSize;
+    if (size > 0x4000)
+        size = 0x4000;
     return size;
 }
 
@@ -757,6 +759,186 @@ std::string disassembleFunction(unsigned int addr) {
     return out.empty() ? "error: no instructions decoded" : out;
 }
 
+static std::string sanitizeIdentifier(std::string s, const std::string &fallback) {
+    for (char &ch : s) {
+        unsigned char c = (unsigned char)ch;
+        if (!(std::isalnum(c) || ch == '_'))
+            ch = '_';
+    }
+    while (!s.empty() && s.front() == '_')
+        s.erase(s.begin());
+    if (s.empty() || !(std::isalpha((unsigned char)s[0]) || s[0] == '_'))
+        s = fallback;
+    if (!isValidCIdentifier(s))
+        s = fallback;
+    return s;
+}
+
+static std::string typeForAccessSize(int size) {
+    switch (size) {
+    case 1: return "unsigned char";
+    case 2: return "unsigned short";
+    case 8: return "unsigned long long";
+    default: return "unsigned int";
+    }
+}
+
+struct StructFieldCandidate {
+    int offset = 0;
+    int size = 0;
+    int refs = 0;
+};
+
+struct StructCandidate {
+    uint32_t functionAddr = 0;
+    std::string functionName;
+    std::string baseReg;
+    std::map<int, StructFieldCandidate> fields;
+    int refs = 0;
+};
+
+static std::string formatStructCandidateDecl(const StructCandidate &cand,
+                                             const std::string &name) {
+    std::string out = "struct " + name + " {\n";
+    int cursor = 0;
+    for (const auto &[off, field] : cand.fields) {
+        if (off > cursor) {
+            char pad[96];
+            snprintf(pad, sizeof(pad), "    unsigned char pad_0x%X[%d];\n", cursor, off - cursor);
+            out += pad;
+            cursor = off;
+        }
+
+        char line[160];
+        snprintf(line, sizeof(line), "    %s field_0x%X; /* %d refs */\n",
+                 typeForAccessSize(field.size).c_str(), off, field.refs);
+        out += line;
+        cursor = std::max(cursor, off + std::max(1, field.size));
+    }
+    out += "};";
+    return out;
+}
+
+std::string inferStructCandidatesJson() {
+    if (!g_loaded) return "{\"error\":\"no binary loaded\"}";
+
+    const auto funcs = collectFunctions(g_mf);
+    csh cs = 0;
+    if (cs_open(CS_ARCH_X86, CS_MODE_32, &cs) != CS_ERR_OK)
+        return "{\"error\":\"capstone unavailable\"}";
+    cs_option(cs, CS_OPT_DETAIL, CS_OPT_ON);
+
+    std::vector<StructCandidate> candidates;
+    for (const auto &fn : funcs) {
+        const Section *sec = g_mf.sectionForAddress(fn.address);
+        if (!sec || !g_mf.isCodeSection(*sec) || sec->size == 0)
+            continue;
+        uint32_t codeOff = fn.address - sec->addr;
+        if (codeOff >= sec->size)
+            continue;
+        uint32_t size = functionSizeForDisassembly(g_mf, funcs, sec, fn.address);
+        if (size == 0)
+            continue;
+        const uint8_t *code = g_mf.bytesAt(sec->offset + codeOff, size);
+        if (!code)
+            continue;
+
+        cs_insn *insn = nullptr;
+        size_t count = cs_disasm(cs, code, size, fn.address, 0, &insn);
+        if (count == 0)
+            continue;
+
+        std::map<std::string, StructCandidate> byBase;
+        for (size_t i = 0; i < count; ++i) {
+            auto *detail = insn[i].detail;
+            if (!detail)
+                continue;
+            for (uint8_t oi = 0; oi < detail->x86.op_count; ++oi) {
+                const auto &op = detail->x86.operands[oi];
+                if (op.type != X86_OP_MEM)
+                    continue;
+                if (op.mem.base == X86_REG_INVALID ||
+                    op.mem.base == X86_REG_ESP ||
+                    op.mem.base == X86_REG_EBP)
+                    continue;
+                if (op.mem.disp < 0 || op.mem.disp > 0xFFFF)
+                    continue;
+
+                const char *reg = cs_reg_name(cs, op.mem.base);
+                if (!reg || !*reg)
+                    continue;
+                auto &cand = byBase[reg];
+                cand.functionAddr = fn.address;
+                cand.functionName = fn.name;
+                cand.baseReg = reg;
+                auto &field = cand.fields[(int)op.mem.disp];
+                field.offset = (int)op.mem.disp;
+                field.size = std::max<int>(field.size, op.size > 0 ? op.size : 4);
+                field.refs++;
+                cand.refs++;
+            }
+        }
+        cs_free(insn, count);
+
+        for (auto &[base, cand] : byBase) {
+            if (cand.fields.size() < 2 || cand.refs < 2)
+                continue;
+            candidates.push_back(std::move(cand));
+        }
+    }
+    cs_close(&cs);
+
+    std::sort(candidates.begin(), candidates.end(), [](const auto &a, const auto &b) {
+        if (a.fields.size() != b.fields.size()) return a.fields.size() > b.fields.size();
+        if (a.refs != b.refs) return a.refs > b.refs;
+        return a.functionAddr < b.functionAddr;
+    });
+    if (candidates.size() > 128)
+        candidates.resize(128);
+
+    std::string out = "{\"format\":\"" + jsonEscape(g_mf.formatName()) + "\",\"candidates\":[";
+    bool firstCand = true;
+    for (const auto &cand : candidates) {
+        if (!firstCand) out += ",";
+        firstCand = false;
+
+        char fallback[64];
+        snprintf(fallback, sizeof(fallback), "sub_%08X_%s", cand.functionAddr, cand.baseReg.c_str());
+        std::string baseName = sanitizeIdentifier(cand.functionName, fallback);
+        std::string name = "inferred_" + baseName + "_" + cand.baseReg + "_t";
+        std::string decl = formatStructCandidateDecl(cand, name);
+
+        out += "{";
+        out += "\"name\":\"" + jsonEscape(name) + "\",";
+        out += "\"function_address\":" + std::to_string(cand.functionAddr) + ",";
+        out += "\"function_address_hex\":\"" + hex32(cand.functionAddr) + "\",";
+        out += "\"function_name\":\"" + jsonEscape(cand.functionName) + "\",";
+        out += "\"base_register\":\"" + jsonEscape(cand.baseReg) + "\",";
+        out += "\"field_count\":" + std::to_string(cand.fields.size()) + ",";
+        out += "\"ref_count\":" + std::to_string(cand.refs) + ",";
+        out += "\"c_decl\":\"" + jsonEscape(decl) + "\",";
+        out += "\"fields\":[";
+        bool firstField = true;
+        for (const auto &[off, field] : cand.fields) {
+            if (!firstField) out += ",";
+            firstField = false;
+            out += "{";
+            out += "\"offset\":" + std::to_string(off) + ",";
+            out += "\"offset_hex\":\"0x";
+            char hex[16];
+            snprintf(hex, sizeof(hex), "%X", off);
+            out += hex;
+            out += "\",";
+            out += "\"size\":" + std::to_string(field.size) + ",";
+            out += "\"refs\":" + std::to_string(field.refs);
+            out += "}";
+        }
+        out += "]}";
+    }
+    out += "]}";
+    return out;
+}
+
 std::string decompileSourceFile(int idx) {
     if (!g_loaded) return "error: no binary loaded";
     return Decompiler::decompileFile(g_mf, idx).toStdString();
@@ -788,6 +970,7 @@ EMSCRIPTEN_BINDINGS(dis) {
     emscripten::function("renameFunction", &renameFunction);
     emscripten::function("decompileFunction", &decompileFunction);
     emscripten::function("disassembleFunction", &disassembleFunction);
+    emscripten::function("inferStructCandidatesJson", &inferStructCandidatesJson);
     emscripten::function("decompileSourceFile", &decompileSourceFile);
     emscripten::function("setUseSSA", &setUseSSA);
     emscripten::function("setFlatMode", &setFlatMode);

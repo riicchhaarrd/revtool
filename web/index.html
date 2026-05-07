@@ -276,7 +276,7 @@ body.light #icon-moon { display: none; }
   padding: 7px 8px 9px; border-bottom: 1px solid var(--border-bin);
   display: flex; flex-direction: column; gap: 7px;
 }
-.db-actions { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 5px; }
+.db-actions { display: grid; grid-template-columns: repeat(4, 1fr); gap: 5px; }
 .db-btn {
   background: var(--bg-input); border: 1px solid var(--border-input);
   color: var(--text); border-radius: 3px; padding: 4px 6px;
@@ -599,6 +599,7 @@ body:not(.light) .toast.ok  { color: #4ec9b0; }
         <div class="db-panel">
           <div class="db-actions">
             <button class="db-btn" id="db-save-btn" onclick="saveProjectDb()">Save</button>
+            <button class="db-btn" id="db-infer-btn" onclick="inferStructs()">Infer</button>
             <button class="db-btn" id="db-export-btn" onclick="exportProjectDb()">Export</button>
             <button class="db-btn" id="db-load-btn" onclick="document.getElementById('db-file-input').click()">Load</button>
           </div>
@@ -1106,6 +1107,53 @@ function importProjectDb(file) {
   reader.readAsText(file);
 }
 
+function inferStructs() {
+  if (!currentBinaryHash) { toast('Load a binary first', 'err'); return; }
+  if (!mod || typeof mod.inferStructCandidatesJson !== 'function') {
+    toast('WASM module does not expose struct inference', 'err');
+    return;
+  }
+  if (!projectDb) projectDb = emptyProjectDb(currentBinaryHash, currentBinaryName);
+  projectDb.customTypes = document.getElementById('custom-types').value;
+  spin(true);
+  sbMsg('Inferring struct candidates...');
+  setTimeout(() => {
+    const data = parseJson(mod.inferStructCandidatesJson(), { candidates: [] });
+    spin(false);
+    if (data.error) { toast(data.error, 'err'); sbMsg(data.error, true); return; }
+    const candidates = data.candidates || [];
+    if (!candidates.length) {
+      toast('No struct candidates found', 'err');
+      sbMsg('No struct candidates found');
+      return;
+    }
+
+    let existing = projectDb.customTypes || '';
+    const additions = [];
+    for (const c of candidates) {
+      if (!c.name || !c.c_decl) continue;
+      if (existing.includes('struct ' + c.name)) continue;
+      const where = (c.function_name || c.function_address_hex || 'function') + ' / ' + (c.base_register || 'reg');
+      additions.push('/* inferred: ' + where + ' */\n' + c.c_decl);
+      existing += '\n' + c.c_decl;
+    }
+    if (!additions.length) {
+      toast('Struct candidates already exist in custom types', 'ok');
+      sbMsg(candidates.length + ' struct candidates already present');
+      return;
+    }
+
+    const prefix = projectDb.customTypes && projectDb.customTypes.trim() ? projectDb.customTypes.trimEnd() + '\n\n' : '';
+    projectDb.customTypes = prefix + additions.join('\n\n') + '\n';
+    clearTimeout(projectDbSaveTimer);
+    saveProjectDb({ quiet: true });
+    renderProjectDb();
+    refreshActiveView();
+    toast(additions.length + ' struct candidates added', 'ok');
+    sbMsg(additions.length + ' struct candidates added to Project DB');
+  }, 10);
+}
+
 function renderProjectDb() {
   const loaded = !!currentBinaryHash;
   const db = projectDb || emptyProjectDb('', '');
@@ -1114,6 +1162,8 @@ function renderProjectDb() {
   badge.textContent = count;
   badge.style.display = loaded ? '' : 'none';
   document.getElementById('db-save-btn').disabled = !loaded;
+  document.getElementById('db-infer-btn').disabled =
+    !loaded || !mod || typeof mod.inferStructCandidatesJson !== 'function';
   document.getElementById('db-export-btn').disabled = !loaded;
   document.getElementById('db-load-btn').disabled = !loaded;
   const ta = document.getElementById('custom-types');
