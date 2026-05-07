@@ -1634,6 +1634,8 @@ private:
         StabsTypeInfo *ti = m_typeTable.getMutableType(compositeType);
         if (!ti || ti->kind != StabsTypeKind::Struct)
             return;
+        if (dwarfUnsignedAttr(attrs, DW_AT_virtuality, 0) != 0)
+            return;
 
         StabsTypeField field;
         field.typeRef = dwarfTypeAttr(unit, attrs, DW_AT_type, typeRefs);

@@ -142,6 +142,7 @@ constexpr uint64_t DW_AT_count             = 0x37;
 constexpr uint64_t DW_AT_data_member_location = 0x38;
 constexpr uint64_t DW_AT_specification     = 0x47;
 constexpr uint64_t DW_AT_type              = 0x49;
+constexpr uint64_t DW_AT_virtuality        = 0x4C;
 constexpr uint64_t DW_AT_ranges            = 0x55;
 constexpr uint64_t DW_AT_linkage_name      = 0x6E;
 constexpr uint64_t DW_AT_data_bit_offset   = 0x6B;
