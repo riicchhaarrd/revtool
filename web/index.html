@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>dis — Binary Decompiler</title>
+<title>revtool — Binary Decompiler</title>
 <style>
 /* ── Reset / Base ─────────────────────────────────────────────────── */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -271,6 +271,30 @@ body.light #icon-moon { display: none; }
   color: var(--text-bin-ph); font-style: italic; padding: 8px 12px; font-size: 12px;
 }
 
+/* Project DB */
+.db-panel {
+  padding: 7px 8px 9px; border-bottom: 1px solid var(--border-bin);
+  display: flex; flex-direction: column; gap: 7px;
+}
+.db-actions { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 5px; }
+.db-btn {
+  background: var(--bg-input); border: 1px solid var(--border-input);
+  color: var(--text); border-radius: 3px; padding: 4px 6px;
+  font: 11px/1.2 inherit; cursor: pointer;
+}
+.db-btn:hover { background: var(--bg-hover); border-color: var(--accent); }
+.db-btn:disabled { opacity: .45; cursor: default; border-color: var(--border-input); }
+#db-status { color: var(--text-dim); font-size: 11px; min-height: 14px; }
+#custom-types {
+  width: 100%; height: 94px; resize: vertical; min-height: 54px; max-height: 220px;
+  background: var(--bg-input); border: 1px solid var(--border-input);
+  border-radius: 3px; color: var(--text); outline: none;
+  font: 11px/1.45 'Cascadia Code','JetBrains Mono','Fira Code',Consolas,monospace;
+  padding: 6px 7px;
+}
+#custom-types:focus { border-color: var(--accent); }
+#db-file-input { display: none; }
+
 /* Search box */
 .sb-search { margin: 5px 8px; position: relative; flex-shrink: 0; }
 .sb-search input {
@@ -304,6 +328,15 @@ body.light #icon-moon { display: none; }
   font-size: 10px; background: var(--badge-bg); color: var(--badge-fg);
   padding: 1px 5px; border-radius: 9px; flex-shrink: 0;
 }
+.item-action {
+  display: flex; align-items: center; justify-content: center;
+  width: 18px; height: 18px; border: 0; border-radius: 3px;
+  background: transparent; color: var(--text-dim); cursor: pointer;
+  opacity: 0; flex-shrink: 0;
+}
+.item:hover .item-action, .item.active .item-action { opacity: .85; }
+.item-action:hover { background: var(--tab-x-hover); color: var(--text); opacity: 1; }
+.item.manual .lbl { color: var(--text-bi-val); }
 .item.active .cnt { background: rgba(0,59,142,.15); }
 body:not(.light) .item.active .cnt { background: rgba(255,255,255,.12); color: #aaa; }
 .list-empty { padding: 10px 12px; color: var(--text-placeholder); font-style: italic; font-size: 12px; text-align: center; }
@@ -485,7 +518,7 @@ body:not(.light) .toast.ok  { color: #4ec9b0; }
       <line x1="14" y1="7.5" x2="17.5" y2="7.5"  stroke="#9cdcfe" stroke-width="1.5" stroke-linecap="round"/>
       <line x1="14" y1="11.5" x2="17.5" y2="11.5" stroke="#9cdcfe" stroke-width="1.5" stroke-linecap="round"/>
     </svg>
-    dis
+    revtool
   </a>
   <span id="header-tagline">Binary Decompiler</span>
   <div id="header-gap"></div>
@@ -531,6 +564,7 @@ body:not(.light) .toast.ok  { color: #4ec9b0; }
     Open Binary
   </button>
   <input type="file" id="file-input">
+  <input type="file" id="db-file-input" accept=".json,.revtool.json,application/json">
 </header>
 
 <!-- ── Main ───────────────────────────────────────────────────── -->
@@ -549,6 +583,28 @@ body:not(.light) .toast.ok  { color: #4ec9b0; }
       <div class="sb-body">
         <div id="bin-placeholder">No binary loaded</div>
         <div id="bin-info" style="display:none"></div>
+      </div>
+    </div>
+
+    <!-- Project database -->
+    <div class="sb-section" id="sec-project">
+      <div class="sb-head" onclick="toggleSec('sec-project')">
+        Project DB
+        <span class="badge" id="db-badge" style="display:none">0</span>
+        <span class="chev">
+          <svg width="9" height="9" viewBox="0 0 9 9" fill="none"><path d="M1.5 3 4.5 6.5 7.5 3" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </span>
+      </div>
+      <div class="sb-body">
+        <div class="db-panel">
+          <div class="db-actions">
+            <button class="db-btn" id="db-save-btn" onclick="saveProjectDb()">Save</button>
+            <button class="db-btn" id="db-export-btn" onclick="exportProjectDb()">Export</button>
+            <button class="db-btn" id="db-load-btn" onclick="document.getElementById('db-file-input').click()">Load</button>
+          </div>
+          <textarea id="custom-types" spellcheck="false" placeholder="typedefs / structs" oninput="onCustomTypesChanged()"></textarea>
+          <div id="db-status">No binary loaded</div>
+        </div>
       </div>
     </div>
 
@@ -743,6 +799,11 @@ let curXrefs = [];
 let activeStringAddr = null;
 let activeXrefAddr = null;
 let currentFormat = '';
+let currentBinaryHash = '';
+let currentBinaryName = '';
+let currentBinarySize = 0;
+let projectDb = null;
+let projectDbSaveTimer = null;
 let decompVersion = 0;
 
 function parseJson(text, fallback) {
@@ -830,6 +891,11 @@ createDisModule().then(m => {
 document.getElementById('file-input').addEventListener('change', function() {
   if (this.files[0]) loadFile(this.files[0]);
 });
+document.getElementById('db-file-input').addEventListener('change', function() {
+  if (this.files[0]) importProjectDb(this.files[0]);
+  this.value = '';
+});
+renderProjectDb();
 document.querySelectorAll('[data-decomp-option]').forEach(el => {
   el.addEventListener('change', function() {
     if (!mod) return;
@@ -872,10 +938,17 @@ function loadFile(file) {
     }
     spin(false);
     if (res.startsWith('error:')) { toast(res, 'err'); sbMsg(res, true); return; }
+    currentBinaryHash = hashBytes(bytes);
+    currentBinaryName = file.name;
+    currentBinarySize = bytes.length;
+    projectDb = loadProjectDb(currentBinaryHash, currentBinaryName);
+    applyProjectDbToBackend();
+    resetEditorTabs();
     document.getElementById('hdr-txt').textContent = file.name;
     sbMsg(file.name + ' · ' + res.replace('ok: ', ''));
     toast(res.replace('ok: ', ''), 'ok');
     populateSidebar(file.name, bytes.length);
+    renderProjectDb();
   };
   reader.readAsArrayBuffer(file);
 }
@@ -904,6 +977,244 @@ function loadBinaryBytes(bytes) {
   } finally {
     mod._free(ptr);
   }
+}
+
+// ── Project DB ──────────────────────────────────────────────────────
+function hashBytes(bytes) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < bytes.length; i++) {
+    h ^= bytes[i];
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return bytes.length.toString(16) + '-' + h.toString(16).padStart(8, '0');
+}
+
+function emptyProjectDb(hash, name) {
+  return {
+    version: 1,
+    binaryHash: hash || '',
+    binaryName: name || '',
+    functionNames: {},
+    customTypes: ''
+  };
+}
+
+function normalizeProjectDb(raw, hash, name) {
+  const db = emptyProjectDb(hash, name);
+  if (!raw || typeof raw !== 'object') return db;
+  db.version = Number(raw.version || 1);
+  db.binaryHash = hash || raw.binaryHash || '';
+  db.binaryName = name || raw.binaryName || '';
+  db.functionNames = raw.functionNames && typeof raw.functionNames === 'object'
+    ? Object.assign({}, raw.functionNames)
+    : {};
+  db.customTypes = typeof raw.customTypes === 'string' ? raw.customTypes : '';
+  return db;
+}
+
+function projectDbKey(hash) {
+  return 'revtool-db:' + hash;
+}
+
+function loadProjectDb(hash, name) {
+  try {
+    const raw = localStorage.getItem(projectDbKey(hash));
+    return raw ? normalizeProjectDb(JSON.parse(raw), hash, name) : emptyProjectDb(hash, name);
+  } catch (_) {
+    return emptyProjectDb(hash, name);
+  }
+}
+
+function addrKey(addr) {
+  return shortHex(addr);
+}
+
+function parseAddrKey(key) {
+  const s = String(key || '').trim();
+  if (!s) return 0;
+  return s.toLowerCase().startsWith('0x') ? parseInt(s, 16) : parseInt(s, 10);
+}
+
+function hasManualFunctionName(addr) {
+  return !!(projectDb && projectDb.functionNames && projectDb.functionNames[addrKey(addr)]);
+}
+
+function isValidCIdentifier(name) {
+  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(name || '');
+}
+
+function applyProjectDbToBackend() {
+  if (!mod || !projectDb || !projectDb.functionNames) return;
+  for (const [key, name] of Object.entries(projectDb.functionNames)) {
+    const addr = parseAddrKey(key);
+    if (!addr || !isValidCIdentifier(name)) continue;
+    if (typeof mod.renameFunction === 'function')
+      mod.renameFunction(addr, name);
+  }
+}
+
+function saveProjectDb(opts) {
+  const quiet = opts && opts.quiet;
+  if (!currentBinaryHash || !projectDb) {
+    if (!quiet) toast('No binary loaded', 'err');
+    renderProjectDb();
+    return;
+  }
+  projectDb.binaryHash = currentBinaryHash;
+  projectDb.binaryName = currentBinaryName;
+  localStorage.setItem(projectDbKey(currentBinaryHash), JSON.stringify(projectDb));
+  renderProjectDb();
+  if (!quiet) toast('Project DB saved', 'ok');
+}
+
+function scheduleProjectDbSave() {
+  clearTimeout(projectDbSaveTimer);
+  projectDbSaveTimer = setTimeout(() => saveProjectDb({ quiet: true }), 250);
+  renderProjectDb();
+}
+
+function exportProjectDb() {
+  if (!currentBinaryHash || !projectDb) { toast('No binary loaded', 'err'); return; }
+  saveProjectDb({ quiet: true });
+  const blob = new Blob([JSON.stringify(projectDb, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  const base = basename(currentBinaryName || 'binary').replace(/[^A-Za-z0-9._-]+/g, '_');
+  a.href = URL.createObjectURL(blob);
+  a.download = base + '.revtool.json';
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 0);
+}
+
+function importProjectDb(file) {
+  if (!currentBinaryHash) { toast('Load a binary before importing a DB', 'err'); return; }
+  const reader = new FileReader();
+  reader.onload = ev => {
+    try {
+      const raw = JSON.parse(String(ev.target.result || '{}'));
+      if (raw.binaryHash && raw.binaryHash !== currentBinaryHash)
+        toast('DB hash differs from the loaded binary; applying by address', 'err');
+      projectDb = normalizeProjectDb(raw, currentBinaryHash, currentBinaryName);
+      applyProjectDbToBackend();
+      saveProjectDb({ quiet: true });
+      reloadProjectViews();
+      toast('Project DB loaded', 'ok');
+    } catch (err) {
+      toast('Invalid project DB: ' + (err && err.message ? err.message : String(err)), 'err');
+    }
+  };
+  reader.readAsText(file);
+}
+
+function renderProjectDb() {
+  const loaded = !!currentBinaryHash;
+  const db = projectDb || emptyProjectDb('', '');
+  const count = Object.keys(db.functionNames || {}).length;
+  const badge = document.getElementById('db-badge');
+  badge.textContent = count;
+  badge.style.display = loaded ? '' : 'none';
+  document.getElementById('db-save-btn').disabled = !loaded;
+  document.getElementById('db-export-btn').disabled = !loaded;
+  document.getElementById('db-load-btn').disabled = !loaded;
+  const ta = document.getElementById('custom-types');
+  ta.disabled = !loaded;
+  if (document.activeElement !== ta)
+    ta.value = db.customTypes || '';
+  const typeLines = (db.customTypes || '').trim() ? countLines(db.customTypes || '') : 0;
+  document.getElementById('db-status').textContent = loaded
+    ? (count + ' names · ' + typeLines + ' type lines')
+    : 'No binary loaded';
+}
+
+function onCustomTypesChanged() {
+  if (!currentBinaryHash) return;
+  if (!projectDb) projectDb = emptyProjectDb(currentBinaryHash, currentBinaryName);
+  projectDb.customTypes = document.getElementById('custom-types').value;
+  scheduleProjectDbSave();
+  refreshActiveView();
+}
+
+function customTypePrelude() {
+  return projectDb && projectDb.customTypes ? projectDb.customTypes.trim() : '';
+}
+
+function codeWithCustomTypes(code) {
+  const prelude = customTypePrelude();
+  if (!prelude || String(code || '').startsWith('error:')) return code || '';
+  return prelude + '\n\n' + (code || '');
+}
+
+function refreshActiveView() {
+  const tab = tabs.find(t => t.id === activeId);
+  if (tab) showTab(tab);
+}
+
+function resetEditorTabs() {
+  tabs = [];
+  activeId = null;
+  renderTabBar();
+  const pane = document.getElementById('code-pane');
+  pane.classList.remove('show', 'has-asm');
+  document.getElementById('welcome').classList.remove('gone');
+  document.getElementById('code-view').innerHTML = '';
+  document.getElementById('line-nums').textContent = '';
+  document.getElementById('asm-view').textContent = '';
+  curCode = '';
+  curAsm = '';
+  updateLines(0);
+}
+
+function reloadProjectViews() {
+  populateSidebar(currentBinaryName, currentBinarySize);
+  tabs.forEach(t => {
+    if (t.kind === 'fn') {
+      const info = allFns.find(f => f.addr === t.addr);
+      if (info) t.label = fnShort(info.name);
+    }
+    t.version = -1;
+  });
+  renderTabBar();
+  const active = tabs.find(t => t.id === activeId);
+  if (active) refreshTab(active, 'Refreshing');
+  else renderProjectDb();
+}
+
+function renameFn(addr, e) {
+  e && e.stopPropagation();
+  if (!mod || typeof mod.renameFunction !== 'function') {
+    toast('WASM module does not expose renaming', 'err');
+    return;
+  }
+  const info = allFns.find(f => f.addr === addr);
+  const current = hasManualFunctionName(addr)
+    ? projectDb.functionNames[addrKey(addr)]
+    : (info ? fnShort(info.name) : '');
+  const next = prompt('Function name', current || ('sub_' + shortHex(addr).slice(2)));
+  if (next === null) return;
+  const name = next.trim();
+  if (!isValidCIdentifier(name)) {
+    toast('Function name must be a C identifier', 'err');
+    return;
+  }
+  const res = mod.renameFunction(addr, name);
+  if (String(res).startsWith('error:')) {
+    toast(res, 'err');
+    return;
+  }
+  if (!projectDb) projectDb = emptyProjectDb(currentBinaryHash, currentBinaryName);
+  projectDb.functionNames[addrKey(addr)] = name;
+  saveProjectDb({ quiet: true });
+  allFns.forEach(f => { if (f.addr === addr) f.name = name; });
+  tabs.forEach(t => {
+    if (t.kind === 'fn' && t.addr === addr) t.label = fnShort(name);
+    t.version = -1;
+  });
+  filterFns();
+  renderTabBar();
+  const active = tabs.find(t => t.id === activeId);
+  if (active) refreshTab(active, 'Refreshing');
+  toast(res.replace('ok: ', ''), 'ok');
+  renderProjectDb();
 }
 
 // ── Sidebar ──────────────────────────────────────────────────────────
@@ -970,8 +1281,9 @@ function row(lbl, val) {
 function renderFnList(fns) {
   const el = document.getElementById('fn-list');
   if (!fns.length) { el.innerHTML = '<div class="list-empty">No matches</div>'; return; }
-  el.innerHTML = fns.map(f =>
-    `<div class="item" data-addr="${f.addr}" onclick="openFn(${f.addr},this)" title="${esc(f.name)} @ ${shortHex(f.addr)}">
+  el.innerHTML = fns.map(f => {
+    const manual = hasManualFunctionName(f.addr);
+    return `<div class="item${manual ? ' manual' : ''}" data-addr="${f.addr}" onclick="openFn(${f.addr},this)" title="${esc(f.name)} @ ${shortHex(f.addr)}">
       <svg class="icon" width="11" height="11" viewBox="0 0 11 11" fill="none">
         <path d="M1.5 8.5V2.5l4 3-4 3z" fill="var(--c-fn)"/>
         <line x1="7" y1="3"   x2="9.5" y2="3"   stroke="var(--c-fn)" stroke-width="1.1" stroke-linecap="round"/>
@@ -980,8 +1292,14 @@ function renderFnList(fns) {
       </svg>
       <span class="lbl">${esc(fnShort(f.name))}</span>
       <span class="cnt">${esc(shortHex(f.addr))}</span>
-     </div>`
-  ).join('');
+      <button class="item-action" onclick="renameFn(${f.addr},event)" title="Rename function">
+        <svg width="11" height="11" viewBox="0 0 11 11" fill="none">
+          <path d="M2 8.5 2.5 6.4 7.2 1.7a1 1 0 0 1 1.4 0l.7.7a1 1 0 0 1 0 1.4L4.6 8.5 2 8.5z" stroke="currentColor" stroke-width="1" fill="none" stroke-linejoin="round"/>
+          <path d="M6.5 2.4 8.6 4.5" stroke="currentColor" stroke-width="1" stroke-linecap="round"/>
+        </svg>
+      </button>
+     </div>`;
+  }).join('');
   const tab = tabs.find(t => t.id === activeId);
   if (tab && tab.kind === 'fn') markActive('fn-list', 'data-addr', tab.addr);
 }
@@ -1183,7 +1501,7 @@ function renderTabBar() {
 }
 
 function showTab(tab) {
-  showCode(tab.code || '', tab.asm || '');
+  showCode(codeWithCustomTypes(tab.code || ''), tab.asm || '');
 }
 
 function showCode(code, asm) {
@@ -1206,7 +1524,7 @@ function showCode(code, asm) {
 function updateLines(n) {
   document.getElementById('sb-lines').textContent = n ? n+' lines' : '';
 }
-function countLines(s) { return s.split('\n').length; }
+function countLines(s) { return String(s || '').split('\n').length; }
 
 // ── Copy ─────────────────────────────────────────────────────────────
 function copyCode() {

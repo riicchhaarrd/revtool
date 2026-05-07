@@ -237,6 +237,21 @@ public:
         return m_funcMap;
     }
 
+    bool setFunctionName(uint32_t addr, const std::string &name) {
+        if (addr == 0 || name.empty())
+            return false;
+        bool changed = false;
+        m_funcMap[addr] = name;
+        changed = true;
+        for (auto &fn : m_stabsFuncs) {
+            if (fn.address == addr) {
+                fn.name = name;
+                changed = true;
+            }
+        }
+        return changed;
+    }
+
     std::string symbolDisplayName(const std::string &name, bool nameOnly = true) const {
         if (isELF() && name.rfind("_Z", 0) != 0 && name.rfind("__Z", 0) != 0)
             return name;

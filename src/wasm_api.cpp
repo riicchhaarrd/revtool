@@ -652,6 +652,29 @@ std::string findStringXrefsByAddressJson(unsigned int addr) {
     return out;
 }
 
+static bool isValidCIdentifier(const std::string &name) {
+    if (name.empty()) return false;
+    unsigned char first = (unsigned char)name[0];
+    if (!(std::isalpha(first) || first == '_')) return false;
+    for (unsigned char ch : name) {
+        if (!(std::isalnum(ch) || ch == '_'))
+            return false;
+    }
+    return true;
+}
+
+std::string renameFunction(unsigned int addr, const std::string &name) {
+    if (!g_loaded) return "error: no binary loaded";
+    if (!isValidCIdentifier(name))
+        return "error: function name must be a C identifier";
+    const Section *sec = g_mf.sectionForAddress(addr);
+    if (!sec || !g_mf.isCodeSection(*sec))
+        return "error: address is not in executable code";
+    if (!g_mf.setFunctionName(addr, name))
+        return "error: function rename failed";
+    return "ok: renamed " + hex32(addr) + " to " + name;
+}
+
 std::string decompileFunction(unsigned int addr) {
     if (!g_loaded) return "error: no binary loaded";
     return Decompiler::decompile(g_mf, addr).toStdString();
@@ -762,6 +785,7 @@ EMSCRIPTEN_BINDINGS(dis) {
     emscripten::function("listFunctionsJson", &listFunctionsJson);
     emscripten::function("listStringsJson", &listStringsJson);
     emscripten::function("findStringXrefsByAddressJson", &findStringXrefsByAddressJson);
+    emscripten::function("renameFunction", &renameFunction);
     emscripten::function("decompileFunction", &decompileFunction);
     emscripten::function("disassembleFunction", &disassembleFunction);
     emscripten::function("decompileSourceFile", &decompileSourceFile);
