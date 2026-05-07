@@ -1560,6 +1560,9 @@ private:
         StabsTypeInfo *ti = m_typeTable.getMutableType(compositeType);
         if (!ti || (ti->kind != StabsTypeKind::Struct && ti->kind != StabsTypeKind::Union))
             return;
+        if (dwarfUnsignedAttr(attrs, DW_AT_external, 0) != 0 ||
+            dwarfUnsignedAttr(attrs, DW_AT_declaration, 0) != 0)
+            return;
         StabsTypeField field;
         field.name = dwarfStringAttr(unit, attrs, DW_AT_name,
                                      debugStr, debugStrOffsets);
