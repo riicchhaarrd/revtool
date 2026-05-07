@@ -107,11 +107,110 @@ public:
         mf.typeTable().configureCNameDisambiguation(roots);
     }
 
+    static std::string fallbackFunctionName(const MachOFile &mf, uint32_t funcAddr) {
+        char fallback[32];
+        snprintf(fallback, sizeof(fallback), "sub_%08X", funcAddr);
+
+        std::string name = fallback;
+        auto it = mf.functionMap().find(funcAddr);
+        if (it != mf.functionMap().end() && !it->second.empty())
+            name = it->second;
+
+        for (char &ch : name) {
+            unsigned char c = (unsigned char)ch;
+            if (!std::isalnum(c) && ch != '_')
+                ch = '_';
+        }
+        if (!isCIdentifier(name))
+            name = fallback;
+        return name;
+    }
+
+    static uint32_t fallbackFunctionSize(const MachOFile &mf, const Section *sec,
+                                         uint32_t funcAddr) {
+        if (!sec || funcAddr < sec->addr || funcAddr >= sec->addr + sec->size)
+            return 0;
+
+        uint32_t end = sec->addr + sec->size;
+        for (const auto &[addr, name] : mf.functionMap()) {
+            (void)name;
+            if (addr <= funcAddr || addr >= end)
+                continue;
+            if (mf.sectionForAddress(addr) == sec)
+                end = addr;
+        }
+
+        if (end > funcAddr + 0x2000)
+            end = funcAddr + 0x2000;
+        return end > funcAddr ? end - funcAddr : 0;
+    }
+
+    static QString x64DisassemblyFallback(const MachOFile &mf, uint32_t funcAddr) {
+        const Section *sec = mf.sectionForAddress(funcAddr);
+        if (!sec || !mf.isCodeSection(*sec))
+            return "/* x64 function address is not in executable code. */\n";
+
+        uint32_t codeOff = funcAddr - sec->addr;
+        uint32_t size = fallbackFunctionSize(mf, sec, funcAddr);
+        const uint8_t *code = size ? mf.bytesAt(sec->offset + codeOff, size) : nullptr;
+        if (!code)
+            return "/* x64 function bytes are unavailable. */\n";
+
+        csh cs = 0;
+        if (cs_open(CS_ARCH_X86, CS_MODE_64, &cs) != CS_ERR_OK)
+            return "/* Capstone is unavailable for x64 disassembly. */\n";
+        cs_option(cs, CS_OPT_SYNTAX, CS_OPT_SYNTAX_INTEL);
+
+        constexpr size_t kMaxFallbackInstructions = 256;
+        cs_insn *insn = nullptr;
+        size_t count = cs_disasm(cs, code, size, funcAddr,
+                                 kMaxFallbackInstructions + 1, &insn);
+        size_t shown = std::min(count, kMaxFallbackInstructions);
+
+        std::string out;
+        out += "void " + fallbackFunctionName(mf, funcAddr) + "(void) {\n";
+        out += "    /* x64 lifting is not implemented yet; emitting disassembly comments. */\n";
+        bool stoppedAtReturn = false;
+        for (size_t i = 0; i < shown; ++i) {
+            char bytes[64] = {0};
+            size_t bytePos = 0;
+            for (size_t b = 0; b < insn[i].size && b < 10; ++b) {
+                int n = snprintf(bytes + bytePos, sizeof(bytes) - bytePos,
+                                 b ? " %02X" : "%02X", insn[i].bytes[b]);
+                if (n <= 0 || (size_t)n >= sizeof(bytes) - bytePos)
+                    break;
+                bytePos += (size_t)n;
+            }
+
+            char line[384];
+            snprintf(line, sizeof(line), "    /* %08llX  %-30s  %-8s %s */\n",
+                     (unsigned long long)insn[i].address, bytes,
+                     insn[i].mnemonic, insn[i].op_str);
+            out += line;
+
+            if (std::strcmp(insn[i].mnemonic, "ret") == 0 ||
+                std::strcmp(insn[i].mnemonic, "retq") == 0) {
+                stoppedAtReturn = true;
+                break;
+            }
+        }
+        if (count == 0)
+            out += "    /* no x64 instructions decoded. */\n";
+        else if (!stoppedAtReturn && count > shown)
+            out += "    /* x64 fallback truncated; use the disassembly pane or CLI --disasm for the full linear listing. */\n";
+        out += "}\n";
+
+        if (insn)
+            cs_free(insn, count);
+        cs_close(&cs);
+        return QString::fromStdString(out);
+    }
+
     // Decompile a single function
     static QString decompile(const MachOFile &mf, uint32_t funcAddr, bool format = true) {
         configurePortTypeNames(mf);
         if (mf.is64Bit())
-            return "/* x64 decompilation is not implemented yet; use the disassembly pane. */\n";
+            return x64DisassemblyFallback(mf, funcAddr);
         Lifter lifter(mf);
         IRFunc func = lifter.liftFunction(funcAddr);
         if (func.blocks.empty()) return "/* could not decompile */\n";
@@ -150,8 +249,21 @@ public:
     // Decompile a whole source file
     static QString decompileFile(MachOFile &mf, int srcIdx) {
         configurePortTypeNames(mf);
-        if (mf.is64Bit())
-            return "/* x64 source-file decompilation is not implemented yet; use function disassembly. */\n";
+        if (mf.is64Bit()) {
+            auto &sources = mf.stabsSourceFiles();
+            if (srcIdx < 0 || srcIdx >= (int)sources.size())
+                return "/* invalid source index */\n";
+            QString out;
+            for (int fi : sources[srcIdx].functionIndices) {
+                if (fi < 0 || fi >= (int)mf.stabsFunctions().size())
+                    continue;
+                out += x64DisassemblyFallback(mf, mf.stabsFunctions()[fi].address);
+                out += "\n";
+            }
+            return out.isEmpty()
+                ? "/* x64 source file has no known functions. */\n"
+                : out;
+        }
         auto &sources = mf.stabsSourceFiles();
         if (srcIdx < 0 || srcIdx >= (int)sources.size()) return "";
         auto &sf = sources[srcIdx];

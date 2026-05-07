@@ -113,11 +113,11 @@ Open `web/index.html` through a local static server, or use the hosted GitHub Pa
 
 ## Supported Inputs
 
-Revtool currently targets 32-bit x86 decompilation, with initial ELF64 x86-64 loading and disassembly:
+Revtool currently targets 32-bit x86 decompilation, with initial ELF64 x86-64 loading and disassembly-backed function views:
 
 - Mach-O i386
 - PE32 i386
 - ELF32 i386
-- ELF64 x86-64 (disassembly/listing; decompilation is not implemented yet)
+- ELF64 x86-64 (loading/listing, disassembly, PLT import names, and C-shell disassembly fallback)
 
 Decompiler output is intended as an analysis aid. It is not a guarantee of buildable source reconstruction, especially for stripped, optimized, obfuscated, or metadata-poor binaries.
