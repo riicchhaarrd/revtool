@@ -1417,6 +1417,7 @@ private:
     std::string dwarfBaseTypeName(uint64_t encoding, uint64_t sizeBytes,
                                   const std::string &name) const {
         if (encoding == DW_ATE_UTF && name.empty()) {
+            if (sizeBytes <= 1) return "char8_t";
             if (sizeBytes <= 2) return "char16_t";
             return "char32_t";
         }

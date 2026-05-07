@@ -1286,8 +1286,11 @@ public:
                    "typedef unsigned int uint32_t __attribute__((mode(SI)));\n"
                    "typedef int int64_t __attribute__((mode(DI)));\n"
                    "typedef unsigned int uint64_t __attribute__((mode(DI)));\n"
+                   "#ifndef __cplusplus\n"
+                   "typedef uint8_t char8_t;\n"
                    "typedef uint16_t char16_t;\n"
-                   "typedef uint32_t char32_t;\n";
+                   "typedef uint32_t char32_t;\n"
+                   "#endif\n";
         } else {
             out += "#include <stdint.h>\n"
                    "#include <stddef.h>\n"
@@ -1295,7 +1298,10 @@ public:
                    "#include <uchar.h>\n"
                    "#include <math.h>\n"
                    "#include <string.h>\n"
-                   "#include <stdio.h>\n";
+                   "#include <stdio.h>\n"
+                   "#ifndef __cplusplus\n"
+                   "typedef uint8_t char8_t;\n"
+                   "#endif\n";
         }
         if (selfContained) out += QString(
             "/* C library stubs */\n"
