@@ -94,6 +94,7 @@ struct StabsFunction {
     std::vector<std::pair<uint32_t, int>> lineMap; // addr -> line number
     std::vector<StabsTypedVar> params;
     std::vector<StabsTypedVar> locals;
+    int frameBaseBias = 8; // DWARF fbreg-to-ebp adjustment; STABS keeps the default.
     bool isRegparm = false;  // true if function uses regparm(3) calling convention
 };
 

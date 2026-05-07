@@ -128,6 +128,7 @@ constexpr uint64_t DW_AT_decl_file         = 0x3A;
 constexpr uint64_t DW_AT_decl_line         = 0x3B;
 constexpr uint64_t DW_AT_declaration       = 0x3C;
 constexpr uint64_t DW_AT_encoding          = 0x3E;
+constexpr uint64_t DW_AT_frame_base        = 0x40;
 constexpr uint64_t DW_AT_abstract_origin   = 0x31;
 constexpr uint64_t DW_AT_count             = 0x37;
 constexpr uint64_t DW_AT_data_member_location = 0x38;
@@ -220,7 +221,12 @@ constexpr uint8_t  DW_OP_constu            = 0x10;
 constexpr uint8_t  DW_OP_consts            = 0x11;
 constexpr uint8_t  DW_OP_plus              = 0x22;
 constexpr uint8_t  DW_OP_plus_uconst       = 0x23;
+constexpr uint8_t  DW_OP_reg0              = 0x50;
+constexpr uint8_t  DW_OP_reg31             = 0x6F;
 constexpr uint8_t  DW_OP_fbreg             = 0x91;
+constexpr uint8_t  DW_OP_call_frame_cfa    = 0x9C;
+constexpr uint8_t  DW_OP_addrx             = 0xA1;
+constexpr uint8_t  DW_OP_constx            = 0xA2;
 
 struct DwarfAbbrevAttr {
     uint64_t name = 0;
@@ -269,5 +275,7 @@ struct DwarfUnit {
     std::string name;
     std::string compDir;
     uint32_t stmtList = UINT32_MAX;
+    uint32_t strOffsetsBase = UINT32_MAX;
+    uint32_t addrBase = UINT32_MAX;
     const DwarfLineTable *lineTable = nullptr;
 };
