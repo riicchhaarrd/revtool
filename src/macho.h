@@ -1567,14 +1567,28 @@ private:
         if (ti->kind == StabsTypeKind::Union) {
             field.bitOffset = 0;
         } else {
+            int byteOffset = 0;
+            bool haveByteOffset = false;
             if (dwarfHasAttr(attrs, DW_AT_data_bit_offset)) {
                 field.bitOffset = (int)dwarfUnsignedAttr(attrs, DW_AT_data_bit_offset);
             } else {
                 auto it = attrs.find(DW_AT_data_member_location);
                 if (it != attrs.end() && it->second.present) {
-                    int byteOffset = 0;
-                    if (dwarfDataMemberByteOffset(it->second, byteOffset))
+                    if (dwarfDataMemberByteOffset(it->second, byteOffset)) {
                         field.bitOffset = byteOffset * 8;
+                        haveByteOffset = true;
+                    }
+                }
+                if (dwarfHasAttr(attrs, DW_AT_bit_offset) &&
+                    dwarfHasAttr(attrs, DW_AT_bit_size)) {
+                    // DWARF2 bit offsets are MSB-relative within the storage unit.
+                    auto *ft = m_typeTable.resolveType(field.typeRef);
+                    int storageBits = ft && ft->sizeBytes > 0 ? ft->sizeBytes * 8 : 0;
+                    int bitOffset = (int)dwarfUnsignedAttr(attrs, DW_AT_bit_offset);
+                    int bitSize = (int)dwarfUnsignedAttr(attrs, DW_AT_bit_size);
+                    if (storageBits > 0 && bitSize > 0 && bitOffset + bitSize <= storageBits)
+                        field.bitOffset = (haveByteOffset ? byteOffset * 8 : 0) +
+                                          storageBits - bitOffset - bitSize;
                 }
             }
         }
