@@ -46,6 +46,12 @@ public:
         return true;
     }
 
+    static bool isCTypeTagName(const std::string &name) {
+        if (name.empty()) return false;
+        static const char *badChars = ":<>~()&*, ";
+        return name.find_first_of(badChars) == std::string::npos;
+    }
+
     static std::string externSuppressGuard(const std::string &name) {
         std::string guard = "COD2_SUPPRESS_EXTERN_";
         for (char c : name) {
@@ -80,8 +86,26 @@ public:
         return variadics.count(name) != 0;
     }
 
+    static void configurePortTypeNames(const MachOFile &mf) {
+        if (!s_portMode) return;
+        std::vector<TypeRef> roots;
+        auto addRoot = [&](TypeRef ref) {
+            if (ref != NullType)
+                roots.push_back(ref);
+        };
+        for (auto &fn : mf.stabsFunctions()) {
+            addRoot(fn.returnType);
+            for (auto &p : fn.params) addRoot(p.typeRef);
+            for (auto &l : fn.locals) addRoot(l.typeRef);
+        }
+        for (auto &g : mf.typeTable().globals())
+            addRoot(g.typeRef);
+        mf.typeTable().configureCNameDisambiguation(roots);
+    }
+
     // Decompile a single function
     static QString decompile(const MachOFile &mf, uint32_t funcAddr, bool format = true) {
+        configurePortTypeNames(mf);
         Lifter lifter(mf);
         IRFunc func = lifter.liftFunction(funcAddr);
         if (func.blocks.empty()) return "/* could not decompile */\n";
@@ -119,6 +143,7 @@ public:
 
     // Decompile a whole source file
     static QString decompileFile(MachOFile &mf, int srcIdx) {
+        configurePortTypeNames(mf);
         auto &sources = mf.stabsSourceFiles();
         if (srcIdx < 0 || srcIdx >= (int)sources.size()) return "";
         auto &sf = sources[srcIdx];
@@ -873,6 +898,7 @@ public:
 
     // Dump all STABS types as a C header
     static QString dumpTypes(const MachOFile &mf) {
+        configurePortTypeNames(mf);
         auto &types = mf.typeTable();
         QString out;
         out += "/* Auto-generated type definitions from STABS debug info */\n";
@@ -933,18 +959,45 @@ public:
 
         // Emit forward declarations for all structs/unions
         std::set<std::string> fwdDeclared;
-        for (auto ref : allTypes) {
-            auto *t = types.resolveType(ref);
+        for (auto &[ref, info] : types.allTypes()) {
+            (void)info;
+            auto *t = types.getType(ref);
             if (!t) continue;
             if (t->kind == StabsTypeKind::Struct || t->kind == StabsTypeKind::Union) {
-                if (t->name.empty() || t->name.find('<') != std::string::npos) continue;
-                if (fwdDeclared.count(t->name) || platformNames.count(t->name)) continue;
-                fwdDeclared.insert(t->name);
+                if (!isCTypeTagName(t->name)) continue;
+                std::string cname = types.aggregateCName(ref);
+                if (!isCTypeTagName(cname) || fwdDeclared.count(cname) ||
+                    platformNames.count(cname)) continue;
+                fwdDeclared.insert(cname);
                 std::string kw = (t->kind == StabsTypeKind::Union) ? "union" : "struct";
-                out += QString::fromStdString(kw + " " + t->name + ";\n");
+                out += QString::fromStdString(kw + " " + cname + ";\n");
             }
         }
         if (!fwdDeclared.empty()) out += "\n";
+
+        if (s_portMode) {
+            std::set<std::string> emittedTypedefForwards;
+            for (auto ref : types.renamedTypedefRefs()) {
+                auto *td = types.getType(ref);
+                if (!td || td->targetType == NullType)
+                    continue;
+                TypeRef aggRef = types.aggregateRefForType(td->targetType);
+                auto *agg = aggRef != NullType ? types.getType(aggRef) : nullptr;
+                if (!agg || (agg->kind != StabsTypeKind::Struct &&
+                             agg->kind != StabsTypeKind::Union))
+                    continue;
+                std::string alias = types.typedefCName(ref);
+                std::string aggName = types.aggregateCName(aggRef);
+                if (!isCIdentifier(alias) || !isCTypeTagName(aggName) ||
+                    emittedTypedefForwards.count(alias) || platformNames.count(alias))
+                    continue;
+                std::string kw = (agg->kind == StabsTypeKind::Union) ? "union" : "struct";
+                out += QString::fromStdString("typedef " + kw + " " +
+                                              aggName + " " + alias + ";\n");
+                emittedTypedefForwards.insert(alias);
+            }
+            if (!emittedTypedefForwards.empty()) out += "\n";
+        }
 
         // Emit full type definitions (skip names already in platform typedefs)
         std::set<std::string> emittedTypeNames(platformNames);
@@ -2959,6 +3012,21 @@ private:
         return realFields * 100000 + (int)t.fields.size() * 1000 + t.sizeBytes;
     }
 
+    static bool weakAggregateDefinition(const StabsTypeInfo &t) {
+        if (t.kind != StabsTypeKind::Struct && t.kind != StabsTypeKind::Union)
+            return false;
+        int realFields = 0;
+        for (auto &f : t.fields) {
+            if (f.name.empty() || f.name[0] == '/' || f.name[0] == '!' ||
+                f.name[0] == '#' || f.name[0] == '$' || f.name[0] == '~')
+                continue;
+            if (f.name == "dummy")
+                continue;
+            realFields++;
+        }
+        return t.fields.empty() || realFields == 0;
+    }
+
     static std::map<std::string, TypeRef> preferredNamedAggregates(const StabsTypeTable &types) {
         std::map<std::string, TypeRef> preferred;
         for (auto &[ref, ti] : types.allTypes()) {
@@ -2992,8 +3060,16 @@ private:
               !t->name.empty()) ||
              (t->kind == StabsTypeKind::ForwardRef && !t->forwardTag.empty()))) {
             auto it = preferredAggregates->find(aggregateEmitKey(*t));
-            if (it != preferredAggregates->end())
-                ref = it->second;
+            if (it != preferredAggregates->end() && it->second != ref) {
+                auto *preferred = types.getType(it->second);
+                bool redirect = t->kind == StabsTypeKind::ForwardRef;
+                if (!redirect && preferred) {
+                    redirect = weakAggregateDefinition(*t) ||
+                               t->sizeBytes == preferred->sizeBytes;
+                }
+                if (redirect)
+                    ref = it->second;
+            }
             t = types.getType(ref);
             if (!t) return;
         }
@@ -3014,10 +3090,12 @@ private:
             // Skip anonymous CU-local types (inlined into parent structs)
             if (t->name.find("$_") == 0) return;
             // Skip C++ template types (not valid C)
-            if (t->name.find('<') != std::string::npos) return;
+            if (!isCTypeTagName(t->name)) return;
             // Skip if already emitted a struct/union with this name (cross-CU dedup)
-            if (emittedNames.count(t->name)) return;
-            emittedNames.insert(t->name);
+            std::string emitName = types.aggregateCName(ref);
+            if (!isCTypeTagName(emitName)) return;
+            if (emittedNames.count(emitName)) return;
+            emittedNames.insert(emitName);
             if (t->fields.empty()) {
                 // Struct with no STABS fields — generate int fields at known offsets
                 // to support field_X access patterns
@@ -3026,7 +3104,7 @@ private:
                 if (sz > 0 && sz <= 65536) {
                     // Emit as a struct padded with ints to cover the full size
                     // Fields will be accessed as ->field_X where X is hex offset
-                    out += QString::fromStdString(kw + " " + t->name + " {\n");
+                    out += QString::fromStdString(kw + " " + emitName + " {\n");
                     int numInts = (sz + 3) / 4;
                     for (int i = 0; i < numInts; ++i) {
                         char fname[32];
@@ -3035,10 +3113,10 @@ private:
                     }
                     out += "};\n\n";
                 } else if (sz > 65536) {
-                    out += QString::fromStdString(kw + " " + t->name +
+                    out += QString::fromStdString(kw + " " + emitName +
                         " { char _opaque[" + std::to_string(sz) + "]; };\n\n");
                 } else {
-                    out += QString::fromStdString(kw + " " + t->name + ";\n");
+                    out += QString::fromStdString(kw + " " + emitName + ";\n");
                 }
                 return;
             }
@@ -3046,9 +3124,10 @@ private:
             for (auto &f : t->fields) {
                 if (f.typeRef == NullType) continue;
                 auto *ft = types.resolveType(f.typeRef);
+                std::string fieldEmitName = types.aggregateCNameForType(f.typeRef);
                 if (ft && ft->kind == StabsTypeKind::Union &&
                     !ft->name.empty() && ft->name != t->name &&
-                    !emittedNames.count(ft->name))
+                    !emittedNames.count(fieldEmitName))
                     emitTypeDefsRecursive(out, types, f.typeRef, emitted, emittedNames,
                                           depth + 1, preferredAggregates);
             }
@@ -3094,9 +3173,10 @@ private:
                                 }
                                 return true;
                             }
-                            return !ft->name.empty() &&
-                                   (emittedNames.count(ft->name) ||
-                                    ft->name == ownerName);
+                            std::string fieldEmitName = types.aggregateCNameForType(fieldRef);
+                            return !fieldEmitName.empty() &&
+                                   (emittedNames.count(fieldEmitName) ||
+                                    fieldEmitName == ownerName);
                         }
                         if (ft->kind == StabsTypeKind::Enum)
                             return !ft->name.empty() && emittedNames.count(ft->name);
@@ -3109,9 +3189,11 @@ private:
                             if (elem->kind == StabsTypeKind::Array)
                                 return fieldTypeOk(ft->targetType, ownerName, depth + 1);
                             if (elem->kind == StabsTypeKind::Struct ||
-                                elem->kind == StabsTypeKind::Union)
-                                return !elem->name.empty() &&
-                                       emittedNames.count(elem->name);
+                                elem->kind == StabsTypeKind::Union) {
+                                std::string elemName = types.aggregateCNameForType(ft->targetType);
+                                return !elemName.empty() &&
+                                       emittedNames.count(elemName);
+                            }
                             return elem->kind == StabsTypeKind::Enum &&
                                    !elem->name.empty() &&
                                    emittedNames.count(elem->name);
@@ -3129,7 +3211,7 @@ private:
                     // Check that the field's type resolves to something we've defined
                     auto *ft = types.resolveType(f.typeRef);
                     if (!ft) { allFieldsOk = false; break; }
-                    if (!fieldTypeOk(f.typeRef, t->name, 0)) {
+                    if (!fieldTypeOk(f.typeRef, emitName, 0)) {
                         allFieldsOk = false; break;
                     }
                 }
@@ -3151,7 +3233,7 @@ private:
                     // Emit struct with STABS field names but simplified types.
                     // Use int/pointer for fields whose types can't be resolved.
                     std::string kw = (t->kind == StabsTypeKind::Union) ? "union" : "struct";
-                    out += QString::fromStdString(kw + " " + t->name + " {\n");
+                    out += QString::fromStdString(kw + " " + emitName + " {\n");
                     int prevEnd = 0; // track offset for padding
                     for (auto &f : t->fields) {
                         if (f.bitSize == 0 && f.bitOffset == 0) continue;
@@ -3209,8 +3291,13 @@ private:
                         if (ft) {
                             if (ft->kind <= StabsTypeKind::LongDouble) typeOk = true;
                             if (rawFt && rawFt->kind == StabsTypeKind::Pointer) typeOk = true;
-                            if ((ft->kind == StabsTypeKind::Struct || ft->kind == StabsTypeKind::Union)
-                                && !ft->name.empty() && emittedNames.count(ft->name)) typeOk = true;
+                            if (ft->kind == StabsTypeKind::Struct ||
+                                ft->kind == StabsTypeKind::Union) {
+                                std::string fieldEmitName = types.aggregateCNameForType(f.typeRef);
+                                if (!fieldEmitName.empty() &&
+                                    emittedNames.count(fieldEmitName))
+                                    typeOk = true;
+                            }
                             if (ft->kind == StabsTypeKind::Enum && !ft->name.empty()
                                 && emittedNames.count(ft->name)) typeOk = true;
                             if (ft->kind == StabsTypeKind::Array) {

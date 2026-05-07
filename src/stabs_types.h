@@ -7,6 +7,7 @@
 #include <unordered_map>
 #include <algorithm>
 #include <functional>
+#include <set>
 
 // ── STABS type system parser ─────────────────────────────────────────
 // Parses STABS debug type encoding strings into structured type info.
@@ -217,6 +218,13 @@ public:
         if (addr) m_globalByAddr[addr].push_back(m_globals.size() - 1);
     }
 
+    void configureCNameDisambiguation(const std::vector<TypeRef> &roots) const {
+        if (m_cNamesConfigured) return;
+        m_cNamesConfigured = true;
+        m_useDisambiguatedCNames = true;
+        buildCNameMaps(roots);
+    }
+
     // Register an include file
     void addInclude(const std::string &path) {
         if (!path.empty() && std::find(m_includes.begin(), m_includes.end(), path) == m_includes.end())
@@ -388,13 +396,13 @@ public:
         }
 
         case StabsTypeKind::Typedef:
-            if (!t->name.empty()) return t->name;
+            if (!t->name.empty()) return typedefCName(ref);
             return formatType(t->targetType, depth + 1);
 
         case StabsTypeKind::Struct:
-            return t->name.empty() ? "struct" : "struct " + t->name;
+            return t->name.empty() ? "struct" : "struct " + aggregateCName(ref);
         case StabsTypeKind::Union:
-            return t->name.empty() ? "union" : "union " + t->name;
+            return t->name.empty() ? "union" : "union " + aggregateCName(ref);
         case StabsTypeKind::Enum:
             return t->name.empty() ? "enum" : "enum " + t->name;
 
@@ -449,6 +457,77 @@ public:
         // void* can't be subscripted or used in arithmetic — use char*
         // void*→char* too broad, disabled
         return typeStr + " " + varName;
+    }
+
+    std::string aggregateCName(TypeRef ref) const {
+        auto *t = getType(ref);
+        if (!t || (t->kind != StabsTypeKind::Struct && t->kind != StabsTypeKind::Union))
+            return t ? t->name : std::string();
+        if (m_useDisambiguatedCNames) {
+            auto it = m_aggregateCNames.find(ref);
+            if (it != m_aggregateCNames.end())
+                return it->second;
+        }
+        return t->name;
+    }
+
+    std::string aggregateCNameForType(TypeRef ref) const {
+        TypeRef aggRef = aggregateRefForType(ref);
+        if (aggRef == NullType) {
+            auto *t = resolveType(ref);
+            return t ? t->name : std::string();
+        }
+        return aggregateCName(aggRef);
+    }
+
+    std::string typedefCName(TypeRef ref) const {
+        auto *t = getType(ref);
+        if (!t || t->kind != StabsTypeKind::Typedef)
+            return t ? t->name : std::string();
+        if (m_useDisambiguatedCNames) {
+            auto it = m_typedefCNames.find(ref);
+            if (it != m_typedefCNames.end())
+                return it->second;
+        }
+        return t->name;
+    }
+
+    std::vector<TypeRef> renamedTypedefRefs() const {
+        std::vector<TypeRef> refs;
+        for (auto &kv : m_typedefCNames) {
+            auto *t = getType(kv.first);
+            if (t && t->kind == StabsTypeKind::Typedef && kv.second != t->name)
+                refs.push_back(kv.first);
+        }
+        return refs;
+    }
+
+    TypeRef aggregateRefForType(TypeRef ref, int depth = 0) const {
+        if (ref == NullType || depth > 20) return NullType;
+        auto *t = getType(ref);
+        if (!t) return NullType;
+        if (t->kind == StabsTypeKind::Typedef ||
+            t->kind == StabsTypeKind::Const ||
+            t->kind == StabsTypeKind::Volatile)
+            return aggregateRefForType(t->targetType, depth + 1);
+        if (t->kind == StabsTypeKind::Struct || t->kind == StabsTypeKind::Union)
+            return ref;
+        if (t->kind == StabsTypeKind::ForwardRef && !t->forwardTag.empty()) {
+            int refCU = ref.first / 10000;
+            TypeRef fallback = NullType;
+            for (auto &[tref, ti] : m_types) {
+                if (tref == ref) continue;
+                if ((ti.kind == StabsTypeKind::Struct || ti.kind == StabsTypeKind::Union) &&
+                    ti.name == t->forwardTag && !ti.fields.empty()) {
+                    if (tref.first / 10000 == refCU)
+                        return tref;
+                    if (fallback == NullType)
+                        fallback = tref;
+                }
+            }
+            return fallback;
+        }
+        return NullType;
     }
 
     // Field bit size with fallback to the field type's size in bits.
@@ -919,7 +998,7 @@ public:
             return "";
         std::string kw = (t->kind == StabsTypeKind::Union) ? "union" : "struct";
         std::string out = kw;
-        if (!t->name.empty()) out += " " + t->name;
+        if (!t->name.empty()) out += " " + aggregateCName(ref);
         out += " {\n";
         auto skipField = [](const StabsTypeField &f) -> bool {
             if (f.name.empty() || f.name[0] == '/') return true;
@@ -1015,6 +1094,237 @@ public:
     }
 
 private:
+    static int realFieldCount(const StabsTypeInfo &t) {
+        int realFields = 0;
+        for (auto &f : t.fields) {
+            if (f.name.empty() || f.name[0] == '/' || f.name[0] == '!' ||
+                f.name[0] == '#' || f.name[0] == '$' || f.name[0] == '~')
+                continue;
+            if (f.name == "dummy")
+                continue;
+            realFields++;
+        }
+        return realFields;
+    }
+
+    static bool weakAggregateDefinition(const StabsTypeInfo &t) {
+        if (t.kind != StabsTypeKind::Struct && t.kind != StabsTypeKind::Union)
+            return false;
+        return t.fields.empty() || realFieldCount(t) == 0;
+    }
+
+    static int aggregateDefinitionScore(const StabsTypeInfo &t) {
+        return realFieldCount(t) * 100000 + (int)t.fields.size() * 1000 + t.sizeBytes;
+    }
+
+    static std::string aggregateKey(const StabsTypeInfo &t) {
+        if (t.kind == StabsTypeKind::Struct)
+            return "struct " + t.name;
+        if (t.kind == StabsTypeKind::Union)
+            return "union " + t.name;
+        return "";
+    }
+
+    static std::string disambiguatedName(const std::string &base, TypeRef ref) {
+        std::string out = base + "__stabs_";
+        out += std::to_string(ref.first);
+        out += "_";
+        out += std::to_string(ref.second);
+        return out;
+    }
+
+    void visitCNameRoot(TypeRef ref, std::map<TypeRef, int> &score,
+                        std::set<TypeRef> &seen, int depth) const {
+        if (ref == NullType || depth > 32) return;
+        if (!seen.insert(ref).second) return;
+        score[ref]++;
+        auto *t = getType(ref);
+        if (!t) return;
+        if (t->targetType != NullType)
+            visitCNameRoot(t->targetType, score, seen, depth + 1);
+        for (auto &f : t->fields)
+            visitCNameRoot(f.typeRef, score, seen, depth + 1);
+    }
+
+    std::string typedefTargetSignature(TypeRef ref, int depth = 0) const {
+        if (ref == NullType || depth > 20) return "null";
+        auto *t = getType(ref);
+        if (!t) return "missing";
+        switch (t->kind) {
+        case StabsTypeKind::Pointer:
+            return "ptr:" + typedefTargetSignature(t->targetType, depth + 1);
+        case StabsTypeKind::Reference:
+            return "ref:" + typedefTargetSignature(t->targetType, depth + 1);
+        case StabsTypeKind::Const:
+            return "const:" + typedefTargetSignature(t->targetType, depth + 1);
+        case StabsTypeKind::Volatile:
+            return "volatile:" + typedefTargetSignature(t->targetType, depth + 1);
+        case StabsTypeKind::Array:
+            return "array:" + std::to_string(t->arrayLow) + ":" +
+                   std::to_string(t->arrayHigh) + ":" +
+                   typedefTargetSignature(t->targetType, depth + 1);
+        case StabsTypeKind::Struct:
+        case StabsTypeKind::Union:
+            return aggregateKey(*t) + ":" + aggregateCName(ref);
+        case StabsTypeKind::Typedef:
+            return "typedef:" + typedefTargetSignature(t->targetType, depth + 1);
+        default:
+            return "kind:" + std::to_string((int)t->kind) + ":" +
+                   t->name + ":" + std::to_string(t->sizeBytes);
+        }
+    }
+
+    static bool typedefTargetCanUseForwardAlias(const StabsTypeInfo &t) {
+        return t.kind == StabsTypeKind::Struct || t.kind == StabsTypeKind::Union;
+    }
+
+    void buildCNameMaps(const std::vector<TypeRef> &roots) const {
+        std::map<TypeRef, int> useScore;
+        for (auto ref : roots) {
+            std::set<TypeRef> seen;
+            visitCNameRoot(ref, useScore, seen, 0);
+        }
+
+        std::map<std::string, std::vector<TypeRef>> aggregateGroups;
+        for (auto &[ref, ti] : m_types) {
+            if (ti.kind != StabsTypeKind::Struct && ti.kind != StabsTypeKind::Union)
+                continue;
+            if (ti.name.empty() || ti.name.find('<') != std::string::npos)
+                continue;
+            aggregateGroups[aggregateKey(ti)].push_back(ref);
+        }
+
+        for (auto &[key, refs] : aggregateGroups) {
+            if (refs.empty()) continue;
+            auto *first = getType(refs.front());
+            if (!first) continue;
+
+            struct Variant {
+                int size = 0;
+                int use = 0;
+                int count = 0;
+                int defScore = 0;
+                TypeRef representative = NullType;
+                std::vector<TypeRef> refs;
+            };
+
+            std::map<int, Variant> variants;
+            std::vector<TypeRef> weakRefs;
+            for (auto ref : refs) {
+                auto *t = getType(ref);
+                if (!t) continue;
+                if (weakAggregateDefinition(*t)) {
+                    weakRefs.push_back(ref);
+                    continue;
+                }
+                auto &v = variants[t->sizeBytes];
+                v.size = t->sizeBytes;
+                v.use += useScore[ref];
+                v.count++;
+                v.refs.push_back(ref);
+                int defScore = aggregateDefinitionScore(*t);
+                if (v.representative == NullType || useScore[ref] > useScore[v.representative] ||
+                    (useScore[ref] == useScore[v.representative] && defScore > v.defScore)) {
+                    v.representative = ref;
+                    v.defScore = defScore;
+                }
+            }
+
+            if (variants.empty()) {
+                for (auto ref : refs)
+                    m_aggregateCNames[ref] = first->name;
+                continue;
+            }
+
+            TypeRef originalRep = NullType;
+            int bestUse = -1;
+            int bestCount = -1;
+            int bestDefScore = -1;
+            int bestSize = -1;
+            for (auto &[size, v] : variants) {
+                if (originalRep == NullType ||
+                    v.use > bestUse ||
+                    (v.use == bestUse && v.count > bestCount) ||
+                    (v.use == bestUse && v.count == bestCount && v.defScore > bestDefScore) ||
+                    (v.use == bestUse && v.count == bestCount && v.defScore == bestDefScore &&
+                     v.size > bestSize)) {
+                    originalRep = v.representative;
+                    bestUse = v.use;
+                    bestCount = v.count;
+                    bestDefScore = v.defScore;
+                    bestSize = v.size;
+                }
+            }
+
+            int originalSize = getType(originalRep) ? getType(originalRep)->sizeBytes : 0;
+            for (auto &[size, v] : variants) {
+                std::string cname = (size == originalSize) ?
+                    first->name : disambiguatedName(first->name, v.representative);
+                for (auto ref : v.refs)
+                    m_aggregateCNames[ref] = cname;
+            }
+            std::string originalName = first->name;
+            for (auto ref : weakRefs)
+                m_aggregateCNames[ref] = originalName;
+        }
+
+        std::map<std::string, std::vector<TypeRef>> typedefGroups;
+        for (auto &[ref, ti] : m_types) {
+            if (ti.kind == StabsTypeKind::Typedef && !ti.name.empty() &&
+                ti.name.find('<') == std::string::npos)
+                typedefGroups[ti.name].push_back(ref);
+        }
+
+        for (auto &[name, refs] : typedefGroups) {
+            struct Variant {
+                std::string signature;
+                int use = 0;
+                int count = 0;
+                TypeRef representative = NullType;
+                std::vector<TypeRef> refs;
+            };
+            std::map<std::string, Variant> variants;
+            for (auto ref : refs) {
+                auto *t = getType(ref);
+                if (!t || t->targetType == NullType) continue;
+                TypeRef targetAgg = aggregateRefForType(t->targetType);
+                if (targetAgg == NullType) continue;
+                auto *agg = getType(targetAgg);
+                if (!agg || !typedefTargetCanUseForwardAlias(*agg)) continue;
+                std::string sig = typedefTargetSignature(t->targetType);
+                auto &v = variants[sig];
+                v.signature = sig;
+                v.use += useScore[ref] + useScore[targetAgg];
+                v.count++;
+                v.refs.push_back(ref);
+                if (v.representative == NullType ||
+                    useScore[ref] > useScore[v.representative])
+                    v.representative = ref;
+            }
+            if (variants.size() <= 1)
+                continue;
+
+            std::string originalSignature;
+            int bestUse = -1;
+            int bestCount = -1;
+            for (auto &[sig, v] : variants) {
+                if (originalSignature.empty() ||
+                    v.use > bestUse ||
+                    (v.use == bestUse && v.count > bestCount)) {
+                    originalSignature = sig;
+                    bestUse = v.use;
+                    bestCount = v.count;
+                }
+            }
+            for (auto &[sig, v] : variants) {
+                std::string cname = (sig == originalSignature) ?
+                    name : disambiguatedName(name, v.representative);
+                for (auto ref : v.refs)
+                    m_typedefCNames[ref] = cname;
+            }
+        }
+    }
+
     std::map<TypeRef, StabsTypeInfo>         m_types;
     std::vector<StabsGlobalVar>              m_globals;
     // Mutable cache for resolveType's CU-unification: maps a TypeRef to
@@ -1024,6 +1334,10 @@ private:
     std::vector<std::string>                 m_includes;
     int                                      m_unit = 0;
     int                                      m_syntheticCounter = -1000000; // negative TypeRefs for synthetic types
+    mutable bool                             m_useDisambiguatedCNames = false;
+    mutable bool                             m_cNamesConfigured = false;
+    mutable std::map<TypeRef, std::string>   m_aggregateCNames;
+    mutable std::map<TypeRef, std::string>   m_typedefCNames;
 
     // Check if a type ref should be protected from overwrite.
     // ForwardRefs with real tag names (like clientStatic_t) carry valuable
