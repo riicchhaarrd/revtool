@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <string>
 #include <vector>
@@ -246,6 +247,53 @@ public:
         }
         m_globals.push_back({name, addr, useType, isStatic, srcIdx >= 0 ? srcIdx : m_unit});
         if (addr) m_globalByAddr[addr].push_back(m_globals.size() - 1);
+    }
+
+    bool overrideGlobalType(uint32_t addr, const std::string &name,
+                            TypeRef type, bool isStatic = false,
+                            int srcIdx = -1) {
+        if (!addr || type == NullType)
+            return false;
+        bool updated = false;
+        auto it = m_globalByAddr.find(addr);
+        if (it != m_globalByAddr.end()) {
+            for (size_t idx : it->second) {
+                if (idx >= m_globals.size()) continue;
+                if (!name.empty() && m_globals[idx].name != name) continue;
+                if (!name.empty())
+                    m_globals[idx].name = name;
+                m_globals[idx].typeRef = type;
+                updated = true;
+            }
+            if (!updated && !name.empty()) {
+                for (size_t idx : it->second) {
+                    if (idx >= m_globals.size()) continue;
+                    m_globals[idx].typeRef = type;
+                    if (m_globals[idx].name.empty())
+                        m_globals[idx].name = name;
+                    updated = true;
+                }
+            }
+        }
+        if (!updated) {
+            std::string useName = name;
+            if (useName.empty()) {
+                char buf[32];
+                snprintf(buf, sizeof(buf), "global_%08X", addr);
+                useName = buf;
+            }
+            addGlobal(useName, addr, type, isStatic, srcIdx);
+        }
+        return true;
+    }
+
+    TypeRef findTypeByName(const std::string &name) const {
+        if (name.empty()) return NullType;
+        for (const auto &[ref, ti] : m_types) {
+            if (ti.name == name)
+                return ref;
+        }
+        return NullType;
     }
 
     void configureCNameDisambiguation(const std::vector<TypeRef> &roots) const {
@@ -1098,6 +1146,23 @@ public:
         ti.sizeBytes = sizeBytes;
         ti.fields = fields;
         return ref;
+    }
+
+    TypeRef upsertSyntheticStruct(const std::string &name,
+                                  const std::vector<StabsTypeField> &fields,
+                                  int sizeBytes) {
+        if (!name.empty()) {
+            for (auto &[ref, ti] : m_types) {
+                if (ti.name != name) continue;
+                if (ti.kind != StabsTypeKind::Struct && ti.kind != StabsTypeKind::Union)
+                    continue;
+                ti.kind = StabsTypeKind::Struct;
+                ti.sizeBytes = sizeBytes;
+                ti.fields = fields;
+                return ref;
+            }
+        }
+        return createSyntheticStruct(name, fields, sizeBytes);
     }
 
     // Replace a char[] field in an existing struct with a sub-struct type

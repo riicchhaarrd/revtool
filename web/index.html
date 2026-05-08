@@ -1079,6 +1079,7 @@ function emptyProjectDb(hash, name) {
     binaryName: name || '',
     functionNames: {},
     functionNotes: {},
+    globalTypes: {},
     customTypes: ''
   };
 }
@@ -1094,6 +1095,9 @@ function normalizeProjectDb(raw, hash, name) {
     : {};
   db.functionNotes = raw.functionNotes && typeof raw.functionNotes === 'object'
     ? Object.assign({}, raw.functionNotes)
+    : {};
+  db.globalTypes = raw.globalTypes && typeof raw.globalTypes === 'object'
+    ? Object.assign({}, raw.globalTypes)
     : {};
   db.customTypes = typeof raw.customTypes === 'string' ? raw.customTypes : '';
   return db;
@@ -1141,13 +1145,42 @@ function isValidCIdentifier(name) {
 }
 
 function applyProjectDbToBackend() {
-  if (!mod || !projectDb || !projectDb.functionNames) return;
-  for (const [key, name] of Object.entries(projectDb.functionNames)) {
-    const addr = parseAddrKey(key);
-    if (!addr || !isValidCIdentifier(name)) continue;
-    if (typeof mod.renameFunction === 'function')
-      mod.renameFunction(addr, name);
+  if (!mod || !projectDb) return;
+  if (projectDb.functionNames) {
+    for (const [key, name] of Object.entries(projectDb.functionNames)) {
+      const addr = parseAddrKey(key);
+      if (!addr || !isValidCIdentifier(name)) continue;
+      if (typeof mod.renameFunction === 'function')
+        mod.renameFunction(addr, name);
+    }
   }
+  if (typeof mod.applyProjectTypes === 'function') {
+    try {
+      mod.applyProjectTypes(projectDb.customTypes || '', projectGlobalBindingsText());
+    } catch (err) {
+      console.warn('applyProjectTypes failed', err);
+    }
+  }
+}
+
+function projectGlobalBindingsText() {
+  if (!projectDb || !projectDb.globalTypes) return '';
+  const lines = [];
+  for (const [key, raw] of Object.entries(projectDb.globalTypes)) {
+    const addr = parseAddrKey(key);
+    if (!addr) continue;
+    let type = '';
+    let symbol = '';
+    if (raw && typeof raw === 'object') {
+      type = String(raw.type || '').trim();
+      symbol = String(raw.symbol || '').trim();
+    } else {
+      type = String(raw || '').trim();
+    }
+    if (!isValidCIdentifier(type)) continue;
+    lines.push(addrKey(addr) + ' ' + type + (symbol ? ' ' + symbol : ''));
+  }
+  return lines.join('\n');
 }
 
 function saveProjectDb(opts) {
@@ -1211,6 +1244,8 @@ function inferStructs() {
   }
   if (!projectDb) projectDb = emptyProjectDb(currentBinaryHash, currentBinaryName);
   projectDb.customTypes = document.getElementById('custom-types').value;
+  if (!projectDb.globalTypes || typeof projectDb.globalTypes !== 'object')
+    projectDb.globalTypes = {};
   spin(true);
   sbMsg('Inferring struct candidates...');
   setTimeout(() => {
@@ -1226,27 +1261,39 @@ function inferStructs() {
 
     let existing = projectDb.customTypes || '';
     const additions = [];
+    let bindingsAdded = 0;
     for (const c of candidates) {
       if (!c.name || !c.c_decl) continue;
+      if (c.is_global && c.global_address && c.name) {
+        const key = addrKey(c.global_address);
+        const prev = projectDb.globalTypes[key];
+        projectDb.globalTypes[key] = {
+          type: c.name,
+          symbol: c.global_symbol || ''
+        };
+        if (!prev) bindingsAdded++;
+      }
       if (existing.includes('struct ' + c.name)) continue;
       const where = (c.function_name || c.function_address_hex || 'function') + ' / ' + (c.base_register || 'reg');
       additions.push('/* inferred: ' + where + ' */\n' + c.c_decl);
       existing += '\n' + c.c_decl;
     }
-    if (!additions.length) {
+    if (!additions.length && !bindingsAdded) {
       toast('Struct candidates already exist in custom types', 'ok');
       sbMsg(candidates.length + ' struct candidates already present');
       return;
     }
 
     const prefix = projectDb.customTypes && projectDb.customTypes.trim() ? projectDb.customTypes.trimEnd() + '\n\n' : '';
-    projectDb.customTypes = prefix + additions.join('\n\n') + '\n';
+    if (additions.length)
+      projectDb.customTypes = prefix + additions.join('\n\n') + '\n';
+    applyProjectDbToBackend();
     clearTimeout(projectDbSaveTimer);
     saveProjectDb({ quiet: true });
     renderProjectDb();
     openTypesTab();
     toast(additions.length + ' struct candidates added', 'ok');
-    sbMsg(additions.length + ' struct candidates added to Project DB');
+    sbMsg(additions.length + ' struct candidates and ' + bindingsAdded + ' global bindings added to Project DB');
   }, 10);
 }
 
@@ -1274,6 +1321,7 @@ function newStructType() {
     'struct ' + name + ' {\n' +
     '    unsigned int field_0x0;\n' +
     '};\n';
+  applyProjectDbToBackend();
   clearTimeout(projectDbSaveTimer);
   saveProjectDb({ quiet: true });
   renderProjectDb();
@@ -1288,9 +1336,10 @@ function renderProjectDb() {
   const db = projectDb || emptyProjectDb('', '');
   const count = Object.keys(db.functionNames || {}).length;
   const noteCount = Object.values(db.functionNotes || {}).filter(v => String(v || '').trim()).length;
+  const globalTypeCount = Object.keys(db.globalTypes || {}).length;
   allTypes = parseCustomTypeEntries(db.customTypes || '');
   const badge = document.getElementById('db-badge');
-  badge.textContent = count + noteCount + allTypes.length;
+  badge.textContent = count + noteCount + allTypes.length + globalTypeCount;
   badge.style.display = loaded ? '' : 'none';
   document.getElementById('db-save-btn').disabled = !loaded;
   document.getElementById('db-new-type-btn').disabled = !loaded;
@@ -1305,7 +1354,7 @@ function renderProjectDb() {
     ta.value = db.customTypes || '';
   const typeLines = (db.customTypes || '').trim() ? countLines(db.customTypes || '') : 0;
   document.getElementById('db-status').textContent = loaded
-    ? (count + ' names · ' + noteCount + ' notes · ' + allTypes.length + ' types · ' + typeLines + ' type lines')
+    ? (count + ' names · ' + noteCount + ' notes · ' + allTypes.length + ' types · ' + globalTypeCount + ' globals')
     : 'No binary loaded';
   document.getElementById('type-badge').textContent = allTypes.length;
   document.getElementById('type-badge').style.display = loaded ? '' : 'none';
@@ -1317,6 +1366,7 @@ function onCustomTypesChanged() {
   if (!currentBinaryHash) return;
   if (!projectDb) projectDb = emptyProjectDb(currentBinaryHash, currentBinaryName);
   projectDb.customTypes = document.getElementById('custom-types').value;
+  applyProjectDbToBackend();
   scheduleProjectDbSave();
   refreshTypesTab();
   refreshActiveView();
@@ -1793,6 +1843,7 @@ function renameType(index, e) {
 
   projectDb.customTypes = replaced.text;
   if (ta) ta.value = replaced.text;
+  applyProjectDbToBackend();
   clearTimeout(projectDbSaveTimer);
   saveProjectDb({ quiet: true });
   renderProjectDb();

@@ -18,6 +18,7 @@
 
 #include "decompiler.h"
 #include "macho.h"
+#include "project_types.h"
 #include <QCoreApplication>
 #include <QFile>
 #include <QJsonArray>
@@ -1064,6 +1065,7 @@ static uint32_t parseProjectAddr(const QString &key) {
 
 static int applyProjectDb(MachOFile &mf, const char *path,
                           QString &customTypes,
+                          QString &globalTypeBindings,
                           std::map<uint32_t, QString> &functionNotes,
                           QString &error) {
     QFile file(QString::fromUtf8(path));
@@ -1080,6 +1082,7 @@ static int applyProjectDb(MachOFile &mf, const char *path,
 
     QJsonObject root = doc.object();
     customTypes = root.value("customTypes").toString();
+    globalTypeBindings.clear();
     functionNotes.clear();
 
     int applied = 0;
@@ -1100,6 +1103,30 @@ static int applyProjectDb(MachOFile &mf, const char *path,
         if (addr && !note.isEmpty())
             functionNotes[addr] = note;
     }
+
+    QJsonObject globalTypes = root.value("globalTypes").toObject();
+    for (auto it = globalTypes.begin(); it != globalTypes.end(); ++it) {
+        uint32_t addr = parseProjectAddr(it.key());
+        if (!addr) continue;
+        QString typeName;
+        QString symbol;
+        if (it.value().isObject()) {
+            QJsonObject obj = it.value().toObject();
+            typeName = obj.value("type").toString().trimmed();
+            symbol = obj.value("symbol").toString().trimmed();
+        } else {
+            typeName = it.value().toString().trimmed();
+        }
+        if (!isValidCIdentifier(typeName))
+            continue;
+        globalTypeBindings += QString("0x%1 %2 %3\n")
+            .arg(addr, 8, 16, QChar('0'))
+            .arg(typeName)
+            .arg(symbol);
+    }
+
+    if (!customTypes.trimmed().isEmpty() || !globalTypeBindings.trimmed().isEmpty())
+        applyProjectTypes(mf, customTypes.toStdString(), globalTypeBindings.toStdString());
     return applied;
 }
 
@@ -1230,11 +1257,13 @@ int main(int argc, char *argv[]) {
     }
 
     QString projectCustomTypes;
+    QString projectGlobalTypeBindings;
     std::map<uint32_t, QString> projectFunctionNotes;
     int projectAppliedNames = 0;
     if (projectPath) {
         QString err;
         projectAppliedNames = applyProjectDb(mf, projectPath, projectCustomTypes,
+                                             projectGlobalTypeBindings,
                                              projectFunctionNotes, err);
         if (projectAppliedNames < 0)
             return fail(1, err);
@@ -1254,6 +1283,10 @@ int main(int argc, char *argv[]) {
             obj["project_function_names"] = projectAppliedNames;
             obj["project_function_notes"] = (int)projectFunctionNotes.size();
             obj["project_custom_type_bytes"] = projectCustomTypes.toUtf8().size();
+            obj["project_global_type_bindings"] =
+                projectGlobalTypeBindings.trimmed().isEmpty()
+                    ? 0
+                    : projectGlobalTypeBindings.trimmed().count('\n') + 1;
         }
         return obj;
     };

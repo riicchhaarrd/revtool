@@ -4,6 +4,7 @@ bool g_cosmeticMode = false;
 
 #include "decompiler.h"
 #include "macho.h"
+#include "project_types.h"
 #include <emscripten/bind.h>
 #include <algorithm>
 #include <capstone/capstone.h>
@@ -683,6 +684,16 @@ std::string decompileFunction(unsigned int addr) {
     return Decompiler::decompile(g_mf, addr).toStdString();
 }
 
+std::string applyProjectTypesText(const std::string &customTypes,
+                                  const std::string &globalTypeBindings) {
+    if (!g_loaded) return "error: no binary loaded";
+    ProjectTypeApplyResult result =
+        applyProjectTypes(g_mf, customTypes, globalTypeBindings);
+    return "ok: applied " + std::to_string(result.structs) +
+           " structs and " + std::to_string(result.globals) +
+           " global type bindings";
+}
+
 static uint32_t functionSizeForDisassembly(const MachOFile &mf,
                                            const std::vector<FunctionInfo> &funcs,
                                            const Section *sec,
@@ -1119,6 +1130,7 @@ EMSCRIPTEN_BINDINGS(dis) {
     emscripten::function("listStringsJson", &listStringsJson);
     emscripten::function("findStringXrefsByAddressJson", &findStringXrefsByAddressJson);
     emscripten::function("renameFunction", &renameFunction);
+    emscripten::function("applyProjectTypes", &applyProjectTypesText);
     emscripten::function("decompileFunction", &decompileFunction);
     emscripten::function("disassembleFunction", &disassembleFunction);
     emscripten::function("inferStructCandidatesJson", &inferStructCandidatesJson);
