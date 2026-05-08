@@ -870,6 +870,33 @@ static std::vector<GlobalDataSymbol> collectGlobalDataSymbols(const MachOFile &m
     return out;
 }
 
+unsigned int globalAddressByName(const std::string &name) {
+    if (!g_loaded || name.empty()) return 0;
+
+    for (const auto &g : g_mf.typeTable().globals()) {
+        if (!g.address || g.name.empty()) continue;
+        if (g.name == name)
+            return g.address;
+    }
+
+    const auto globals = collectGlobalDataSymbols(g_mf);
+    for (const auto &g : globals) {
+        if (!g.addr || g.name.empty()) continue;
+        char fallback[32];
+        snprintf(fallback, sizeof(fallback), "data_%08X", g.addr);
+        std::string clean = sanitizeIdentifier(g.name, fallback);
+        if (g.name == name || clean == name || "global_" + clean == name)
+            return g.addr;
+    }
+
+    unsigned int addr = 0;
+    if (sscanf(name.c_str(), "g_%x", &addr) == 1 && addr)
+        return addr;
+    if (sscanf(name.c_str(), "data_%x", &addr) == 1 && addr)
+        return addr;
+    return 0;
+}
+
 static const GlobalDataSymbol *globalSymbolForAddress(
     const std::vector<GlobalDataSymbol> &globals, uint32_t addr) {
     auto it = std::upper_bound(globals.begin(), globals.end(), addr,
@@ -1131,6 +1158,7 @@ EMSCRIPTEN_BINDINGS(dis) {
     emscripten::function("findStringXrefsByAddressJson", &findStringXrefsByAddressJson);
     emscripten::function("renameFunction", &renameFunction);
     emscripten::function("applyProjectTypes", &applyProjectTypesText);
+    emscripten::function("globalAddressByName", &globalAddressByName);
     emscripten::function("decompileFunction", &decompileFunction);
     emscripten::function("disassembleFunction", &disassembleFunction);
     emscripten::function("inferStructCandidatesJson", &inferStructCandidatesJson);

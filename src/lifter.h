@@ -2540,10 +2540,97 @@ private:
         if (off < 0) return "";
         const Section *sec = m_mf.sectionForAddress(addr);
         if (!sec || !m_mf.isCStringSection(*sec)) return "";
-        const uint8_t *p = m_mf.bytesAt(off, std::min((uint32_t)80, (uint32_t)(m_mf.size() - off)));
+        uint32_t maxBytes = std::min((uint32_t)80, (uint32_t)(m_mf.size() - off));
+        const uint8_t *p = m_mf.bytesAt(off, maxBytes);
         if (!p) return "";
+        int limit = (int)std::min<uint32_t>(72, maxBytes);
         std::string s;
-        for (int i = 0; i < 72 && p[i]; ++i) {
+        auto appendUtf8 = [&](uint32_t cp) {
+            if (cp <= 0x7F) {
+                s += (char)cp;
+            } else if (cp <= 0x7FF) {
+                s += (char)(0xC0 | (cp >> 6));
+                s += (char)(0x80 | (cp & 0x3F));
+            } else if (cp <= 0xFFFF) {
+                s += (char)(0xE0 | (cp >> 12));
+                s += (char)(0x80 | ((cp >> 6) & 0x3F));
+                s += (char)(0x80 | (cp & 0x3F));
+            } else {
+                s += (char)(0xF0 | (cp >> 18));
+                s += (char)(0x80 | ((cp >> 12) & 0x3F));
+                s += (char)(0x80 | ((cp >> 6) & 0x3F));
+                s += (char)(0x80 | (cp & 0x3F));
+            }
+        };
+        auto decodeUtf8At = [&](int i, uint32_t &cp, int &len) -> bool {
+            uint8_t b0 = p[i];
+            auto cont = [&](int j) {
+                return j < limit && p[j] && (p[j] & 0xC0) == 0x80;
+            };
+            if (b0 >= 0xC2 && b0 <= 0xDF && cont(i + 1)) {
+                cp = ((uint32_t)(b0 & 0x1F) << 6) | (p[i + 1] & 0x3F);
+                len = 2;
+                return true;
+            }
+            if (b0 >= 0xE0 && b0 <= 0xEF && cont(i + 1) && cont(i + 2)) {
+                uint8_t b1 = p[i + 1];
+                if ((b0 == 0xE0 && b1 < 0xA0) || (b0 == 0xED && b1 >= 0xA0))
+                    return false;
+                cp = ((uint32_t)(b0 & 0x0F) << 12) |
+                     ((uint32_t)(p[i + 1] & 0x3F) << 6) |
+                     (p[i + 2] & 0x3F);
+                len = 3;
+                return true;
+            }
+            if (b0 >= 0xF0 && b0 <= 0xF4 && cont(i + 1) && cont(i + 2) && cont(i + 3)) {
+                uint8_t b1 = p[i + 1];
+                if ((b0 == 0xF0 && b1 < 0x90) || (b0 == 0xF4 && b1 >= 0x90))
+                    return false;
+                cp = ((uint32_t)(b0 & 0x07) << 18) |
+                     ((uint32_t)(p[i + 1] & 0x3F) << 12) |
+                     ((uint32_t)(p[i + 2] & 0x3F) << 6) |
+                     (p[i + 3] & 0x3F);
+                len = 4;
+                return cp <= 0x10FFFF;
+            }
+            return false;
+        };
+        auto printableExtendedCodepoint = [](uint8_t b) -> uint32_t {
+            switch (b) {
+            case 0x80: return 0x20AC;
+            case 0x82: return 0x201A;
+            case 0x83: return 0x0192;
+            case 0x84: return 0x201E;
+            case 0x85: return 0x2026;
+            case 0x86: return 0x2020;
+            case 0x87: return 0x2021;
+            case 0x88: return 0x02C6;
+            case 0x89: return 0x2030;
+            case 0x8A: return 0x0160;
+            case 0x8B: return 0x2039;
+            case 0x8C: return 0x0152;
+            case 0x8E: return 0x017D;
+            case 0x91: return 0x2018;
+            case 0x92: return 0x2019;
+            case 0x93: return 0x201C;
+            case 0x94: return 0x201D;
+            case 0x95: return 0x2022;
+            case 0x96: return 0x2013;
+            case 0x97: return 0x2014;
+            case 0x98: return 0x02DC;
+            case 0x99: return 0x2122;
+            case 0x9A: return 0x0161;
+            case 0x9B: return 0x203A;
+            case 0x9C: return 0x0153;
+            case 0x9E: return 0x017E;
+            case 0x9F: return 0x0178;
+            default:
+                if ((b >= 0xA1 && b <= 0xAC) || (b >= 0xAE && b <= 0xFF))
+                    return b;
+                return 0;
+            }
+        };
+        for (int i = 0; i < limit && p[i]; ++i) {
             if (p[i] >= 0x20 && p[i] < 0x7F) {
                 if (p[i] == '"') s += "\\\"";
                 else if (p[i] == '\\') s += "\\\\";
@@ -2551,7 +2638,17 @@ private:
             } else if (p[i] == '\n') { s += "\\n"; }
               else if (p[i] == '\t') { s += "\\t"; }
               else if (p[i] == '\r') { s += "\\r"; }
-              else { char b[8]; snprintf(b, 8, "\\x%02X", p[i]); s += b; }
+              else {
+                uint32_t cp = 0;
+                int len = 0;
+                if (decodeUtf8At(i, cp, len)) {
+                    appendUtf8(cp);
+                    i += len - 1;
+                } else if ((cp = printableExtendedCodepoint(p[i]))) {
+                    appendUtf8(cp);
+                }
+                else { char b[8]; snprintf(b, 8, "\\x%02X", p[i]); s += b; }
+              }
         }
         // Empty string (just NUL byte) is still a valid string literal
         if (s.empty() && p && p[0] == 0) return "\"\"";
