@@ -258,6 +258,23 @@ body.light #icon-moon { display: none; }
 .sb-section.closed .chev { transform: rotate(-90deg); }
 .sb-section.closed .sb-body { display: none; }
 .sb-body { display: flex; flex-direction: column; overflow: hidden; flex: 1; }
+.side-nav {
+  display: grid; grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 4px; padding: 6px 7px; border-bottom: 1px solid var(--border-bin);
+  flex-shrink: 0;
+}
+.side-tab {
+  min-width: 0; display: flex; align-items: center; justify-content: center; gap: 3px;
+  background: var(--bg-input); border: 1px solid var(--border-input);
+  color: var(--text-dim); border-radius: 3px; padding: 4px 3px;
+  font: 10px/1.2 inherit; cursor: pointer;
+}
+.side-tab:hover { color: var(--text); border-color: var(--accent); }
+.side-tab.on { background: var(--bg-active); color: var(--text-active); border-color: var(--accent); }
+.side-tab-count { opacity: .7; font-size: 9px; }
+#sidebar.list-tabbed .sb-section.grow { display: none; }
+#sidebar.list-tabbed .sb-section.grow.active-side { display: flex; }
+#sidebar.list-tabbed .sb-section.grow .sb-head { display: none; }
 
 /* Binary info */
 #bin-info {
@@ -276,7 +293,7 @@ body.light #icon-moon { display: none; }
   padding: 7px 8px 9px; border-bottom: 1px solid var(--border-bin);
   display: flex; flex-direction: column; gap: 7px;
 }
-.db-actions { display: grid; grid-template-columns: repeat(5, 1fr); gap: 5px; }
+.db-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 5px; }
 .db-btn {
   background: var(--bg-input); border: 1px solid var(--border-input);
   color: var(--text); border-radius: 3px; padding: 4px 6px;
@@ -332,7 +349,7 @@ body.light #icon-moon { display: none; }
   display: flex; align-items: center; justify-content: center;
   width: 18px; height: 18px; border: 0; border-radius: 3px;
   background: transparent; color: var(--text-dim); cursor: pointer;
-  opacity: 0; flex-shrink: 0;
+  opacity: .45; flex-shrink: 0;
 }
 .item:hover .item-action, .item.active .item-action { opacity: .85; }
 .item-action:hover { background: var(--tab-x-hover); color: var(--text); opacity: 1; }
@@ -398,9 +415,15 @@ body:not(.light) .item.active .cnt { background: rgba(255,255,255,.12); color: #
   background: var(--bg);
 }
 #decomp-pane { flex: 1 1 58%; position: relative; }
+#pane-resize-gutter {
+  flex: 0 0 5px; cursor: col-resize; background: transparent;
+  transition: background .15s; display: none; position: relative; z-index: 3;
+}
+#pane-resize-gutter:hover, #pane-resize-gutter.drag { background: var(--accent); }
 #asm-pane {
   flex: 0 0 42%; border-left: 1px solid var(--border-code); display: none;
 }
+#code-pane.has-asm #pane-resize-gutter { display: block; }
 #code-pane.has-asm #asm-pane { display: flex; }
 .pane-title {
   height: 28px; flex-shrink: 0; padding: 7px 12px 0 14px;
@@ -447,6 +470,7 @@ body.light #copy-btn.ok { color: #1a7a3a !important; }
 
 @media (max-width: 900px) {
   #code-pane.has-asm { flex-direction: column; }
+  #pane-resize-gutter { display: none !important; }
   #asm-pane {
     flex: 0 0 40%; border-left: 0; border-top: 1px solid var(--border-code);
   }
@@ -460,6 +484,13 @@ body.light #copy-btn.ok { color: #1a7a3a !important; }
 .n { color: var(--c-num);  }
 .c { color: var(--c-cmt);  font-style: italic; }
 .p { color: var(--c-pp);   }
+.asm-addr { color: var(--linenum-color); }
+.asm-bytes { color: var(--text-dim); }
+.asm-mn { color: var(--c-kw); font-weight: 600; }
+.asm-op { color: var(--text); }
+.asm-reg { color: var(--c-type); }
+.asm-num { color: var(--c-num); }
+.asm-sym { color: var(--c-fn); }
 
 /* ── Status bar ───────────────────────────────────────────────────── */
 #statusbar {
@@ -557,6 +588,9 @@ body:not(.light) .toast.ok  { color: #4ec9b0; }
     <label class="option-label" title="Prefer readable output with struct field access">
       <input type="checkbox" class="option-cb" id="cosmetic-cb" data-decomp-option> Cosmetic
     </label>
+    <label class="option-label" title="Prepend Project DB types above decompiler output">
+      <input type="checkbox" class="option-cb" id="types-prelude-cb" onchange="refreshActiveView()"> Types
+    </label>
   </div>
   <button id="open-btn" onclick="document.getElementById('file-input').click()">
     <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
@@ -573,7 +607,7 @@ body:not(.light) .toast.ok  { color: #4ec9b0; }
 <div id="body">
 
   <!-- Sidebar -->
-  <aside id="sidebar">
+  <aside id="sidebar" class="list-tabbed">
     <!-- Binary info -->
     <div class="sb-section" id="sec-bin">
       <div class="sb-head" onclick="toggleSec('sec-bin')">
@@ -600,16 +634,25 @@ body:not(.light) .toast.ok  { color: #4ec9b0; }
       <div class="sb-body">
         <div class="db-panel">
           <div class="db-actions">
-            <button class="db-btn" id="db-save-btn" onclick="saveProjectDb()">Save</button>
-            <button class="db-btn" id="db-new-type-btn" onclick="newStructType()">Type</button>
-            <button class="db-btn" id="db-infer-btn" onclick="inferStructs()">Infer</button>
-            <button class="db-btn" id="db-export-btn" onclick="exportProjectDb()">Export</button>
-            <button class="db-btn" id="db-load-btn" onclick="document.getElementById('db-file-input').click()">Load</button>
+            <button class="db-btn" id="db-save-btn" onclick="saveProjectDb()" title="Save names, notes, and custom types in browser storage">Save DB</button>
+            <button class="db-btn" id="db-new-type-btn" onclick="newStructType()" title="Create a struct template in Project DB types">New Struct</button>
+            <button class="db-btn" id="db-infer-btn" onclick="inferStructs()" title="Infer candidate structs from memory access patterns">Infer Structs</button>
+            <button class="db-btn" id="db-export-btn" onclick="exportProjectDb()" title="Download this Project DB as JSON">Export DB</button>
+            <button class="db-btn" id="db-load-btn" onclick="document.getElementById('db-file-input').click()" title="Load a Project DB JSON file">Load DB</button>
+            <button class="db-btn" id="db-open-types-btn" onclick="openTypesTab()" title="Open Project DB types in the main editor">Open Types</button>
           </div>
-          <textarea id="custom-types" spellcheck="false" placeholder="typedefs / structs" oninput="onCustomTypesChanged()"></textarea>
+          <textarea id="custom-types" spellcheck="false" placeholder="Project DB types / structs" title="Manual and inferred structs saved with this binary" oninput="onCustomTypesChanged()"></textarea>
           <div id="db-status">No binary loaded</div>
         </div>
       </div>
+    </div>
+
+    <div class="side-nav" id="side-nav">
+      <button class="side-tab on" data-side="sec-fn" onclick="setSideTab('sec-fn')" title="Functions">Funcs <span class="side-tab-count" id="nav-fn-count">0</span></button>
+      <button class="side-tab" data-side="sec-src" onclick="setSideTab('sec-src')" title="Source files">Files <span class="side-tab-count" id="nav-src-count">0</span></button>
+      <button class="side-tab" data-side="sec-str" onclick="setSideTab('sec-str')" title="Strings">Strs <span class="side-tab-count" id="nav-str-count">0</span></button>
+      <button class="side-tab" data-side="sec-xref" onclick="setSideTab('sec-xref')" title="String xrefs">Xrefs <span class="side-tab-count" id="nav-xref-count">0</span></button>
+      <button class="side-tab" data-side="sec-types" onclick="setSideTab('sec-types')" title="Manual and inferred types">Types <span class="side-tab-count" id="nav-type-count">0</span></button>
     </div>
 
     <!-- Manual and inferred types -->
@@ -659,7 +702,7 @@ body:not(.light) .toast.ok  { color: #4ec9b0; }
     </div>
 
     <!-- Functions -->
-    <div class="sb-section grow" id="sec-fn">
+    <div class="sb-section grow active-side" id="sec-fn">
       <div class="sb-head" onclick="toggleSec('sec-fn')">
         Functions
         <span class="badge" id="fn-badge" style="display:none">0</span>
@@ -766,6 +809,7 @@ body:not(.light) .toast.ok  { color: #4ec9b0; }
           </svg>
         </button>
       </div>
+      <div id="pane-resize-gutter"></div>
       <div id="asm-pane" class="code-panel">
         <div class="pane-title">Disassembly</div>
         <div id="asm-scroll" class="pane-scroll">
@@ -819,6 +863,8 @@ let tabs     = [];
 let activeId = null;
 let curCode  = '';
 let curAsm   = '';
+let curCodeLineCount = 0;
+let curAsmLineCount = 0;
 let allFns   = [];
 let allSrcs  = [];
 let allStrings = [];
@@ -877,9 +923,10 @@ function applyDecompilerOptions() {
 }
 
 function decompileTab(tab) {
-  return tab.kind === 'fn'
-    ? mod.decompileFunction(tab.addr)
-    : mod.decompileSourceFile(tab.srcIdx);
+  if (tab.kind === 'fn') return mod.decompileFunction(tab.addr);
+  if (tab.kind === 'src') return mod.decompileSourceFile(tab.srcIdx);
+  if (tab.kind === 'types') return currentTypesText();
+  return '';
 }
 
 function disassembleTab(tab) {
@@ -889,7 +936,15 @@ function disassembleTab(tab) {
 }
 
 function refreshTab(tab, statusPrefix) {
-  if (!mod || !tab) return;
+  if (!tab) return;
+  if (tab.kind === 'types') {
+    tab.code = currentTypesText();
+    tab.asm = '';
+    tab.version = decompVersion;
+    if (activeId === tab.id) showTab(tab);
+    return;
+  }
+  if (!mod) return;
   spin(true);
   sbMsg((statusPrefix || 'Decompiling') + ' ' + tab.label + '…');
   setTimeout(() => {
@@ -1189,7 +1244,7 @@ function inferStructs() {
     clearTimeout(projectDbSaveTimer);
     saveProjectDb({ quiet: true });
     renderProjectDb();
-    refreshActiveView();
+    openTypesTab();
     toast(additions.length + ' struct candidates added', 'ok');
     sbMsg(additions.length + ' struct candidates added to Project DB');
   }, 10);
@@ -1222,6 +1277,7 @@ function newStructType() {
   clearTimeout(projectDbSaveTimer);
   saveProjectDb({ quiet: true });
   renderProjectDb();
+  refreshTypesTab();
   refreshActiveView();
   focusCustomType(start);
   toast('Struct added: ' + name, 'ok');
@@ -1242,6 +1298,7 @@ function renderProjectDb() {
     !loaded || !mod || typeof mod.inferStructCandidatesJson !== 'function';
   document.getElementById('db-export-btn').disabled = !loaded;
   document.getElementById('db-load-btn').disabled = !loaded;
+  document.getElementById('db-open-types-btn').disabled = !loaded;
   const ta = document.getElementById('custom-types');
   ta.disabled = !loaded;
   if (document.activeElement !== ta)
@@ -1252,6 +1309,7 @@ function renderProjectDb() {
     : 'No binary loaded';
   document.getElementById('type-badge').textContent = allTypes.length;
   document.getElementById('type-badge').style.display = loaded ? '' : 'none';
+  setNavCount('type', loaded ? allTypes.length : 0);
   filterTypes();
 }
 
@@ -1260,11 +1318,25 @@ function onCustomTypesChanged() {
   if (!projectDb) projectDb = emptyProjectDb(currentBinaryHash, currentBinaryName);
   projectDb.customTypes = document.getElementById('custom-types').value;
   scheduleProjectDbSave();
+  refreshTypesTab();
   refreshActiveView();
+}
+
+function includeTypePrelude() {
+  const cb = document.getElementById('types-prelude-cb');
+  return !!(cb && cb.checked);
 }
 
 function customTypePrelude() {
   return projectDb && projectDb.customTypes ? projectDb.customTypes.trim() : '';
+}
+
+function currentTypesText() {
+  const ta = document.getElementById('custom-types');
+  const text = projectDb
+    ? (document.activeElement === ta ? ta.value : projectDb.customTypes || '')
+    : '';
+  return text && text.trim() ? text : '/* no Project DB types */\n';
 }
 
 function parseCustomTypeEntries(text) {
@@ -1309,6 +1381,7 @@ function parseCustomTypeEntries(text) {
 }
 
 function codeWithCustomTypes(code) {
+  if (!includeTypePrelude()) return code || '';
   const prelude = customTypePrelude();
   if (!prelude || String(code || '').startsWith('error:')) return code || '';
   return prelude + '\n\n' + (code || '');
@@ -1322,6 +1395,8 @@ function formatFunctionNote(note) {
 
 function codeForTab(tab) {
   let code = tab.code || '';
+  if (tab.kind === 'types')
+    return currentTypesText();
   if (tab.kind === 'fn') {
     const note = formatFunctionNote(functionNote(tab.addr));
     if (note && !String(code || '').startsWith('error:'))
@@ -1344,9 +1419,11 @@ function resetEditorTabs() {
   document.getElementById('welcome').classList.remove('gone');
   document.getElementById('code-view').innerHTML = '';
   document.getElementById('line-nums').textContent = '';
-  document.getElementById('asm-view').textContent = '';
+  document.getElementById('asm-view').innerHTML = '';
   curCode = '';
   curAsm = '';
+  curCodeLineCount = 0;
+  curAsmLineCount = 0;
   updateLines(0);
 }
 
@@ -1363,6 +1440,39 @@ function reloadProjectViews() {
   const active = tabs.find(t => t.id === activeId);
   if (active) refreshTab(active, 'Refreshing');
   else renderProjectDb();
+}
+
+function openTypesTab() {
+  if (!currentBinaryHash) { toast('Load a binary first', 'err'); return; }
+  if (!projectDb) projectDb = emptyProjectDb(currentBinaryHash, currentBinaryName);
+  const ta = document.getElementById('custom-types');
+  if (ta) projectDb.customTypes = ta.value;
+  setSideTab('sec-types');
+  const ex = tabs.find(t => t.kind === 'types');
+  if (ex) {
+    ex.code = currentTypesText();
+    ex.asm = '';
+    ex.version = decompVersion;
+    activateTab(ex.id);
+    return;
+  }
+  addTab({
+    id: 'project_types',
+    label: 'Project Types',
+    kind: 'types',
+    version: decompVersion,
+    code: currentTypesText(),
+    asm: ''
+  });
+}
+
+function refreshTypesTab() {
+  const tab = tabs.find(t => t.kind === 'types');
+  if (!tab) return;
+  tab.code = currentTypesText();
+  tab.asm = '';
+  tab.version = decompVersion;
+  if (activeId === tab.id) showTab(tab);
 }
 
 function renameFn(addr, e) {
@@ -1469,6 +1579,10 @@ function populateSidebar(filename, sizeBytes) {
   document.getElementById('str-badge').style.display = '';
   document.getElementById('xref-badge').textContent = '0';
   document.getElementById('xref-badge').style.display = '';
+  setNavCount('fn', allFns.length);
+  setNavCount('src', allSrcs.length);
+  setNavCount('str', allStrings.length);
+  setNavCount('xref', 0);
 
   document.getElementById('fn-filter').value = '';
   document.getElementById('src-filter').value = '';
@@ -1481,6 +1595,7 @@ function populateSidebar(filename, sizeBytes) {
   renderStringList(allStrings);
   renderXrefList([]);
   filterTypes();
+  setSideTab('sec-fn');
 }
 
 function row(lbl, val) {
@@ -1593,6 +1708,12 @@ function renderTypeList(types) {
       </svg>
       <span class="lbl">${esc(t.name)}</span>
       <span class="cnt">${esc(t.kind)}</span>
+      <button class="item-action" onclick="renameType(${t.index},event)" title="Rename type">
+        <svg width="11" height="11" viewBox="0 0 11 11" fill="none">
+          <path d="M2 8.5 2.5 6.4 7.2 1.7a1 1 0 0 1 1.4 0l.7.7a1 1 0 0 1 0 1.4L4.6 8.5 2 8.5z" stroke="currentColor" stroke-width="1" fill="none" stroke-linejoin="round"/>
+          <path d="M6.5 2.4 8.6 4.5" stroke="currentColor" stroke-width="1" stroke-linecap="round"/>
+        </svg>
+      </button>
      </div>`
   ).join('');
 }
@@ -1600,6 +1721,7 @@ function renderTypeList(types) {
 function focusCustomType(index) {
   const ta = document.getElementById('custom-types');
   if (!ta) return;
+  setSideTab('sec-types');
   document.getElementById('sec-project').classList.remove('closed');
   const pos = Math.max(0, Math.min(Number(index) || 0, ta.value.length));
   ta.focus();
@@ -1608,6 +1730,76 @@ function focusCustomType(index) {
   const line = before.split('\n').length - 1;
   ta.scrollTop = Math.max(0, (line - 2) * 16);
   markActive('type-list', 'data-index', pos);
+}
+
+function escapeRegExp(s) {
+  return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function replaceTypeName(src, entry, nextName) {
+  const start = Math.max(0, Math.min(Number(entry.index) || 0, src.length));
+  const before = src.slice(0, start);
+  const tail = src.slice(start);
+  const oldName = escapeRegExp(entry.name);
+
+  if (entry.kind === 'typedef') {
+    const semi = tail.indexOf(';');
+    if (semi < 0) return null;
+    const segment = tail.slice(0, semi + 1);
+    const re = new RegExp('\\b' + oldName + '\\b(?=\\s*(?:\\[[^\\]]*\\]\\s*)*;)');
+    const m = re.exec(segment);
+    if (!m) return null;
+    return {
+      text: before + segment.slice(0, m.index) + nextName +
+        segment.slice(m.index + entry.name.length) + tail.slice(semi + 1),
+      index: start + m.index
+    };
+  }
+
+  const re = new RegExp('\\b' + entry.kind + '\\s+' + oldName + '\\b');
+  const m = re.exec(tail);
+  if (!m) return null;
+  const nameStart = m.index + m[0].lastIndexOf(entry.name);
+  return {
+    text: before + tail.slice(0, nameStart) + nextName +
+      tail.slice(nameStart + entry.name.length),
+    index: start + nameStart
+  };
+}
+
+function renameType(index, e) {
+  e && e.stopPropagation();
+  if (!currentBinaryHash) { toast('Load a binary first', 'err'); return; }
+  const entry = allTypes.find(t => t.index === index);
+  if (!entry) { toast('Type entry not found', 'err'); return; }
+  const next = prompt('Type name', entry.name);
+  if (next === null) return;
+  const name = next.trim();
+  if (!isValidCIdentifier(name)) {
+    toast('Type name must be a C identifier', 'err');
+    return;
+  }
+  if (name === entry.name) return;
+
+  const ta = document.getElementById('custom-types');
+  if (!projectDb) projectDb = emptyProjectDb(currentBinaryHash, currentBinaryName);
+  projectDb.customTypes = ta ? ta.value : projectDb.customTypes || '';
+  const replaced = replaceTypeName(projectDb.customTypes, entry, name);
+  if (!replaced) {
+    focusCustomType(index);
+    toast('Could not rename this type automatically', 'err');
+    return;
+  }
+
+  projectDb.customTypes = replaced.text;
+  if (ta) ta.value = replaced.text;
+  clearTimeout(projectDbSaveTimer);
+  saveProjectDb({ quiet: true });
+  renderProjectDb();
+  refreshTypesTab();
+  refreshActiveView();
+  focusCustomType(replaced.index);
+  toast('Type renamed: ' + name, 'ok');
 }
 
 function filterFns() {
@@ -1643,10 +1835,12 @@ function ensureFunctionEntry(addr, name) {
   allFns.push({ addr, name: name || shortHex(addr), size: 0, sourcePath: '', hasDebugInfo: false });
   allFns.sort((a, b) => a.addr - b.addr);
   document.getElementById('fn-badge').textContent = allFns.length;
+  setNavCount('fn', allFns.length);
   filterFns();
 }
 
 function openFn(addr, el) {
+  setSideTab('sec-fn');
   markActive('fn-list', 'data-addr', addr);
   const ex = tabs.find(t => t.kind==='fn' && t.addr===addr);
   if (ex) { activateTab(ex.id); return; }
@@ -1664,6 +1858,7 @@ function openFn(addr, el) {
 }
 
 function openString(addr, el) {
+  setSideTab('sec-str');
   activeStringAddr = addr;
   activeXrefAddr = null;
   markActive('str-list', 'data-addr', addr);
@@ -1673,6 +1868,7 @@ function openString(addr, el) {
     const data = parseJson(mod.findStringXrefsByAddressJson(addr), { matches: [] });
     curXrefs = data.matches || [];
     document.getElementById('xref-badge').textContent = curXrefs.length;
+    setNavCount('xref', curXrefs.length);
     renderXrefList(curXrefs);
     filterXrefs();
     spin(false);
@@ -1681,6 +1877,7 @@ function openString(addr, el) {
 }
 
 function openXref(fnAddr, xrefAddr, el) {
+  setSideTab('sec-xref');
   activeXrefAddr = xrefAddr;
   const info = curXrefs.find(x => x.function_address === fnAddr && x.xref_address === xrefAddr);
   if (info) ensureFunctionEntry(fnAddr, info.function_name);
@@ -1689,6 +1886,7 @@ function openXref(fnAddr, xrefAddr, el) {
 }
 
 function openSrc(idx, el) {
+  setSideTab('sec-src');
   markActive('src-list', 'data-idx', idx);
   const ex = tabs.find(t => t.kind==='src' && t.srcIdx===idx);
   if (ex) { activateTab(ex.id); return; }
@@ -1714,8 +1912,9 @@ function activateTab(id) {
   const tab = tabs.find(t => t.id===id);
   if (!tab) return;
   renderTabBar();
-  if (tab.kind==='fn')  markActive('fn-list',  'data-addr', tab.addr);
-  if (tab.kind==='src') markActive('src-list', 'data-idx',  tab.srcIdx);
+  if (tab.kind==='fn')  { setSideTab('sec-fn'); markActive('fn-list',  'data-addr', tab.addr); }
+  if (tab.kind==='src') { setSideTab('sec-src'); markActive('src-list', 'data-idx',  tab.srcIdx); }
+  if (tab.kind==='types') setSideTab('sec-types');
   if (tab.version !== decompVersion) {
     refreshTab(tab, 'Refreshing');
     return;
@@ -1735,8 +1934,9 @@ function closeTab(id, e) {
   document.getElementById('welcome').classList.remove('gone');
   document.getElementById('code-view').innerHTML = '';
   document.getElementById('line-nums').textContent = '';
-  document.getElementById('asm-view').textContent = '';
+  document.getElementById('asm-view').innerHTML = '';
   curCode=''; curAsm=''; updateLines(0);
+  curCodeLineCount = 0; curAsmLineCount = 0;
 }
 function renderTabBar() {
   document.getElementById('tab-bar').innerHTML = tabs.map(t =>
@@ -1764,9 +1964,11 @@ function showCode(code, asm) {
   pane.classList.add('show');
   pane.classList.toggle('has-asm', !!curAsm);
   const lines = code.split('\n');
+  curCodeLineCount = lines.length;
+  curAsmLineCount = curAsm ? curAsm.split('\n').length : 0;
   document.getElementById('line-nums').textContent = lines.map((_,i)=>i+1).join('\n');
   document.getElementById('code-view').innerHTML = hlC(code);
-  document.getElementById('asm-view').textContent = curAsm;
+  document.getElementById('asm-view').innerHTML = hlAsm(curAsm);
   updateLines(lines.length);
   const decompScroll = document.getElementById('decomp-scroll');
   if (decompScroll) { decompScroll.scrollTop = 0; decompScroll.scrollLeft = 0; }
@@ -1788,28 +1990,96 @@ function copyCode() {
   });
 }
 
-// ── Sidebar resize ────────────────────────────────────────────────────
+// ── Resize and view sync ─────────────────────────────────────────────
 const gutter = document.getElementById('resize-gutter');
-let dragging=false, dragX0=0, dragW0=0;
+let sidebarDragging=false, dragX0=0, dragW0=0;
 gutter.addEventListener('mousedown', e => {
-  dragging=true; dragX0=e.clientX;
+  sidebarDragging=true; dragX0=e.clientX;
   dragW0=document.getElementById('sidebar').offsetWidth;
   gutter.classList.add('drag');
   document.body.style.cssText+='cursor:col-resize;user-select:none;';
 });
 document.addEventListener('mousemove', e => {
-  if (!dragging) return;
+  if (!sidebarDragging) return;
   const w=Math.max(150,Math.min(520,dragW0+e.clientX-dragX0));
   document.getElementById('sidebar').style.width=w+'px';
 });
 document.addEventListener('mouseup', ()=>{
-  if (!dragging) return;
-  dragging=false; gutter.classList.remove('drag');
+  if (!sidebarDragging) return;
+  sidebarDragging=false; gutter.classList.remove('drag');
   document.body.style.cursor=''; document.body.style.userSelect='';
+});
+
+const paneGutter = document.getElementById('pane-resize-gutter');
+let paneDragging = false;
+if (paneGutter) {
+  paneGutter.addEventListener('mousedown', e => {
+    paneDragging = true;
+    paneGutter.classList.add('drag');
+    document.body.style.cssText += 'cursor:col-resize;user-select:none;';
+    e.preventDefault();
+  });
+}
+document.addEventListener('mousemove', e => {
+  if (!paneDragging) return;
+  const pane = document.getElementById('code-pane');
+  const rect = pane.getBoundingClientRect();
+  if (!rect.width) return;
+  const pct = Math.max(25, Math.min(75, ((e.clientX - rect.left) / rect.width) * 100));
+  document.getElementById('decomp-pane').style.flex = '0 0 ' + pct.toFixed(1) + '%';
+  document.getElementById('asm-pane').style.flex = '1 1 ' + (100 - pct).toFixed(1) + '%';
+});
+document.addEventListener('mouseup', () => {
+  if (!paneDragging) return;
+  paneDragging = false;
+  if (paneGutter) paneGutter.classList.remove('drag');
+  document.body.style.cursor = '';
+  document.body.style.userSelect = '';
+});
+
+function lineFromClick(textEl, ev) {
+  if (!textEl) return 0;
+  const rect = textEl.getBoundingClientRect();
+  const cs = getComputedStyle(textEl);
+  let lineHeight = parseFloat(cs.lineHeight);
+  if (!lineHeight || Number.isNaN(lineHeight))
+    lineHeight = (parseFloat(cs.fontSize) || 13) * 1.6;
+  return Math.max(0, Math.floor((ev.clientY - rect.top) / lineHeight));
+}
+
+function syncScrollByLine(fromLine, fromTotal, targetScrollId, targetTotal) {
+  const target = document.getElementById(targetScrollId);
+  if (!target || fromTotal <= 0 || targetTotal <= 0) return;
+  const max = Math.max(0, target.scrollHeight - target.clientHeight);
+  const ratio = fromTotal <= 1 ? 0 : Math.max(0, Math.min(1, fromLine / (fromTotal - 1)));
+  target.scrollTop = max * ratio;
+}
+
+document.getElementById('decomp-scroll').addEventListener('click', e => {
+  if (!curAsm) return;
+  const line = lineFromClick(document.getElementById('code-view'), e);
+  syncScrollByLine(line, curCodeLineCount, 'asm-scroll', curAsmLineCount);
+});
+document.getElementById('asm-scroll').addEventListener('click', e => {
+  if (!curCode) return;
+  const line = lineFromClick(document.getElementById('asm-view'), e);
+  syncScrollByLine(line, curAsmLineCount, 'decomp-scroll', curCodeLineCount);
 });
 
 // ── Misc ──────────────────────────────────────────────────────────────
 function toggleSec(id) { document.getElementById(id).classList.toggle('closed'); }
+function setSideTab(id) {
+  document.querySelectorAll('#sidebar .sb-section.grow').forEach(sec => {
+    sec.classList.toggle('active-side', sec.id === id);
+  });
+  document.querySelectorAll('.side-tab').forEach(btn => {
+    btn.classList.toggle('on', btn.getAttribute('data-side') === id);
+  });
+}
+function setNavCount(kind, count) {
+  const el = document.getElementById('nav-' + kind + '-count');
+  if (el) el.textContent = String(count || 0);
+}
 function spin(on) { document.getElementById('spinner').classList.toggle('on',on); }
 function sbMsg(msg,err) {
   const el=document.getElementById('sb-msg');
@@ -1900,6 +2170,43 @@ function hlC(src) {
     o+=esc(c);i++;
   }
   return o;
+}
+
+function isAsmRegister(tok) {
+  return /^(?:r(?:1[0-5]|[0-9])(?:[bwd])?|r(?:ax|bx|cx|dx|si|di|bp|sp)|e(?:ax|bx|cx|dx|si|di|bp|sp)|[abcd][lh]|[abcd]x|[sd]i|[sb]p|[xyz]mm[0-9]+|[cz]mm[0-9]+|rip|eip|cs|ds|es|fs|gs|ss)$/i.test(tok);
+}
+
+function hlAsmToken(tok) {
+  if (isAsmRegister(tok)) return '<span class="asm-reg">' + esc(tok) + '</span>';
+  if (/^-?(?:0x[0-9a-f]+|\d+)$/i.test(tok)) return '<span class="asm-num">' + esc(tok) + '</span>';
+  if (/^(?:byte|word|dword|qword|xmmword|ymmword|zmmword|ptr|offset|short|near|far)$/i.test(tok))
+    return '<span class="asm-mn">' + esc(tok) + '</span>';
+  return '<span class="asm-sym">' + esc(tok) + '</span>';
+}
+
+function hlAsmOperands(text) {
+  const re = /\b(?:r(?:1[0-5]|[0-9])(?:[bwd])?|r(?:ax|bx|cx|dx|si|di|bp|sp)|e(?:ax|bx|cx|dx|si|di|bp|sp)|[abcd][lh]|[abcd]x|[sd]i|[sb]p|[xyz]mm[0-9]+|[cz]mm[0-9]+|rip|eip|cs|ds|es|fs|gs|ss|0x[0-9a-fA-F]+|-?\d+|[A-Za-z_.$][A-Za-z0-9_.$@]*)\b/g;
+  let out = '', last = 0, m;
+  const src = String(text || '');
+  while ((m = re.exec(src)) !== null) {
+    out += esc(src.slice(last, m.index));
+    out += hlAsmToken(m[0]);
+    last = m.index + m[0].length;
+  }
+  out += esc(src.slice(last));
+  return out;
+}
+
+function hlAsm(src) {
+  if (!src) return '';
+  return String(src).split('\n').map(line => {
+    const m = /^([0-9A-Fa-f]{8,16})\s+([0-9A-Fa-f ]{1,30})\s{2,}([A-Za-z][A-Za-z0-9_.]*)(.*)$/.exec(line);
+    if (!m) return esc(line);
+    return '<span class="asm-addr">' + esc(m[1]) + '</span>  ' +
+      '<span class="asm-bytes">' + esc(m[2]) + '</span>  ' +
+      '<span class="asm-mn">' + esc(m[3]) + '</span>' +
+      '<span class="asm-op">' + hlAsmOperands(m[4]) + '</span>';
+  }).join('\n');
 }
 </script>
 </body>
