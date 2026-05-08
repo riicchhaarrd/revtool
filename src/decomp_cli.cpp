@@ -673,6 +673,9 @@ struct StructCandidate {
     uint32_t functionAddr = 0;
     std::string functionName;
     std::string baseReg;
+    bool isGlobal = false;
+    uint32_t globalAddr = 0;
+    std::string globalName;
     std::map<int, StructFieldCandidate> fields;
     int refs = 0;
 };
@@ -704,12 +707,122 @@ static std::string sanitizeStructIdentifier(std::string s, const std::string &fa
     return s;
 }
 
+struct GlobalDataSymbol {
+    uint32_t addr = 0;
+    uint32_t end = 0;
+    std::string name;
+};
+
+static std::string dataSymbolDisplayName(const MachOFile &mf, const NList &sym) {
+    std::string name = mf.symbolNameAtAddress(sym.n_value);
+    if (name.empty()) {
+        name = sym.name;
+        if (!mf.isELF() && !name.empty() && name[0] == '_')
+            name = name.substr(1);
+    }
+    return name.empty() ? "data" : name;
+}
+
+static std::vector<GlobalDataSymbol> collectGlobalDataSymbols(const MachOFile &mf) {
+    std::map<uint32_t, GlobalDataSymbol> byAddr;
+    for (const auto &sym : mf.symbols()) {
+        if (sym.n_value == 0 || sym.name.empty()) continue;
+        if (sym.n_type & N_STAB) continue;
+        if ((sym.n_type & N_TYPE) != N_SECT) continue;
+        const Section *sec = mf.sectionForAddress(sym.n_value);
+        if (!sec || !mf.isDataSection(*sec)) continue;
+
+        auto &gs = byAddr[sym.n_value];
+        gs.addr = sym.n_value;
+        if (sym.n_size > 0 && sym.n_value + sym.n_size > sym.n_value)
+            gs.end = sym.n_value + sym.n_size;
+        gs.name = dataSymbolDisplayName(mf, sym);
+    }
+
+    std::vector<GlobalDataSymbol> out;
+    out.reserve(byAddr.size());
+    for (auto &[addr, gs] : byAddr)
+        out.push_back(std::move(gs));
+
+    for (size_t i = 0; i < out.size(); ++i) {
+        const Section *sec = mf.sectionForAddress(out[i].addr);
+        uint32_t secEnd = sec ? sec->addr + sectionSpan(mf, *sec) : out[i].addr;
+        uint32_t next = secEnd;
+        for (size_t j = i + 1; j < out.size(); ++j) {
+            const Section *nextSec = mf.sectionForAddress(out[j].addr);
+            if (nextSec == sec) {
+                next = out[j].addr;
+                break;
+            }
+        }
+        if (out[i].end == 0 || out[i].end > next)
+            out[i].end = next;
+        if (out[i].end <= out[i].addr)
+            out[i].end = secEnd;
+    }
+    return out;
+}
+
+static const GlobalDataSymbol *globalSymbolForAddress(
+    const std::vector<GlobalDataSymbol> &globals, uint32_t addr) {
+    auto it = std::upper_bound(globals.begin(), globals.end(), addr,
+        [](uint32_t value, const GlobalDataSymbol &sym) {
+            return value < sym.addr;
+        });
+    if (it == globals.begin()) return nullptr;
+    --it;
+    if (addr < it->addr || addr >= it->end) return nullptr;
+    return &*it;
+}
+
+static bool absoluteMemoryTarget(const cs_insn &insn, const cs_x86_op &op,
+                                 bool hasPIC, uint32_t picBase,
+                                 uint32_t &target) {
+    if (op.mem.base == X86_REG_RIP) {
+        target = (uint32_t)(insn.address + insn.size + op.mem.disp);
+        return true;
+    }
+    if (op.mem.base == X86_REG_INVALID && op.mem.disp != 0) {
+        target = (uint32_t)op.mem.disp;
+        return true;
+    }
+    if (hasPIC && op.mem.base == X86_REG_EBX) {
+        target = picBase + (uint32_t)(int32_t)op.mem.disp;
+        return true;
+    }
+    return false;
+}
+
+static void recordStructAccess(std::map<std::string, StructCandidate> &byBase,
+                               const FunctionInfo &fn,
+                               const std::string &key,
+                               const std::string &baseLabel,
+                               int offset, int size,
+                               bool isGlobal = false,
+                               uint32_t globalAddr = 0,
+                               const std::string &globalName = "") {
+    if (offset < 0 || offset > 0xFFFF) return;
+    auto &cand = byBase[key];
+    cand.functionAddr = fn.address;
+    cand.functionName = fn.name;
+    cand.baseReg = baseLabel;
+    cand.isGlobal = isGlobal;
+    cand.globalAddr = globalAddr;
+    cand.globalName = globalName;
+    auto &field = cand.fields[offset];
+    field.offset = offset;
+    field.size = std::max<int>(field.size, size > 0 ? size : 4);
+    field.refs++;
+    cand.refs++;
+}
+
 static QString structCandidateName(const StructCandidate &cand) {
     char fallback[64];
     snprintf(fallback, sizeof(fallback), "sub_%08X_%s",
              cand.functionAddr, cand.baseReg.c_str());
     std::string baseName = sanitizeStructIdentifier(cand.functionName, fallback);
-    return QString::fromStdString("inferred_" + baseName + "_" + cand.baseReg + "_t");
+    std::string baseReg = sanitizeStructIdentifier(cand.baseReg, "base");
+    return QString::fromStdString("inferred_" + baseName + "_" + baseReg + "_t");
 }
 
 static QString formatStructCandidateDecl(const StructCandidate &cand) {
@@ -756,6 +869,7 @@ static std::vector<StructCandidate> inferStructCandidates(const MachOFile &mf,
         return {};
     cs_option(cs, CS_OPT_DETAIL, CS_OPT_ON);
 
+    const std::vector<GlobalDataSymbol> globals = collectGlobalDataSymbols(mf);
     std::vector<StructCandidate> candidates;
     for (const auto &fn : funcs) {
         const Section *sec = mf.sectionForAddress(fn.address);
@@ -777,6 +891,8 @@ static std::vector<StructCandidate> inferStructCandidates(const MachOFile &mf,
             continue;
 
         std::map<std::string, StructCandidate> byBase;
+        uint32_t picBase = 0;
+        bool hasPIC = !mf.is64Bit() && detectPicBase(mf, insn, count, picBase);
         for (size_t i = 0; i < count; ++i) {
             auto *detail = insn[i].detail;
             if (!detail)
@@ -785,6 +901,23 @@ static std::vector<StructCandidate> inferStructCandidates(const MachOFile &mf,
                 const auto &op = detail->x86.operands[oi];
                 if (op.type != X86_OP_MEM)
                     continue;
+                uint32_t target = 0;
+                if (absoluteMemoryTarget(insn[i], op, hasPIC, picBase, target)) {
+                    const GlobalDataSymbol *global = globalSymbolForAddress(globals, target);
+                    if (global) {
+                        char globalFallback[32];
+                        snprintf(globalFallback, sizeof(globalFallback), "data_%08X", global->addr);
+                        std::string label = "global_" +
+                            sanitizeStructIdentifier(global->name, globalFallback);
+                        char key[64];
+                        snprintf(key, sizeof(key), "global:%08X", global->addr);
+                        recordStructAccess(byBase, fn, key, label,
+                                           (int)(target - global->addr),
+                                           op.size > 0 ? op.size : 4,
+                                           true, global->addr, global->name);
+                        continue;
+                    }
+                }
                 if (op.mem.base == X86_REG_INVALID ||
                     op.mem.base == X86_REG_ESP ||
                     op.mem.base == X86_REG_EBP ||
@@ -798,15 +931,8 @@ static std::vector<StructCandidate> inferStructCandidates(const MachOFile &mf,
                 const char *reg = cs_reg_name(cs, op.mem.base);
                 if (!reg || !*reg)
                     continue;
-                auto &cand = byBase[reg];
-                cand.functionAddr = fn.address;
-                cand.functionName = fn.name;
-                cand.baseReg = reg;
-                auto &field = cand.fields[(int)op.mem.disp];
-                field.offset = (int)op.mem.disp;
-                field.size = std::max<int>(field.size, op.size > 0 ? op.size : 4);
-                field.refs++;
-                cand.refs++;
+                recordStructAccess(byBase, fn, reg, reg, (int)op.mem.disp,
+                                   op.size > 0 ? op.size : 4);
             }
         }
         cs_free(insn, count);
@@ -836,6 +962,12 @@ static QJsonObject structCandidateToJson(const StructCandidate &cand) {
     obj["function_address_hex"] = hex32q(cand.functionAddr);
     obj["function_name"] = QString::fromStdString(cand.functionName);
     obj["base_register"] = QString::fromStdString(cand.baseReg);
+    obj["is_global"] = cand.isGlobal;
+    if (cand.isGlobal) {
+        obj["global_symbol"] = QString::fromStdString(cand.globalName);
+        obj["global_address"] = (int)cand.globalAddr;
+        obj["global_address_hex"] = hex32q(cand.globalAddr);
+    }
     obj["field_count"] = (int)cand.fields.size();
     obj["ref_count"] = cand.refs;
     obj["c_decl"] = formatStructCandidateDecl(cand);
