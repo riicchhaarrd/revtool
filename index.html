@@ -468,6 +468,23 @@ body:not(.light) .item.active .cnt { background: rgba(255,255,255,.12); color: #
 body.light #copy-btn.ok { color: #1a7a3a !important; }
 #code-pane.show #copy-btn { display: flex; }
 
+/* Context menu */
+#ctx-menu {
+  position: fixed; z-index: 80; display: none; min-width: 220px; padding: 4px;
+  background: var(--bg-panel); border: 1px solid var(--border);
+  box-shadow: 0 10px 28px rgba(0,0,0,.22); border-radius: 6px;
+}
+#ctx-menu.on { display: block; }
+.ctx-item {
+  width: 100%; min-height: 28px; padding: 6px 9px; border: 0; border-radius: 4px;
+  background: transparent; color: var(--text); text-align: left; cursor: pointer;
+  font: 12px/1.25 system-ui,-apple-system,Segoe UI,sans-serif;
+}
+.ctx-item:hover { background: var(--bg-hover); }
+.ctx-item:disabled { color: var(--text-dim); cursor: default; }
+.ctx-item:disabled:hover { background: transparent; }
+.ctx-sep { height: 1px; margin: 4px; background: var(--border); }
+
 @media (max-width: 900px) {
   #code-pane.has-asm { flex-direction: column; }
   #pane-resize-gutter { display: none !important; }
@@ -841,6 +858,7 @@ body:not(.light) .toast.ok  { color: #4ec9b0; }
 </div>
 
 <!-- Toasts -->
+<div id="ctx-menu"></div>
 <div id="toasts"></div>
 
 <script>
@@ -879,6 +897,7 @@ let currentBinarySize = 0;
 let projectDb = null;
 let projectDbSaveTimer = null;
 let decompVersion = 0;
+let lastStructCandidates = [];
 
 function parseJson(text, fallback) {
   try { return JSON.parse(text); } catch (_) { return fallback; }
@@ -1024,6 +1043,7 @@ function loadFile(file) {
     currentBinaryHash = hashBytes(bytes);
     currentBinaryName = file.name;
     currentBinarySize = bytes.length;
+    lastStructCandidates = [];
     projectDb = loadProjectDb(currentBinaryHash, currentBinaryName);
     applyProjectDbToBackend();
     resetEditorTabs();
@@ -1079,6 +1099,7 @@ function emptyProjectDb(hash, name) {
     binaryName: name || '',
     functionNames: {},
     functionNotes: {},
+    globalTypes: {},
     customTypes: ''
   };
 }
@@ -1094,6 +1115,9 @@ function normalizeProjectDb(raw, hash, name) {
     : {};
   db.functionNotes = raw.functionNotes && typeof raw.functionNotes === 'object'
     ? Object.assign({}, raw.functionNotes)
+    : {};
+  db.globalTypes = raw.globalTypes && typeof raw.globalTypes === 'object'
+    ? Object.assign({}, raw.globalTypes)
     : {};
   db.customTypes = typeof raw.customTypes === 'string' ? raw.customTypes : '';
   return db;
@@ -1141,13 +1165,42 @@ function isValidCIdentifier(name) {
 }
 
 function applyProjectDbToBackend() {
-  if (!mod || !projectDb || !projectDb.functionNames) return;
-  for (const [key, name] of Object.entries(projectDb.functionNames)) {
-    const addr = parseAddrKey(key);
-    if (!addr || !isValidCIdentifier(name)) continue;
-    if (typeof mod.renameFunction === 'function')
-      mod.renameFunction(addr, name);
+  if (!mod || !projectDb) return;
+  if (projectDb.functionNames) {
+    for (const [key, name] of Object.entries(projectDb.functionNames)) {
+      const addr = parseAddrKey(key);
+      if (!addr || !isValidCIdentifier(name)) continue;
+      if (typeof mod.renameFunction === 'function')
+        mod.renameFunction(addr, name);
+    }
   }
+  if (typeof mod.applyProjectTypes === 'function') {
+    try {
+      mod.applyProjectTypes(projectDb.customTypes || '', projectGlobalBindingsText());
+    } catch (err) {
+      console.warn('applyProjectTypes failed', err);
+    }
+  }
+}
+
+function projectGlobalBindingsText() {
+  if (!projectDb || !projectDb.globalTypes) return '';
+  const lines = [];
+  for (const [key, raw] of Object.entries(projectDb.globalTypes)) {
+    const addr = parseAddrKey(key);
+    if (!addr) continue;
+    let type = '';
+    let symbol = '';
+    if (raw && typeof raw === 'object') {
+      type = String(raw.type || '').trim();
+      symbol = String(raw.symbol || '').trim();
+    } else {
+      type = String(raw || '').trim();
+    }
+    if (!isValidCIdentifier(type)) continue;
+    lines.push(addrKey(addr) + ' ' + type + (symbol ? ' ' + symbol : ''));
+  }
+  return lines.join('\n');
 }
 
 function saveProjectDb(opts) {
@@ -1203,18 +1256,115 @@ function importProjectDb(file) {
   reader.readAsText(file);
 }
 
+function ensureProjectDbForTypeEdit() {
+  if (!currentBinaryHash) {
+    toast('Load a binary first', 'err');
+    return false;
+  }
+  if (!projectDb) projectDb = emptyProjectDb(currentBinaryHash, currentBinaryName);
+  const ta = document.getElementById('custom-types');
+  if (ta) projectDb.customTypes = ta.value;
+  if (!projectDb.globalTypes || typeof projectDb.globalTypes !== 'object')
+    projectDb.globalTypes = {};
+  return true;
+}
+
+function customTypeNameExists(name) {
+  if (!name || !projectDb) return false;
+  const re = new RegExp('\\b(struct|union|enum|typedef)\\s+' + escapeRegExp(name) + '\\b');
+  return re.test(projectDb.customTypes || '');
+}
+
+function appendCustomTypeDecl(name, decl, comment) {
+  if (!name || !decl || customTypeNameExists(name))
+    return { added: false, index: -1 };
+  const prefix = projectDb.customTypes && projectDb.customTypes.trim()
+    ? projectDb.customTypes.trimEnd() + '\n\n'
+    : '';
+  const body = (comment ? comment.trimEnd() + '\n' : '') + String(decl).trimEnd() + '\n';
+  const start = prefix.length;
+  projectDb.customTypes = prefix + body;
+  const ta = document.getElementById('custom-types');
+  if (ta) ta.value = projectDb.customTypes;
+  return { added: true, index: start };
+}
+
+function addStructCandidateToProject(c) {
+  let addedDecl = false;
+  let addedBinding = false;
+  let index = -1;
+  if (!c || !c.name) return { addedDecl, addedBinding, index };
+
+  if (c.is_global && c.global_address && c.name) {
+    const key = addrKey(c.global_address);
+    const symbol = c.global_symbol || '';
+    const prev = projectDb.globalTypes[key];
+    if (!prev || prev.type !== c.name || prev.symbol !== symbol)
+      addedBinding = true;
+    projectDb.globalTypes[key] = { type: c.name, symbol };
+  }
+
+  if (c.c_decl && !customTypeNameExists(c.name)) {
+    const where = (c.function_name || c.function_address_hex || 'function') + ' / ' +
+      (c.base_register || 'reg');
+    const res = appendCustomTypeDecl(c.name, c.c_decl, '/* inferred: ' + where + ' */');
+    addedDecl = res.added;
+    index = res.index;
+  }
+
+  return { addedDecl, addedBinding, index };
+}
+
+function commitProjectTypeEdits(opts) {
+  const options = opts || {};
+  applyProjectDbToBackend();
+  decompVersion++;
+  tabs.forEach(t => {
+    if (t.kind !== 'types') t.version = -1;
+  });
+  clearTimeout(projectDbSaveTimer);
+  saveProjectDb({ quiet: true });
+  renderProjectDb();
+  refreshTypesTab();
+  if (Number.isFinite(options.focusIndex) && options.focusIndex >= 0)
+    focusCustomType(options.focusIndex);
+  if (options.openTypes) {
+    openTypesTab();
+    return;
+  }
+  const active = tabs.find(t => t.id === activeId);
+  if (active && active.kind !== 'types')
+    refreshTab(active, 'Refreshing');
+  else
+    refreshActiveView();
+}
+
+function loadStructCandidates(force) {
+  if (!mod || typeof mod.inferStructCandidatesJson !== 'function')
+    return { error: 'WASM module does not expose struct inference', candidates: [] };
+  if (!force && lastStructCandidates.length)
+    return { candidates: lastStructCandidates };
+  const data = parseJson(mod.inferStructCandidatesJson(), { candidates: [] });
+  if (data.error) {
+    lastStructCandidates = [];
+    return data;
+  }
+  lastStructCandidates = Array.isArray(data.candidates) ? data.candidates : [];
+  data.candidates = lastStructCandidates;
+  return data;
+}
+
 function inferStructs() {
   if (!currentBinaryHash) { toast('Load a binary first', 'err'); return; }
   if (!mod || typeof mod.inferStructCandidatesJson !== 'function') {
     toast('WASM module does not expose struct inference', 'err');
     return;
   }
-  if (!projectDb) projectDb = emptyProjectDb(currentBinaryHash, currentBinaryName);
-  projectDb.customTypes = document.getElementById('custom-types').value;
+  if (!ensureProjectDbForTypeEdit()) return;
   spin(true);
   sbMsg('Inferring struct candidates...');
   setTimeout(() => {
-    const data = parseJson(mod.inferStructCandidatesJson(), { candidates: [] });
+    const data = loadStructCandidates(true);
     spin(false);
     if (data.error) { toast(data.error, 'err'); sbMsg(data.error, true); return; }
     const candidates = data.candidates || [];
@@ -1224,29 +1374,26 @@ function inferStructs() {
       return;
     }
 
-    let existing = projectDb.customTypes || '';
-    const additions = [];
+    let additions = 0;
+    let bindingsAdded = 0;
+    let focusIndex = -1;
     for (const c of candidates) {
-      if (!c.name || !c.c_decl) continue;
-      if (existing.includes('struct ' + c.name)) continue;
-      const where = (c.function_name || c.function_address_hex || 'function') + ' / ' + (c.base_register || 'reg');
-      additions.push('/* inferred: ' + where + ' */\n' + c.c_decl);
-      existing += '\n' + c.c_decl;
+      const res = addStructCandidateToProject(c);
+      if (res.addedDecl) {
+        additions++;
+        if (focusIndex < 0) focusIndex = res.index;
+      }
+      if (res.addedBinding) bindingsAdded++;
     }
-    if (!additions.length) {
+    if (!additions && !bindingsAdded) {
       toast('Struct candidates already exist in custom types', 'ok');
       sbMsg(candidates.length + ' struct candidates already present');
       return;
     }
 
-    const prefix = projectDb.customTypes && projectDb.customTypes.trim() ? projectDb.customTypes.trimEnd() + '\n\n' : '';
-    projectDb.customTypes = prefix + additions.join('\n\n') + '\n';
-    clearTimeout(projectDbSaveTimer);
-    saveProjectDb({ quiet: true });
-    renderProjectDb();
-    openTypesTab();
-    toast(additions.length + ' struct candidates added', 'ok');
-    sbMsg(additions.length + ' struct candidates added to Project DB');
+    commitProjectTypeEdits({ openTypes: true, focusIndex });
+    toast(additions + ' struct candidates added', 'ok');
+    sbMsg(additions + ' struct candidates and ' + bindingsAdded + ' global bindings added to Project DB');
   }, 10);
 }
 
@@ -1274,12 +1421,7 @@ function newStructType() {
     'struct ' + name + ' {\n' +
     '    unsigned int field_0x0;\n' +
     '};\n';
-  clearTimeout(projectDbSaveTimer);
-  saveProjectDb({ quiet: true });
-  renderProjectDb();
-  refreshTypesTab();
-  refreshActiveView();
-  focusCustomType(start);
+  commitProjectTypeEdits({ focusIndex: start });
   toast('Struct added: ' + name, 'ok');
 }
 
@@ -1288,9 +1430,10 @@ function renderProjectDb() {
   const db = projectDb || emptyProjectDb('', '');
   const count = Object.keys(db.functionNames || {}).length;
   const noteCount = Object.values(db.functionNotes || {}).filter(v => String(v || '').trim()).length;
+  const globalTypeCount = Object.keys(db.globalTypes || {}).length;
   allTypes = parseCustomTypeEntries(db.customTypes || '');
   const badge = document.getElementById('db-badge');
-  badge.textContent = count + noteCount + allTypes.length;
+  badge.textContent = count + noteCount + allTypes.length + globalTypeCount;
   badge.style.display = loaded ? '' : 'none';
   document.getElementById('db-save-btn').disabled = !loaded;
   document.getElementById('db-new-type-btn').disabled = !loaded;
@@ -1305,7 +1448,7 @@ function renderProjectDb() {
     ta.value = db.customTypes || '';
   const typeLines = (db.customTypes || '').trim() ? countLines(db.customTypes || '') : 0;
   document.getElementById('db-status').textContent = loaded
-    ? (count + ' names · ' + noteCount + ' notes · ' + allTypes.length + ' types · ' + typeLines + ' type lines')
+    ? (count + ' names · ' + noteCount + ' notes · ' + allTypes.length + ' types · ' + globalTypeCount + ' globals')
     : 'No binary loaded';
   document.getElementById('type-badge').textContent = allTypes.length;
   document.getElementById('type-badge').style.display = loaded ? '' : 'none';
@@ -1317,6 +1460,7 @@ function onCustomTypesChanged() {
   if (!currentBinaryHash) return;
   if (!projectDb) projectDb = emptyProjectDb(currentBinaryHash, currentBinaryName);
   projectDb.customTypes = document.getElementById('custom-types').value;
+  applyProjectDbToBackend();
   scheduleProjectDbSave();
   refreshTypesTab();
   refreshActiveView();
@@ -1793,12 +1937,7 @@ function renameType(index, e) {
 
   projectDb.customTypes = replaced.text;
   if (ta) ta.value = replaced.text;
-  clearTimeout(projectDbSaveTimer);
-  saveProjectDb({ quiet: true });
-  renderProjectDb();
-  refreshTypesTab();
-  refreshActiveView();
-  focusCustomType(replaced.index);
+  commitProjectTypeEdits({ focusIndex: replaced.index });
   toast('Type renamed: ' + name, 'ok');
 }
 
@@ -2055,16 +2194,274 @@ function syncScrollByLine(fromLine, fromTotal, targetScrollId, targetTotal) {
   target.scrollTop = max * ratio;
 }
 
+function activeFunctionTab() {
+  const tab = tabs.find(t => t.id === activeId);
+  return tab && tab.kind === 'fn' ? tab : null;
+}
+
+function activeFunctionDisplayNames(tab) {
+  if (!tab) return [];
+  const names = new Set();
+  if (tab.label) names.add(fnShort(tab.label));
+  const info = allFns.find(f => f.addr === tab.addr);
+  if (info && info.name) names.add(fnShort(info.name));
+  if (projectDb && projectDb.functionNames && projectDb.functionNames[addrKey(tab.addr)])
+    names.add(projectDb.functionNames[addrKey(tab.addr)]);
+  names.add('sub_' + shortHex(tab.addr).slice(2));
+  return Array.from(names).filter(Boolean);
+}
+
+function functionMatchForToken(token) {
+  const active = activeFunctionTab();
+  if (active && activeFunctionDisplayNames(active).includes(token))
+    return { addr: active.addr };
+  const matches = allFns.filter(f => {
+    if (fnShort(f.name) === token) return true;
+    return projectDb && projectDb.functionNames &&
+      projectDb.functionNames[addrKey(f.addr)] === token;
+  });
+  return matches.length === 1 ? matches[0] : null;
+}
+
+function isIdentifierChar(ch) {
+  return !!ch && /[A-Za-z0-9_$]/.test(ch);
+}
+
+function caretOffsetInCodeView(ev) {
+  const el = document.getElementById('code-view');
+  if (!el || !el.contains(ev.target)) return -1;
+  let node = null;
+  let offset = 0;
+  if (document.caretPositionFromPoint) {
+    const pos = document.caretPositionFromPoint(ev.clientX, ev.clientY);
+    if (pos) { node = pos.offsetNode; offset = pos.offset; }
+  } else if (document.caretRangeFromPoint) {
+    const range = document.caretRangeFromPoint(ev.clientX, ev.clientY);
+    if (range) { node = range.startContainer; offset = range.startOffset; }
+  }
+  if (!node || !el.contains(node)) return -1;
+  if (node.nodeType === Node.ELEMENT_NODE) {
+    const child = node.childNodes[Math.min(offset, Math.max(0, node.childNodes.length - 1))];
+    if (child) { node = child; offset = 0; }
+  }
+  let total = 0;
+  const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+  let cur;
+  while ((cur = walker.nextNode())) {
+    if (cur === node)
+      return total + Math.max(0, Math.min(offset, cur.nodeValue.length));
+    total += cur.nodeValue.length;
+  }
+  return -1;
+}
+
+function codeTokenAtPoint(ev) {
+  const offset = caretOffsetInCodeView(ev);
+  if (offset < 0 || !curCode) return null;
+  let pos = Math.min(offset, curCode.length - 1);
+  if (!isIdentifierChar(curCode[pos]) && offset > 0 && isIdentifierChar(curCode[offset - 1]))
+    pos = offset - 1;
+  if (!isIdentifierChar(curCode[pos])) return null;
+  let start = pos;
+  let end = pos + 1;
+  while (start > 0 && isIdentifierChar(curCode[start - 1])) start--;
+  while (end < curCode.length && isIdentifierChar(curCode[end])) end++;
+  const lineStart = curCode.lastIndexOf('\n', start - 1) + 1;
+  let lineEnd = curCode.indexOf('\n', end);
+  if (lineEnd < 0) lineEnd = curCode.length;
+  return {
+    token: curCode.slice(start, end),
+    start,
+    end,
+    lineText: curCode.slice(lineStart, lineEnd)
+  };
+}
+
+function sanitizeCIdentifierBase(s, fallback) {
+  let out = String(s || '').replace(/[^A-Za-z0-9_]/g, '_').replace(/^_+/, '');
+  if (!out || !/^[A-Za-z_]/.test(out))
+    out = fallback || 'custom_global';
+  return isValidCIdentifier(out) ? out : (fallback || 'custom_global');
+}
+
+function syntheticGlobalAddress(token) {
+  const m = /^(?:g|data)_([0-9A-Fa-f]{5,16})$/.exec(String(token || ''));
+  return m ? (parseInt(m[1], 16) >>> 0) : 0;
+}
+
+function globalAddressForToken(token) {
+  let addr = syntheticGlobalAddress(token);
+  if (addr) return addr;
+  if (projectDb && projectDb.globalTypes) {
+    for (const [key, raw] of Object.entries(projectDb.globalTypes)) {
+      const symbol = raw && typeof raw === 'object' ? String(raw.symbol || '') : '';
+      if (symbol && symbol === token) {
+        addr = parseAddrKey(key) >>> 0;
+        if (addr) return addr;
+      }
+    }
+  }
+  if (mod && typeof mod.globalAddressByName === 'function') {
+    try {
+      addr = Number(mod.globalAddressByName(token)) >>> 0;
+      if (addr) return addr;
+    } catch (_) {}
+  }
+  for (const c of lastStructCandidates) {
+    if (!c || !c.is_global || !c.global_address) continue;
+    if (c.global_symbol === token || c.base_register === token)
+      return Number(c.global_address) >>> 0;
+  }
+  return 0;
+}
+
+function findStructCandidateForToken(token, candidates) {
+  const addr = globalAddressForToken(token);
+  const clean = sanitizeCIdentifierBase(token, '');
+  for (const c of candidates || []) {
+    if (!c || !c.is_global) continue;
+    const candAddr = Number(c.global_address || 0) >>> 0;
+    if (addr && candAddr === addr) return c;
+    if (c.global_symbol === token || c.base_register === token) return c;
+    if (clean && c.base_register === 'global_' + clean) return c;
+  }
+  return null;
+}
+
+function defaultStructNameForToken(token) {
+  const synthetic = /^g_([0-9A-Fa-f]+)$/.exec(String(token || ''));
+  let base = synthetic ? 'data_' + synthetic[1] : sanitizeCIdentifierBase(token, 'custom_global');
+  if (!/_t$/i.test(base)) base += '_t';
+  return base;
+}
+
+function createStructForToken(token) {
+  if (!ensureProjectDbForTypeEdit()) return;
+  const raw = prompt('Struct name for ' + token, defaultStructNameForToken(token));
+  if (raw === null) return;
+  const name = raw.trim();
+  if (!isValidCIdentifier(name)) {
+    toast('Struct name must be a C identifier', 'err');
+    return;
+  }
+  if (customTypeNameExists(name)) {
+    toast('Type already exists: ' + name, 'err');
+    return;
+  }
+  const res = appendCustomTypeDecl(name,
+    'struct ' + name + ' {\n' +
+    '    unsigned int field_0x0;\n' +
+    '};',
+    '');
+  const addr = globalAddressForToken(token);
+  if (addr)
+    projectDb.globalTypes[addrKey(addr)] = { type: name, symbol: token };
+  commitProjectTypeEdits({ focusIndex: res.index });
+  toast(addr ? 'Struct added and bound to ' + token : 'Struct added: ' + name, 'ok');
+}
+
+function inferStructForToken(token) {
+  if (!ensureProjectDbForTypeEdit()) return;
+  if (!mod || typeof mod.inferStructCandidatesJson !== 'function') {
+    toast('WASM module does not expose struct inference', 'err');
+    return;
+  }
+  spin(true);
+  sbMsg('Inferring struct fields for ' + token + '...');
+  setTimeout(() => {
+    const data = loadStructCandidates(true);
+    spin(false);
+    if (data.error) { toast(data.error, 'err'); sbMsg(data.error, true); return; }
+    const c = findStructCandidateForToken(token, data.candidates || []);
+    if (!c) {
+      toast('No inferred field accesses found for ' + token, 'err');
+      sbMsg('No struct candidate for ' + token);
+      return;
+    }
+    const res = addStructCandidateToProject(c);
+    if (!res.addedDecl && !res.addedBinding) {
+      toast('Struct candidate already applied for ' + token, 'ok');
+      sbMsg('Struct candidate already applied');
+      return;
+    }
+    commitProjectTypeEdits({ focusIndex: res.index });
+    toast('Struct fields inferred for ' + token, 'ok');
+    sbMsg('Applied inferred struct ' + c.name + ' for ' + token);
+  }, 10);
+}
+
+function hideCodeContextMenu() {
+  const menu = document.getElementById('ctx-menu');
+  if (!menu) return;
+  menu.classList.remove('on');
+  menu.innerHTML = '';
+}
+
+function showContextMenu(items, x, y) {
+  const menu = document.getElementById('ctx-menu');
+  if (!menu) return;
+  menu.innerHTML = '';
+  items.forEach(item => {
+    if (item === 'sep') {
+      const sep = document.createElement('div');
+      sep.className = 'ctx-sep';
+      menu.appendChild(sep);
+      return;
+    }
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'ctx-item';
+    btn.textContent = item.label;
+    btn.disabled = !!item.disabled;
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      hideCodeContextMenu();
+      item.action && item.action();
+    });
+    menu.appendChild(btn);
+  });
+  menu.classList.add('on');
+  const rect = menu.getBoundingClientRect();
+  menu.style.left = Math.max(8, Math.min(x, window.innerWidth - rect.width - 8)) + 'px';
+  menu.style.top = Math.max(8, Math.min(y, window.innerHeight - rect.height - 8)) + 'px';
+}
+
+function showCodeContextMenu(ev) {
+  const ctx = codeTokenAtPoint(ev);
+  if (!ctx || !ctx.token) return;
+  const token = ctx.token;
+  const items = [];
+  const fnTarget = ctx.lineText.includes(token + '(') ? functionMatchForToken(token) : null;
+  if (fnTarget) {
+    items.push({ label: 'Rename function ' + token, action: () => renameFn(fnTarget.addr, null) });
+  }
+  if (isValidCIdentifier(token) && !KW.has(token) && !TYPES.has(token)) {
+    if (items.length) items.push('sep');
+    items.push({ label: 'Infer struct fields for ' + token, action: () => inferStructForToken(token) });
+    items.push({ label: 'Create struct type for ' + token, action: () => createStructForToken(token) });
+  }
+  if (!items.length) return;
+  ev.preventDefault();
+  ev.stopPropagation();
+  showContextMenu(items, ev.clientX, ev.clientY);
+}
+
 document.getElementById('decomp-scroll').addEventListener('click', e => {
+  hideCodeContextMenu();
   if (!curAsm) return;
   const line = lineFromClick(document.getElementById('code-view'), e);
   syncScrollByLine(line, curCodeLineCount, 'asm-scroll', curAsmLineCount);
 });
 document.getElementById('asm-scroll').addEventListener('click', e => {
+  hideCodeContextMenu();
   if (!curCode) return;
   const line = lineFromClick(document.getElementById('asm-view'), e);
   syncScrollByLine(line, curAsmLineCount, 'decomp-scroll', curCodeLineCount);
 });
+document.getElementById('code-view').addEventListener('contextmenu', showCodeContextMenu);
+document.getElementById('decomp-scroll').addEventListener('scroll', hideCodeContextMenu);
+window.addEventListener('resize', hideCodeContextMenu);
+document.addEventListener('click', hideCodeContextMenu);
 
 // ── Misc ──────────────────────────────────────────────────────────────
 function toggleSec(id) { document.getElementById(id).classList.toggle('closed'); }
@@ -2114,6 +2511,7 @@ document.addEventListener('keydown',e=>{
   const isMod=e.ctrlKey||e.metaKey;
   if(isMod&&e.key==='k'){e.preventDefault();document.getElementById('fn-filter').focus();document.getElementById('fn-filter').select();}
   if(e.key==='Escape'){
+    hideCodeContextMenu();
     document.getElementById('fn-filter').blur();
     document.getElementById('src-filter').blur();
     document.getElementById('str-filter').blur();
