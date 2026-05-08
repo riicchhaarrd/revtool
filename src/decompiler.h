@@ -6022,7 +6022,7 @@ private:
             if (byteOffset < 0) return "";
             auto *global = m_types.globalByName(rawName);
             if (!global || global->typeRef == NullType) return "";
-            if (!global->isStatic || global->sourceFileIdx != m_func.sourceFileIdx)
+            if (global->isStatic && global->sourceFileIdx != m_func.sourceFileIdx)
                 return "";
             auto *globalType = m_types.resolveType(global->typeRef);
             if (!globalType || (globalType->kind != StabsTypeKind::Struct &&
@@ -6220,7 +6220,7 @@ private:
                 return "";
             auto *global = m_types.globalByName(rawGlobalName);
             if (!global || global->typeRef == NullType) return "";
-            if (!global->isStatic || global->sourceFileIdx != m_func.sourceFileIdx)
+            if (global->isStatic && global->sourceFileIdx != m_func.sourceFileIdx)
                 return "";
             auto *globalType = m_types.resolveType(global->typeRef);
             if (!globalType || (globalType->kind != StabsTypeKind::Struct &&
